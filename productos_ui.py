@@ -14,9 +14,8 @@ class ProductosUI:
     def __init__(self, root):
 
         self.root = root
-        self.producto_id = None
 
-        frame = ttk.Frame(root, padding=20)
+        frame = ttk.Frame(root, padding=10)
         frame.pack(fill="both", expand=True)
 
         # =========================
@@ -27,32 +26,27 @@ class ProductosUI:
         self.buscar.bind("<KeyRelease>", self.filtrar)
 
         # =========================
-        # LISTA
+        # TABLA
         # =========================
-        self.tree = ttk.Treeview(frame, columns=("id", "desc", "precio"), show="headings")
+        self.tree = ttk.Treeview(
+            frame,
+            columns=("desc", "precio"),
+            show="headings"
+        )
 
-        self.tree.heading("id", text="ID")
         self.tree.heading("desc", text="Descripción")
         self.tree.heading("precio", text="Precio")
 
-        self.tree.pack(fill="both", expand=True, pady=10)
+        self.tree.column("desc", width=300)
+        self.tree.column("precio", width=100, anchor="center")
 
-        self.tree.bind("<<TreeviewSelect>>", self.seleccionar)
+        self.tree.pack(fill="both", expand=True)
 
-        # =========================
-        # EDICION
-        # =========================
-        edit = ttk.Frame(frame)
-        edit.pack(fill="x", pady=10)
+        # doble click editar
+        self.tree.bind("<Double-1>", self.editar_celda)
 
-        ttk.Label(edit, text="Precio").grid(row=0, column=0, padx=5)
+        self.entry_edit = None
 
-        self.precio = ttk.Entry(edit)
-        self.precio.grid(row=0, column=1, padx=5)
-
-        ttk.Button(edit, text="Guardar", command=self.guardar).grid(row=0, column=2, padx=5)
-
-        # cargar datos
         self.cargar_datos()
 
     # =========================
@@ -70,7 +64,7 @@ class ProductosUI:
         cur.execute("SELECT id, descripcion, precio_unit FROM catalogo")
 
         for row in cur.fetchall():
-            self.tree.insert("", tk.END, values=row)
+            self.tree.insert("", tk.END, iid=row[0], values=(row[1], row[2]))
 
         conn.close()
 
@@ -95,42 +89,51 @@ class ProductosUI:
         """, (f"%{texto}%",))
 
         for row in cur.fetchall():
-            self.tree.insert("", tk.END, values=row)
+            self.tree.insert("", tk.END, iid=row[0], values=(row[1], row[2]))
 
         conn.close()
 
     # =========================
-    # SELECCIONAR
+    # EDITAR CELDA
     # =========================
 
-    def seleccionar(self, event):
+    def editar_celda(self, event):
 
-        selected = self.tree.selection()
+        item = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
 
-        if not selected:
+        # solo columna precio (#2)
+        if col != "#2":
             return
 
-        item = self.tree.item(selected[0])
-        datos = item["values"]
+        x, y, width, height = self.tree.bbox(item, col)
 
-        self.producto_id = datos[0]
+        valor_actual = self.tree.item(item, "values")[1]
 
-        self.precio.delete(0, tk.END)
-        self.precio.insert(0, datos[2])
+        self.entry_edit = tk.Entry(self.tree)
+        self.entry_edit.place(x=x, y=y, width=width, height=height)
+
+        self.entry_edit.insert(0, valor_actual)
+        self.entry_edit.focus()
+
+        self.entry_edit.bind("<Return>", lambda e: self.guardar_edicion(item))
+        self.entry_edit.bind("<Escape>", lambda e: self.cancelar_edicion())
 
     # =========================
-    # GUARDAR
+    # GUARDAR EDICION
     # =========================
 
-    def guardar(self):
+    def guardar_edicion(self, item):
 
-        if not self.producto_id:
-            return
+        nuevo_valor = self.entry_edit.get()
 
         try:
-            precio = float(self.precio.get())
+            precio = float(nuevo_valor)
         except:
+            self.cancelar_edicion()
             return
+
+        producto_id = int(item)
 
         conn = get_conn()
         cur = conn.cursor()
@@ -139,9 +142,25 @@ class ProductosUI:
             UPDATE catalogo
             SET precio_unit = ?
             WHERE id = ?
-        """, (precio, self.producto_id))
+        """, (precio, producto_id))
 
         conn.commit()
         conn.close()
 
-        self.cargar_datos()
+        # actualizar UI
+        valores = list(self.tree.item(item, "values"))
+        valores[1] = precio
+        self.tree.item(item, values=valores)
+
+        self.entry_edit.destroy()
+        self.entry_edit = None
+
+    # =========================
+    # CANCELAR
+    # =========================
+
+    def cancelar_edicion(self):
+
+        if self.entry_edit:
+            self.entry_edit.destroy()
+            self.entry_edit = None
