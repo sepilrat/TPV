@@ -30,15 +30,17 @@ class ProductosUI:
         # =========================
         self.tree = ttk.Treeview(
             frame,
-            columns=("desc", "precio"),
+            columns=("desc", "precio", "categoria"),
             show="headings"
         )
 
         self.tree.heading("desc", text="Descripción")
         self.tree.heading("precio", text="Precio")
+        self.tree.heading("categoria", text="Categoría")
 
         self.tree.column("desc", width=300)
         self.tree.column("precio", width=100, anchor="center")
+        self.tree.column("categoria", width=150, anchor="center")
 
         self.tree.pack(fill="both", expand=True)
 
@@ -55,16 +57,19 @@ class ProductosUI:
 
     def cargar_datos(self):
 
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        self.tree.delete(*self.tree.get_children())
 
         conn = get_conn()
         cur = conn.cursor()
 
-        cur.execute("SELECT id, descripcion, precio_unit FROM catalogo")
+        cur.execute("""
+        SELECT c.id, c.descripcion, c.precio_unit, COALESCE(cat.nombre,'')
+        FROM catalogo c
+        LEFT JOIN categorias cat ON cat.id = c.categoria_id
+        """)
 
         for row in cur.fetchall():
-            self.tree.insert("", tk.END, iid=row[0], values=(row[1], row[2]))
+            self.tree.insert("", tk.END, iid=row[0], values=(row[1], row[2], row[3]))
 
         conn.close()
 
@@ -76,22 +81,34 @@ class ProductosUI:
 
         texto = self.buscar.get()
 
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        self.tree.delete(*self.tree.get_children())
 
         conn = get_conn()
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT id, descripcion, precio_unit
-            FROM catalogo
-            WHERE descripcion LIKE ?
+        SELECT c.id, c.descripcion, c.precio_unit, COALESCE(cat.nombre,'')
+        FROM catalogo c
+        LEFT JOIN categorias cat ON cat.id = c.categoria_id
+        WHERE c.descripcion LIKE ?
         """, (f"%{texto}%",))
 
         for row in cur.fetchall():
-            self.tree.insert("", tk.END, iid=row[0], values=(row[1], row[2]))
+            self.tree.insert("", tk.END, iid=row[0], values=(row[1], row[2], row[3]))
 
         conn.close()
+
+    # =========================
+    # CATEGORIAS
+    # =========================
+
+    def obtener_categorias(self):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, nombre FROM categorias")
+        data = cur.fetchall()
+        conn.close()
+        return data
 
     # =========================
     # EDITAR CELDA
@@ -102,58 +119,94 @@ class ProductosUI:
         item = self.tree.identify_row(event.y)
         col = self.tree.identify_column(event.x)
 
-        # solo columna precio (#2)
-        if col != "#2":
+        if not item:
             return
 
         x, y, width, height = self.tree.bbox(item, col)
 
-        valor_actual = self.tree.item(item, "values")[1]
+        # =========================
+        # EDITAR PRECIO (#2)
+        # =========================
+        if col == "#2":
 
-        self.entry_edit = tk.Entry(self.tree)
-        self.entry_edit.place(x=x, y=y, width=width, height=height)
+            valor_actual = self.tree.item(item, "values")[1]
 
-        self.entry_edit.insert(0, valor_actual)
-        self.entry_edit.focus()
+            self.entry_edit = tk.Entry(self.tree)
+            self.entry_edit.place(x=x, y=y, width=width, height=height)
 
-        self.entry_edit.bind("<Return>", lambda e: self.guardar_edicion(item))
-        self.entry_edit.bind("<Escape>", lambda e: self.cancelar_edicion())
+            self.entry_edit.insert(0, valor_actual)
+            self.entry_edit.focus()
 
-    # =========================
-    # GUARDAR EDICION
-    # =========================
+            def guardar_precio(event=None):
+                try:
+                    precio = float(self.entry_edit.get())
+                except:
+                    self.cancelar_edicion()
+                    return
 
-    def guardar_edicion(self, item):
+                conn = get_conn()
+                cur = conn.cursor()
 
-        nuevo_valor = self.entry_edit.get()
+                cur.execute("""
+                    UPDATE catalogo
+                    SET precio_unit = ?
+                    WHERE id = ?
+                """, (precio, int(item)))
 
-        try:
-            precio = float(nuevo_valor)
-        except:
-            self.cancelar_edicion()
-            return
+                conn.commit()
+                conn.close()
 
-        producto_id = int(item)
+                valores = list(self.tree.item(item, "values"))
+                valores[1] = precio
+                self.tree.item(item, values=valores)
 
-        conn = get_conn()
-        cur = conn.cursor()
+                self.entry_edit.destroy()
+                self.entry_edit = None
 
-        cur.execute("""
-            UPDATE catalogo
-            SET precio_unit = ?
-            WHERE id = ?
-        """, (precio, producto_id))
+            self.entry_edit.bind("<Return>", guardar_precio)
+            self.entry_edit.bind("<Escape>", lambda e: self.cancelar_edicion())
 
-        conn.commit()
-        conn.close()
+        # =========================
+        # EDITAR CATEGORIA (#3)
+        # =========================
+        elif col == "#3":
 
-        # actualizar UI
-        valores = list(self.tree.item(item, "values"))
-        valores[1] = precio
-        self.tree.item(item, values=valores)
+            categorias = self.obtener_categorias()
 
-        self.entry_edit.destroy()
-        self.entry_edit = None
+            combo = ttk.Combobox(self.tree)
+            combo["values"] = [c[1] for c in categorias]
+
+            combo.place(x=x, y=y, width=width, height=height)
+            combo.focus()
+
+            def guardar_categoria(event=None):
+                nombre = combo.get()
+
+                for cid, cname in categorias:
+                    if cname == nombre:
+
+                        conn = get_conn()
+                        cur = conn.cursor()
+
+                        cur.execute("""
+                            UPDATE catalogo
+                            SET categoria_id = ?
+                            WHERE id = ?
+                        """, (cid, int(item)))
+
+                        conn.commit()
+                        conn.close()
+
+                        valores = list(self.tree.item(item, "values"))
+                        valores[2] = nombre
+                        self.tree.item(item, values=valores)
+
+                        combo.destroy()
+                        return
+
+            combo.bind("<<ComboboxSelected>>", guardar_categoria)
+            combo.bind("<Return>", guardar_categoria)
+            combo.bind("<Escape>", lambda e: combo.destroy())
 
     # =========================
     # CANCELAR

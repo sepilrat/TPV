@@ -54,17 +54,8 @@ def limpiar_precio(v):
 
 
 def calcular_precio(prod, cant):
-    unit = limpiar_precio(prod[3])
-    p3 = limpiar_precio(prod[4])
-    caja = limpiar_precio(prod[5])
-    u_caja = prod[6] if prod[6] else 9999
-
-    if cant >= u_caja:
-        return caja
-    if cant >= 3:
-        return p3
-    return unit
-
+    return limpiar_precio(prod[3])
+    
 
 # =========================
 # APP
@@ -328,22 +319,39 @@ class TPV:
         total = 0
 
         for i in self.tree.get_children():
+
             v = self.tree.item(i)["values"]
             desc, cant, precio, total_item = v
+
             row = buscar_producto_por_texto(desc)[0]
+            producto_id = row[0]
 
-            items.append((desc, int(cant), float(precio), float(total_item), row[7]))
-            total += float(total_item)
+            stock = obtener_stock(producto_id)
 
-        if items:
+        
+        if stock < int(cant):
+            messagebox.showerror(
+                "Stock",
+                f"Sin stock suficiente para:\n{desc}\nStock: {stock}"
+            )
+            return
+
+        items.append((desc, int(cant), float(precio), float(total_item), row[7]))
+        total += float(total_item)
+
+   
+        try:
             guardar_venta(items)
-            imprimir_ticket(items, total, impresora=self.impresora_sel.get())
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        imprimir_ticket(items, total, impresora=self.impresora_sel.get())
 
         messagebox.showinfo("Venta", f"Total: ${total:,.2f}")
 
         self.tree.delete(*self.tree.get_children())
         self.total_label.config(text="TOTAL $ 0.00")
-
     # =========================
     # IMAGEN
     # =========================

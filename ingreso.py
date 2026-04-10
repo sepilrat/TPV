@@ -26,8 +26,8 @@ def insertar_producto(data):
 
     cur.execute("""
         INSERT INTO catalogo 
-        (codigo, descripcion, precio_unit, precio_3, precio_caja, unidades_caja, cod_barra)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (codigo, descripcion, precio_unit, precio_3, precio_caja, unidades_caja, cod_barra, categoria_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, data)
 
     conn.commit()
@@ -112,15 +112,22 @@ class IngresoStockApp:
         self.proveedor["values"] = self.obtener_proveedores()
         self.proveedor.grid(row=4, column=1, sticky="ew")
 
-        ttk.Label(frame, text="Vencimiento (YYYY-MM-DD)").grid(row=5, column=0, sticky="w")
-        self.venc = ttk.Entry(frame)
-        self.venc.grid(row=5, column=1, sticky="ew")
+        # ✅ CATEGORIA (FIX)
+        ttk.Label(frame, text="Categoría").grid(row=5, column=0, sticky="w")
+        self.categoria = ttk.Combobox(frame)
+        self.categoria["values"] = self.obtener_categorias()
+        self.categoria.grid(row=5, column=1, sticky="ew")
 
-        ttk.Button(frame, text="Guardar", command=self.guardar).grid(row=6, column=0, columnspan=2, pady=5)
-        ttk.Button(frame, text="Ver stock", command=self.ver_stock).grid(row=7, column=0, columnspan=2)
+        # 🔽 BAJAMOS TODO LO DEMÁS
+        ttk.Label(frame, text="Vencimiento (YYYY-MM-DD)").grid(row=6, column=0, sticky="w")
+        self.venc = ttk.Entry(frame)
+        self.venc.grid(row=6, column=1, sticky="ew")
+
+        ttk.Button(frame, text="Guardar", command=self.guardar).grid(row=7, column=0, columnspan=2, pady=5)
+        ttk.Button(frame, text="Ver stock", command=self.ver_stock).grid(row=8, column=0, columnspan=2)
 
         self.info = ttk.Label(frame, text="")
-        self.info.grid(row=8, column=0, columnspan=2)
+        self.info.grid(row=9, column=0, columnspan=2)
 
     def buscar(self, e=None):
 
@@ -144,6 +151,12 @@ class IngresoStockApp:
             self.info.config(text="⚠ No encontrado (API/local)", foreground="orange")
 
     def guardar(self):
+
+        categoria_nombre = self.categoria.get().strip()
+
+        if not categoria_nombre:
+            self.info.config(text="❌ Debe seleccionar categoría", foreground="red")
+            return
 
         codigo = self.codigo.get()
         desc = self.desc.get()
@@ -176,13 +189,14 @@ class IngresoStockApp:
 
         producto = buscar_producto(codigo)
 
+        categoria_id = self.obtener_o_crear_categoria(categoria_nombre)
+
         if not producto:
-            insertar_producto((codigo, desc, 0, 0, 0, 1, codigo))
+            insertar_producto((codigo, desc, 0, 0, 0, 1, codigo, categoria_id))
             producto = buscar_producto(codigo)
 
-        
         registrar_lote(producto[0], proveedor_id, cantidad, precio, venc)
-        # guardar último costo
+
         conn = get_conn()
         cur = conn.cursor()
 
@@ -192,8 +206,23 @@ class IngresoStockApp:
         WHERE id = ?
         """, (precio, producto[0]))
 
+        cur.execute("""
+        UPDATE catalogo
+        SET precio_unit = CASE
+            WHEN (costo_ultimo * (1 + COALESCE((
+                SELECT margen FROM categorias WHERE id = catalogo.categoria_id
+            ), 0.3))) > precio_unit
+            THEN (costo_ultimo * (1 + COALESCE((
+                SELECT margen FROM categorias WHERE id = catalogo.categoria_id
+            ), 0.3)))
+            ELSE precio_unit
+        END
+        WHERE id = ?
+        """, (producto[0],))
+
         conn.commit()
         conn.close()
+
         stock = obtener_stock_total(producto[0])
 
         self.info.config(text=f"{desc} | Stock: {stock}", foreground="green")
@@ -215,12 +244,10 @@ class IngresoStockApp:
         frame = ttk.Frame(win, padding=10)
         frame.pack(fill="both", expand=True)
 
-        #  BUSCADOR
         ttk.Label(frame, text="Buscar").pack(anchor="w")
         buscador = ttk.Entry(frame)
         buscador.pack(fill="x")
 
-        #  GRID
         tree = ttk.Treeview(frame, columns=("prod", "stock"), show="headings")
         tree.heading("prod", text="Producto")
         tree.heading("stock", text="Stock")
@@ -260,13 +287,7 @@ class IngresoStockApp:
 
             conn.close()
 
-        #  filtro en vivo
-        def on_key(e):
-            cargar(buscador.get())
-
-        buscador.bind("<KeyRelease>", on_key)
-
-        # carga inicial
+        buscador.bind("<KeyRelease>", lambda e: cargar(buscador.get()))
         cargar()
 
     def obtener_proveedores(self):
@@ -296,3 +317,31 @@ class IngresoStockApp:
         conn.commit()
         conn.close()
         return pid
+
+    def obtener_categorias(self):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT nombre FROM categorias")
+        data = [r[0] for r in cur.fetchall()]
+        conn.close()
+        return data
+
+    def obtener_o_crear_categoria(self, nombre):
+        if not nombre:
+            return None
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id FROM categorias WHERE nombre=?", (nombre,))
+        row = cur.fetchone()
+
+        if row:
+            cid = row[0]
+        else:
+            cur.execute("INSERT INTO categorias (nombre, margen) VALUES (?, ?)", (nombre, 0.3))
+            cid = cur.lastrowid
+
+        conn.commit()
+        conn.close()
+        return cid
