@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mayorista Araí — Hacé tu pedido</title>
+<style>
+  :root{
+    --verde:      #3F9142;
+    --verde-osc:  #2B6B2E;
+    --verde-suave:#E9F3E8;
+    --fondo:      #FAF9F5;
+    --superficie: #FFFFFF;
+    --borde:      #E6E3D8;
+    --texto:      #1C1C18;
+    --texto-suave:#6B6B60;
+    --sombra:     0 1px 3px rgba(28,28,24,.08);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--fondo); color:var(--texto);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    padding-bottom:96px;
+  }
+  header{
+    background:#14150F; color:#fff; padding:22px 16px 20px;
+    position:sticky; top:0; z-index:5;
+  }
+  .marca{display:flex; align-items:center; gap:10px;}
+  .marca svg{flex:none;}
+  .marca h1{font-size:20px; margin:0; letter-spacing:.01em; font-weight:800;}
+  .marca p{margin:2px 0 0; font-size:12.5px; color:#9CA89A; letter-spacing:.04em; text-transform:uppercase;}
+  .buscador{margin-top:14px; position:relative;}
+  .buscador input{
+    width:100%; padding:11px 14px 11px 38px; border-radius:10px; border:none;
+    font-size:15px; background:#fff; color:var(--texto);
+  }
+  .buscador input:focus{outline:2px solid var(--verde);}
+  .buscador::before{
+    content:"🔍"; position:absolute; left:12px; top:50%; transform:translateY(-50%);
+    font-size:14px; opacity:.55;
+  }
+  main{max-width:640px; margin:0 auto; padding:14px 12px 0;}
+  .categoria{
+    font-size:12.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--verde-osc); margin:22px 4px 8px;
+  }
+  .categoria:first-child{margin-top:6px;}
+  .prod{
+    background:var(--superficie); border:1px solid var(--borde); border-radius:12px;
+    padding:12px 14px; margin-bottom:8px; box-shadow:var(--sombra);
+    display:grid; grid-template-columns:1fr auto; gap:4px 12px; align-items:center;
+  }
+  .prod .nombre{font-size:14.5px; font-weight:600; line-height:1.3;}
+  .prod .marca-txt{font-size:12px; color:var(--texto-suave); margin-top:1px;}
+  .prod .precio{font-size:14px; color:var(--texto-suave); grid-column:1; font-variant-numeric:tabular-nums;}
+  .prod .subtotal{
+    font-size:15px; font-weight:800; color:var(--verde-osc); grid-column:2; text-align:right;
+    font-variant-numeric:tabular-nums; min-width:78px;
+  }
+  .cant{grid-column:1/-1; display:flex; align-items:center; gap:8px; margin-top:8px;}
+  .cant button{
+    width:32px; height:32px; border-radius:8px; border:1px solid var(--borde);
+    background:var(--fondo); color:var(--texto); font-size:17px; font-weight:700;
+    cursor:pointer; line-height:1;
+  }
+  .cant button:active{background:var(--verde-suave); border-color:var(--verde);}
+  .cant input{
+    width:56px; text-align:center; padding:6px 4px; border-radius:8px;
+    border:1px solid var(--borde); font-size:14.5px; font-variant-numeric:tabular-nums;
+  }
+  .cant .unidad{font-size:12px; color:var(--texto-suave);}
+  .vacio, .cargando, .error{text-align:center; color:var(--texto-suave); padding:40px 20px; font-size:14px;}
+  .error{color:#B23B2E;}
+  .barra{
+    position:fixed; left:0; right:0; bottom:0; z-index:10;
+    background:var(--superficie); border-top:2px dashed var(--borde);
+    box-shadow:0 -4px 14px rgba(28,28,24,.10);
+    padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+  }
+  .barra-inner{max-width:640px; margin:0 auto; display:flex; align-items:center; gap:14px;}
+  .barra .info{flex:1; min-width:0;}
+  .barra .cant-items{font-size:12px; color:var(--texto-suave);}
+  .barra .total{font-size:21px; font-weight:800; color:var(--texto); font-variant-numeric:tabular-nums;}
+  .barra .total span{color:var(--verde-osc);}
+  .btn-enviar{
+    background:var(--verde); color:#fff; border:none; border-radius:11px;
+    padding:14px 20px; font-size:14.5px; font-weight:700; cursor:pointer;
+    display:flex; align-items:center; gap:8px; white-space:nowrap; transition:background .15s;
+  }
+  .btn-enviar:hover{background:var(--verde-osc);}
+  .btn-enviar:disabled{background:#C8C6BA; cursor:not-allowed;}
+  @media (max-width:380px){
+    .marca h1{font-size:18px;}
+    .btn-enviar{padding:13px 16px; font-size:13.5px;}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="marca">
+    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M2 3h2l2.2 11.4a2 2 0 0 0 2 1.6h8.6a2 2 0 0 0 2-1.6L21 7H6" stroke="#3F9142" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="9" cy="20" r="1.6" fill="#3F9142"/>
+      <circle cx="17" cy="20" r="1.6" fill="#3F9142"/>
+    </svg>
+    <div>
+      <h1>Mayorista Araí</h1>
+      <p>Armá tu pedido</p>
+    </div>
+  </div>
+  <div class="buscador">
+    <input type="text" id="buscar" placeholder="Buscar producto…" autocomplete="off">
+  </div>
+</header>
+
+<main id="lista">
+  <div class="cargando">Cargando catálogo…</div>
+</main>
+
+<div class="barra">
+  <div class="barra-inner">
+    <div class="info">
+      <div class="cant-items" id="resumen-items">Sin productos elegidos</div>
+      <div class="total">Total: <span id="total">$ 0</span></div>
+    </div>
+    <button class="btn-enviar" id="btn-enviar" disabled>📲 Enviar pedido</button>
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════
+   CONFIGURAR ANTES DE PUBLICAR (dentro de Apps Script, no hace falta
+   tocar nada de URLs acá — la página se pide el catálogo a sí misma):
+   1) NUMERO_WHATSAPP: el número del negocio, con código de país,
+      SIN + ni espacios ni guiones. Ej Argentina: "5491123456789".
+   ══════════════════════════════════════════════════════════════════ */
+const NUMERO_WHATSAPP = "PEGAR_ACA_EL_NUMERO_SIN_MAS_NI_ESPACIOS";
+
+const $lista     = document.getElementById("lista");
+const $buscar    = document.getElementById("buscar");
+const $total     = document.getElementById("total");
+const $resumen   = document.getElementById("resumen-items");
+const $btnEnviar = document.getElementById("btn-enviar");
+
+let productos = [];
+const cantidades = {};
+
+function money(n){
+  return "$ " + n.toLocaleString("es-AR", {minimumFractionDigits:0, maximumFractionDigits:2});
+}
+
+function cargarCatalogo(){
+  // Le pide el catálogo al mismo Apps Script que sirve esta página
+  // (ver doGet en el Code.gs) — mismo origen, sin problemas de CORS
+  // ni necesidad de publicar la Sheet como CSV aparte.
+  const urlPropia = window.location.href.split("?")[0] + "?catalogo=1";
+  fetch(urlPropia, {cache:"no-store"})
+    .then(r => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    })
+    .then(data => {
+      productos = (data.productos || [])
+        .filter(p => p.descripcion)
+        .map(p => ({
+          codigo: p.codigo || "",
+          descripcion: p.descripcion || "",
+          marca: p.marca || "",
+          categoria: p.categoria || "Otros",
+          precio: parseFloat(String(p.precio).replace(",", ".")) || 0,
+        }));
+      if (!productos.length) throw new Error("El catálogo está vacío.");
+      renderizar(productos);
+    })
+    .catch(err => {
+      $lista.innerHTML = `<div class="error">
+        No se pudo cargar el catálogo (${err.message}).<br>
+        Probá recargar la página en un rato.
+      </div>`;
+    });
+}
+
+function renderizar(lista){
+  if (!lista.length){
+    $lista.innerHTML = `<div class="vacio">No se encontró ningún producto con esa búsqueda.</div>`;
+    return;
+  }
+  const porCategoria = {};
+  lista.forEach(p => {
+    (porCategoria[p.categoria] = porCategoria[p.categoria] || []).push(p);
+  });
+
+  let html = "";
+  Object.keys(porCategoria).sort().forEach(cat => {
+    html += `<div class="categoria">${escapeHTML(cat)}</div>`;
+    porCategoria[cat].forEach(p => {
+      const cant = cantidades[p.codigo] || 0;
+      const subtotal = cant * p.precio;
+      html += `
+        <div class="prod" data-codigo="${escapeHTML(p.codigo)}">
+          <div>
+            <div class="nombre">${escapeHTML(p.descripcion)}</div>
+            ${p.marca ? `<div class="marca-txt">${escapeHTML(p.marca)}</div>` : ""}
+          </div>
+          <div></div>
+          <div class="precio">${money(p.precio)} c/u</div>
+          <div class="subtotal" data-subtotal>${cant ? money(subtotal) : ""}</div>
+          <div class="cant">
+            <button type="button" data-accion="menos">−</button>
+            <input type="number" min="0" step="1" value="${cant || ""}" placeholder="0" data-input>
+            <button type="button" data-accion="mas">+</button>
+            <span class="unidad">unid.</span>
+          </div>
+        </div>`;
+    });
+  });
+  $lista.innerHTML = html;
+}
+
+function escapeHTML(s){
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function actualizarCantidad(codigo, nuevaCant){
+  nuevaCant = Math.max(0, nuevaCant || 0);
+  cantidades[codigo] = nuevaCant;
+  const fila = $lista.querySelector(`.prod[data-codigo="${CSS.escape(codigo)}"]`);
+  if (fila){
+    const prod = productos.find(p => p.codigo === codigo);
+    fila.querySelector("[data-input]").value = nuevaCant || "";
+    fila.querySelector("[data-subtotal]").textContent = nuevaCant ? money(nuevaCant * prod.precio) : "";
+  }
+  actualizarTotales();
+}
+
+function actualizarTotales(){
+  let total = 0, items = 0;
+  productos.forEach(p => {
+    const c = cantidades[p.codigo] || 0;
+    if (c > 0){ total += c * p.precio; items += c; }
+  });
+  $total.textContent = money(total);
+  $resumen.textContent = items > 0 ? `${items} producto(s) elegido(s)` : "Sin productos elegidos";
+  $btnEnviar.disabled = items === 0;
+}
+
+$lista.addEventListener("click", e => {
+  const boton = e.target.closest("button[data-accion]");
+  if (!boton) return;
+  const fila = boton.closest(".prod");
+  const codigo = fila.dataset.codigo;
+  const actual = cantidades[codigo] || 0;
+  actualizarCantidad(codigo, actual + (boton.dataset.accion === "mas" ? 1 : -1));
+});
+
+$lista.addEventListener("input", e => {
+  const input = e.target.closest("[data-input]");
+  if (!input) return;
+  const fila = input.closest(".prod");
+  actualizarCantidad(fila.dataset.codigo, parseFloat(input.value));
+});
+
+let filtroTimeout;
+$buscar.addEventListener("input", () => {
+  clearTimeout(filtroTimeout);
+  filtroTimeout = setTimeout(() => {
+    const q = $buscar.value.trim().toLowerCase();
+    const filtrados = !q ? productos : productos.filter(p =>
+      p.descripcion.toLowerCase().includes(q) ||
+      (p.marca || "").toLowerCase().includes(q) ||
+      p.categoria.toLowerCase().includes(q));
+    renderizar(filtrados);
+  }, 150);
+});
+
+$btnEnviar.addEventListener("click", () => {
+  const elegidos = productos.filter(p => (cantidades[p.codigo] || 0) > 0);
+  if (!elegidos.length) return;
+
+  let texto = "🛒 *Pedido — Mayorista Araí*\n\n";
+  let total = 0;
+  elegidos.forEach(p => {
+    const c = cantidades[p.codigo];
+    const subtotal = c * p.precio;
+    total += subtotal;
+    texto += `• ${p.descripcion} x${c} — ${money(subtotal)}\n`;
+  });
+  texto += `\n*Total: ${money(total)}*`;
+
+  const numero = NUMERO_WHATSAPP.replace(/\D/g, "");
+  const url = `https://wa.me/${numero}?text=${encodeURIComponent(texto)}`;
+  window.open(url, "_blank");
+});
+
+cargarCatalogo();
+</script>
+
+</body>
+</html>
