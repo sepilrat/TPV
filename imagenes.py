@@ -7,9 +7,7 @@ en el listado de "elegir producto").
 
 import os
 import io
-import json
 import logging
-import re
 import urllib.request
 
 from PIL import Image, ImageTk
@@ -17,91 +15,19 @@ from PIL import Image, ImageTk
 CARPETA_IMAGENES = os.path.join(os.path.dirname(__file__), "imagenes_productos")
 EXTENSIONES_VALIDAS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 MAX_LADO_GUARDADO = 800   # px — al guardar localmente, para no ocupar de más
-TIMEOUT_URL = 6           # segundos
-OFF_URL = "https://world.openfoodfacts.org/api/v2/product/{codigo}.json"
+# Timeout corto: una foto no puede frenar la caja. Y en la grilla ni
+# siquiera se intenta bajar (ver PERMITIR_DESCARGA_URL): con 28 productos
+# apuntando a un sitio lento, la pantalla tardaba casi 2 minutos en
+# dibujarse.
+TIMEOUT_URL = 4
 
-
-def _a_resolucion_completa(url: str) -> str:
-    """
-    Open Food Facts devuelve en image_*_url una versión reducida a
-    400px (pensada para mostrar en apps chicas). La foto original tal
-    cual la subieron — mucho mejor calidad — vive en el mismo servidor
-    con el mismo nombre de archivo, solo que con "full" en vez del
-    tamaño en píxeles: ".../front_es.4.400.jpg" -> ".../front_es.4.full.jpg"
-    Si la URL no tiene ese patrón (formato inesperado), se devuelve
-    igual que llegó, sin romper nada.
-    """
-    if not url:
-        return url
-    return re.sub(r"\.\d+\.jpg(\?.*)?$", r".full.jpg\1", url)
-
-# Cache en memoria de miniaturas ya cargadas (evita releer/redescargar
-# la misma imagen varias veces en la misma sesión).
+# Cuando esta en False, las fotos por URL no se descargan: se muestran
+# como "sin foto". Se pone en True a proposito al usar el boton
+# "Guardar fotos localmente", que es cuando uno SI quiere esperar.
+PERMITIR_DESCARGA_URL = False
+# Miniaturas ya generadas, por (url, tamaño): evita releer del disco y
+# redimensionar en cada repintado de la grilla.
 _cache_thumbs = {}
-
-
-def probar_conexion_openfoodfacts() -> tuple[bool, str]:
-    """
-    Prueba rápida de conectividad contra Open Food Facts (con un
-    código que sabemos que existe). Se usa antes de una búsqueda
-    masiva para avisar de entrada si hay un problema de red/firewall,
-    en vez de recorrer todo el catálogo fallando en silencio.
-    Retorna (ok, mensaje).
-    """
-    try:
-        url = OFF_URL.format(codigo="7790895000430")  # Coca Cola 1.5L, existe
-        req = urllib.request.Request(url, headers={"User-Agent": "TPV-Arai/1.0"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT_URL) as resp:
-            json.loads(resp.read().decode("utf-8"))
-        return True, "OK"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
-
-
-def buscar_fotos_openfoodfacts(codigo_barras: str) -> list[tuple[str, str]]:
-    """
-    Busca las fotos disponibles del producto en Open Food Facts (base
-    de datos colaborativa, gratuita, sin API key) usando el código de
-    barras. OFF suele tener más de una foto por producto (frente,
-    empaque, ingredientes, tabla nutricional) — devuelve todas las que
-    haya como lista de (etiqueta, url), en orden de relevancia. Lista
-    vacía si el producto no está en la base o no tiene fotos.
-    """
-    codigo_barras = (codigo_barras or "").strip()
-    if not codigo_barras or not codigo_barras.isdigit():
-        return []
-    try:
-        url = OFF_URL.format(codigo=codigo_barras)
-        req = urllib.request.Request(url, headers={"User-Agent": "TPV-Arai/1.0"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT_URL) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        if data.get("status") != 1:
-            return []
-        p = data.get("product", {})
-        candidatas = [
-            ("Frente",            p.get("image_front_url") or p.get("image_url")),
-            ("Empaque",           p.get("image_packaging_url")),
-            ("Ingredientes",      p.get("image_ingredients_url")),
-            ("Tabla nutricional", p.get("image_nutrition_url")),
-        ]
-        vistas = set()
-        resultado = []
-        for etiqueta, u in candidatas:
-            if u and u not in vistas:
-                vistas.add(u)
-                resultado.append((etiqueta, _a_resolucion_completa(u)))
-        return resultado
-    except Exception as e:
-        logging.warning(f"Open Food Facts: error buscando '{codigo_barras}': {e}")
-        return []
-
-
-def buscar_foto_openfoodfacts(codigo_barras: str) -> str | None:
-    """Compatibilidad: devuelve solo la primera foto encontrada (la de
-    frente si existe). Preferir buscar_fotos_openfoodfacts() para
-    poder elegir entre varias."""
-    fotos = buscar_fotos_openfoodfacts(codigo_barras)
-    return fotos[0][1] if fotos else None
 
 
 def es_url(valor: str) -> bool:
@@ -128,6 +54,126 @@ def guardar_imagen_local(producto_id: int, ruta_origen: str) -> str:
     rel = os.path.join("imagenes_productos", nombre)
     invalidar_cache(rel)
     return rel
+
+
+def ya_esta_en_carpeta(imagen_url: str) -> bool:
+    """True si la imagen ya vive dentro de imagenes_productos/."""
+    if not imagen_url or es_url(imagen_url):
+        return False
+    try:
+        ruta = imagen_url if os.path.isabs(imagen_url) else os.path.join(
+            os.path.dirname(__file__), imagen_url)
+        return os.path.commonpath([os.path.abspath(ruta),
+                                   os.path.abspath(CARPETA_IMAGENES)]) == \
+               os.path.abspath(CARPETA_IMAGENES)
+    except (ValueError, OSError):
+        return False
+
+
+def productos_con_foto_externa(solo_rotas=False) -> list:
+    """Productos cuya foto es una URL, o sea que depende de internet.
+
+    solo_rotas: ademas verifica que la URL responda. Tarda (una consulta
+    por producto) pero es lo que permite limpiar solo las que ya no
+    sirven, sin tocar las que todavia andan.
+    """
+    from repositorio import get_productos
+    externas = [p for p in get_productos(solo_activos=False)
+                if p.get("imagen_url") and es_url(p["imagen_url"])]
+    if not solo_rotas:
+        return externas
+
+    rotas = []
+    for prod in externas:
+        try:
+            req = urllib.request.Request(
+                prod["imagen_url"], method="HEAD",
+                headers={"User-Agent": "Mozilla/5.0"})
+            urllib.request.urlopen(req, timeout=TIMEOUT_URL)
+        except Exception:
+            rotas.append(prod)
+    return rotas
+
+
+def descargar_fotos_externas(progreso=None, producto_ids=None) -> dict:
+    """Baja a imagenes_productos/ las fotos que hoy son una URL.
+
+    Son fotos elegidas a mano, no basura automatica: hay que
+    conservarlas. Pero mientras vivan en un sitio ajeno se descargan
+    cada vez que se dibuja la lista, cuelgan la pantalla si el sitio
+    esta lento, y desaparecen el dia que las borren de alla.
+
+    progreso: callable(hecho, total, descripcion) para la barra.
+    Devuelve {"total", "ok", "errores": [str]}.
+    """
+    from repositorio import actualizar_imagen_producto
+    todas = productos_con_foto_externa()
+    if producto_ids is not None:
+        ids = set(producto_ids)
+        todas = [p for p in todas if p["id"] in ids]
+
+    global PERMITIR_DESCARGA_URL
+    anterior = PERMITIR_DESCARGA_URL
+    PERMITIR_DESCARGA_URL = True     # acá SÍ se quiere esperar la descarga
+    ok, errores = 0, []
+    for i, prod in enumerate(todas, start=1):
+        if progreso:
+            progreso(i, len(todas), prod.get("descripcion", ""))
+        try:
+            rel = guardar_imagen_desde_url(prod["id"], prod["imagen_url"])
+            actualizar_imagen_producto(prod["id"], rel)
+            _URLS_FALLIDAS.discard(prod["imagen_url"])
+            ok += 1
+        except Exception as e:
+            errores.append(f"{prod.get('descripcion', '?')[:38]}: {e}")
+            logging.warning(f"No se pudo bajar la foto de "
+                            f"{prod.get('descripcion', prod['id'])}: {e}")
+    PERMITIR_DESCARGA_URL = anterior
+    return {"total": len(todas), "ok": ok, "errores": errores}
+
+
+def quitar_fotos_externas(producto_ids=None, solo_rotas=False) -> dict:
+    """Deja sin foto a los productos que la tenian por URL.
+
+    Una URL de un sitio ajeno no es una foto propia: se descarga cada
+    vez que se dibuja la grilla, traba la pantalla si el sitio esta
+    lento, y desaparece el dia que la borren de alla. Vaciarlas deja el
+    producto listo para cargarle una foto de verdad.
+    """
+    from repositorio import actualizar_imagen_producto
+    if producto_ids is None:
+        objetivo = [p["id"] for p in productos_con_foto_externa(solo_rotas)]
+    else:
+        objetivo = list(producto_ids)
+    for pid in objetivo:
+        actualizar_imagen_producto(pid, None)
+    return {"quitadas": len(objetivo)}
+
+
+def incorporar_imagen(producto_id: int, origen: str) -> tuple[str, str]:
+    """Deja la imagen dentro del sistema, venga de donde venga.
+
+    origen puede ser una URL o la ruta a un archivo del disco. En los dos
+    casos termina copiada en imagenes_productos/{id}.jpg, que es lo que
+    hace que la foto siga estando aunque se borre el original o se caiga
+    el sitio de donde salio.
+
+    Devuelve (ruta_relativa, que_paso).
+    """
+    if not origen:
+        raise ValueError("No hay ninguna imagen para incorporar.")
+
+    if es_url(origen):
+        return guardar_imagen_desde_url(producto_id, origen), "descargada"
+
+    if ya_esta_en_carpeta(origen):
+        return origen, "ya_estaba"
+
+    ruta = origen if os.path.isabs(origen) else os.path.join(
+        os.path.dirname(__file__), origen)
+    if not os.path.isfile(ruta):
+        raise ValueError(f"No se encontro el archivo:\n{origen}")
+    return guardar_imagen_local(producto_id, ruta), "copiada"
 
 
 def guardar_imagen_desde_url(producto_id: int, url: str) -> str:
@@ -183,8 +229,20 @@ def invalidar_cache(imagen_url: str):
         del _cache_thumbs[k]
 
 
+# URLs que fallaron: no se reintentan en toda la sesion. Sin esto, una
+# grilla con 20 fotos rotas cuelga la pantalla 20 x TIMEOUT segundos, y
+# vuelve a colgarla en cada refresco.
+_URLS_FALLIDAS = set()
+
+
 def _resolver_bytes(imagen_url: str) -> bytes | None:
     if not imagen_url:
+        return None
+    if imagen_url in _URLS_FALLIDAS:
+        return None
+    # Dibujar una lista no puede depender de internet: se muestra sin
+    # foto y listo. Bajarlas es una accion explicita del usuario.
+    if es_url(imagen_url) and not PERMITIR_DESCARGA_URL:
         return None
     try:
         if es_url(imagen_url):
@@ -201,7 +259,14 @@ def _resolver_bytes(imagen_url: str) -> bytes | None:
             with open(ruta, "rb") as f:
                 return f.read()
     except Exception as e:
-        logging.warning(f"No se pudo cargar imagen '{imagen_url}': {e}")
+        if es_url(imagen_url):
+            _URLS_FALLIDAS.add(imagen_url)
+            logging.warning(
+                f"No se pudo bajar la foto de '{imagen_url}': {e}. "
+                f"No se reintenta hasta reiniciar. Para que no dependa de "
+                f"internet, guardala localmente desde Productos → Editar.")
+        else:
+            logging.warning(f"No se pudo cargar imagen '{imagen_url}': {e}")
         return None
 
 

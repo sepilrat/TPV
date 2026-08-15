@@ -2,11 +2,12 @@
 main.py — Punto de entrada TPV v2.0
 Estructura de tabs:
   🛒 Venta
-  📦 Productos  (sub-tabs: Catalogo / Precios / Stock / Auditoria / Ofertas)
+  📦 Productos  (sub-tabs: Catalogo / Precios / Stock / Reposicion / A revisar / Auditoria / Ofertas)
   🗃 Caja
   📊 Informes
 """
 
+import os
 import logging
 import tkinter as tk
 from tkinter import ttk
@@ -19,7 +20,14 @@ from repositorio import get_stock_critico, get_vencimientos_proximos
 class AppTPV(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("TPV — Punto de Venta")
+        # En modo prueba tiene que ser IMPOSIBLE confundirse: si uno
+        # carga ventas de prueba creyendo que es la base real, o al
+        # reves, el desastre no se deshace.
+        from db import MODO_PRUEBA, DB_PATH
+        if MODO_PRUEBA:
+            self.title(f"TPV — MODO PRUEBA — {os.path.basename(DB_PATH)}")
+        else:
+            self.title("TPV — Punto de Venta")
         self.geometry("1100x700")
         self.minsize(900, 600)
         self.configure(bg=C.bg)
@@ -28,7 +36,7 @@ class AppTPV(tk.Tk):
         inicializar_db()
         aplicar_tema()
         hacer_backup("inicio")
-        self._avisar_vencimientos()
+        self._aviso_diario("apertura del sistema", "aviso_diario_al_abrir_app")
 
         self.sesion_id = self._verificar_sesion()
         self._construir_header()
@@ -69,34 +77,55 @@ class AppTPV(tk.Tk):
             try:    fondo = float(e.get().replace(",", "."))
             except ValueError: fondo = 0.0
             result[0] = abrir_sesion_caja(fondo)
+            self._aviso_diario("apertura de caja", "aviso_diario_al_abrir_caja")
             d.destroy()
 
         e.bind("<Return>", confirmar)
         btn(d, "Abrir caja", variante="exito", comando=confirmar).pack(pady=(0,16))
         self.wait_window(d)
-        return result[0] or abrir_sesion_caja(0.0)
+        if not result[0]:
+            result[0] = abrir_sesion_caja(0.0)
+            self._aviso_diario("apertura de caja", "aviso_diario_al_abrir_caja")
+        return result[0]
 
     # ── Header ────────────────────────────────────────────────────────────────
 
-    def _avisar_vencimientos(self):
-        """Aviso por email de lo que esta por vencer, al abrir el TPV.
+    def _aviso_diario(self, motivo, clave_config):
+        """Aviso diario por email (stock critico + vencimientos).
 
         Va en un hilo aparte: si el SMTP tarda o el wifi esta caido, el
         cajero no puede quedarse esperando para empezar a vender.
         """
         import threading
+        from config import cfg
+        if not cfg().get(clave_config):
+            return
 
         def trabajo():
             try:
-                from impresion import enviar_alerta_vencimientos
-                ok, msg = enviar_alerta_vencimientos()
-                (logging.info if ok else logging.debug)(f"Vencimientos: {msg}")
+                from impresion import enviar_aviso_diario
+                ok, msg = enviar_aviso_diario(motivo)
+                (logging.info if ok else logging.debug)(f"Aviso diario: {msg}")
             except Exception as e:
-                logging.warning(f"No se pudo enviar el aviso de vencimientos: {e}")
+                logging.warning(f"No se pudo enviar el aviso diario: {e}")
 
         threading.Thread(target=trabajo, daemon=True).start()
 
     def _construir_header(self):
+        # Franja imposible de ignorar cuando se trabaja sobre una base
+        # de prueba: confundirse de base y cargar ventas reales en la de
+        # prueba (o al reves) no se deshace.
+        from db import MODO_PRUEBA, DB_PATH
+        if MODO_PRUEBA:
+            aviso = tk.Label(
+                self,
+                text=("⚠  MODO PRUEBA — estás usando "
+                      f"{os.path.basename(DB_PATH)}, NO la base real.  "
+                      "Nada de lo que hagas acá afecta al negocio.  ⚠"),
+                bg=C.peligro, fg=C.blanco, font=("Segoe UI", 11, "bold"),
+                pady=7)
+            aviso.pack(fill="x")
+
         self._header = tk.Frame(self, bg=C.superficie, height=52)
         self._header.pack(fill="x")
         self._header.pack_propagate(False)
@@ -104,6 +133,11 @@ class AppTPV(tk.Tk):
 
         lbl(self._header, "TPV Autoservicio", variante="titulo",
             bg=C.superficie).pack(side="left", padx=20)
+        # Que base esta en uso. Chiquito pero siempre visible: si alguna
+        # vez hay dudas de si se esta en la real o en una copia, se mira
+        # aca y se termina la discusion.
+        lbl(self._header, os.path.basename(DB_PATH), variante="suave",
+            bg=C.superficie).pack(side="left")
         lbl(self._header, f"  Caja #{self.sesion_id}  ", variante="badge",
             padx=8, pady=4).pack(side="right", padx=16, pady=10)
 
@@ -187,6 +221,8 @@ class AppTPV(tk.Tk):
         from precios_ui   import PreciosUI
         from ingreso_ui   import IngresoUI
         from auditoria_ui import AuditoriaUI, OfertasUI
+        from revision_ui import RevisionUI
+        from reposicion_ui import ReposicionUI
 
         nb2 = ttk.Notebook(parent, style="Productos.TNotebook")
         nb2.pack(fill="both", expand=True)
@@ -195,6 +231,8 @@ class AppTPV(tk.Tk):
             ("  Catalogo  ",  ProductosUI),
             ("  Precios   ",  PreciosUI),
             ("  Stock     ",  IngresoUI),
+            ("  Reposicion",  ReposicionUI),
+            ("  A revisar ",  RevisionUI),
             ("  Auditoria ",  AuditoriaUI),
             ("  Ofertas   ",  OfertasUI),
         ]:

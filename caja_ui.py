@@ -4,6 +4,7 @@ Fixes: stock correcto al anular, movimientos en historial,
        notas visibles, alineación izquierda, refresh automático
 """
 
+import logging
 import tkinter as tk
 from tkinter import ttk, messagebox
 from styles import C, F, btn, lbl, card, tabla, toast, header_seccion, scrollable
@@ -36,6 +37,8 @@ COLS_HIST = [
     ("qr",       "QR",       75,  "e"),
     ("cta",      "Cta.Cte",  80,  "e"),
     ("total",    "Total",    90,  "e"),
+    ("contado",  "Contado",  90,  "e"),
+    ("dif",      "Dif.",     85,  "e"),
     ("notas",    "Notas",    150, "w"),
 ]
 
@@ -76,6 +79,10 @@ class CajaUI(ttk.Frame):
         self._build_actual(f_actual)
         self._build_movimientos(f_movs)
         self._build_historial(f_historial)
+
+        f_bitacora = ttk.Frame(self.nb)
+        self.nb.add(f_bitacora, text="  Bitacora  ")
+        self._build_bitacora(f_bitacora)
 
         # Refresh automático al cambiar de tab
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self.refrescar())
@@ -235,6 +242,14 @@ class CajaUI(ttk.Frame):
 
         frame_t, self.tree_hist = tabla(parent, COLS_HIST)
         frame_t.grid(row=0, column=0, sticky="nsew", pady=(0,8))
+        self.tree_hist.tag_configure("falta", background=C.err_flash,
+                                     foreground=C.peligro)
+        self.tree_hist.tag_configure("sobra", background=C.advertencia)
+        self.tree_hist.tag_configure("cuadra", background=C.ok_flash)
+        self.tree_hist.tag_configure("sinarqueo", foreground=C.texto_suave)
+
+        self.lbl_arqueo = lbl(parent, "", variante="suave")
+        self.lbl_arqueo.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         btn(parent, "Actualizar", variante="neutro",
             comando=self._refrescar_historial).grid(
@@ -246,6 +261,7 @@ class CajaUI(ttk.Frame):
         self._refrescar_actual()
         self._refrescar_movimientos()
         self._refrescar_historial()
+        self._refrescar_bitacora()
 
     def _refrescar_actual(self):
         sesion = get_sesion_abierta()
@@ -319,8 +335,24 @@ class CajaUI(ttk.Frame):
     def _refrescar_historial(self):
         for r in self.tree_hist.get_children():
             self.tree_hist.delete(r)
+        # Arqueo por sesion: sin esto no se ve si el faltante es de un
+        # dia suelto o un patron que se repite.
+        from repositorio import get_arqueos
+        arq = {a["id"]: a for a in get_arqueos(limit=200)}
         for s in get_historial_sesiones():
-            self.tree_hist.insert("", "end", values=(
+            a = arq.get(s["id"], {})
+            contado = a.get("efectivo_contado")
+            dif = a.get("diferencia")
+            if contado is None:
+                txt_cont, txt_dif, tag = "sin arqueo", "—", "sinarqueo"
+            else:
+                txt_cont = f"$ {contado:,.2f}"
+                if abs(dif or 0) < 0.01:
+                    txt_dif, tag = "✓", "cuadra"
+                else:
+                    txt_dif = f"$ {dif:,.2f}"
+                    tag = "falta" if dif < 0 else "sobra"
+            self.tree_hist.insert("", "end", tags=(tag,), values=(
                 s["id"],
                 s["apertura_en"][:16] if s["apertura_en"] else "—",
                 s["cierre_en"][:16]   if s["cierre_en"]   else "—",
@@ -330,8 +362,89 @@ class CajaUI(ttk.Frame):
                 f"$ {s['total_qr']:,.2f}",
                 f"$ {s['total_cuenta_corriente']:,.2f}",
                 f"$ {s['total_general']:,.2f}",
-                s["notas"] or "—",
+                txt_cont,
+                txt_dif,
+                (a.get("arqueo_notas") or s["notas"] or "—"),
             ))
+
+        cerradas = [a for a in arq.values() if a.get("diferencia") is not None]
+        if cerradas:
+            faltantes = [a["diferencia"] for a in cerradas if a["diferencia"] < -0.01]
+            neto = sum(a["diferencia"] for a in cerradas)
+            self.lbl_arqueo.config(
+                text=(f"{len(cerradas)} cierre(s) con arqueo   ·   "
+                      f"{len(faltantes)} con faltante   ·   "
+                      f"acumulado: $ {neto:,.2f}"))
+        else:
+            self.lbl_arqueo.config(
+                text="Todavía no hay cierres con arqueo. Al cerrar la caja, "
+                     "cargá cuánto contaste para empezar a llevar el control.")
+
+    # ── Tab bitacora ──────────────────────────────────────────────────────────
+
+    def _build_bitacora(self, parent):
+        """Quien autorizo cada accion que movio plata o stock.
+
+        Es lo que permite explicar una diferencia de caja: sin esto, un
+        faltante de $8.000 y una devolucion de $8.000 son indistinguibles.
+        """
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        bar = tk.Frame(parent, bg=C.bg)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        lbl(bar, "Ver:", variante="suave").pack(side="left")
+        self.v_bit_accion = tk.StringVar(value="Todas")
+        self.cb_bit = ttk.Combobox(bar, textvariable=self.v_bit_accion,
+                                   width=26, state="readonly",
+                                   values=("Todas",))
+        self.cb_bit.pack(side="left", padx=6)
+        self.cb_bit.bind("<<ComboboxSelected>>", lambda e: self._refrescar_bitacora())
+        btn(bar, "Actualizar", variante="neutro",
+            comando=self._refrescar_bitacora).pack(side="right")
+
+        COLS_BIT = [
+            ("fecha",  "Fecha",        130, "w"),
+            ("accion", "Accion",       190, "w"),
+            ("resp",   "Autorizo",     140, "w"),
+            ("monto",  "Monto",        110, "e"),
+            ("det",    "Detalle",      420, "w"),
+        ]
+        frame_t, self.tree_bit = tabla(parent, COLS_BIT)
+        frame_t.grid(row=1, column=0, sticky="nsew")
+        self.tree_bit.tag_configure("plata", background=C.err_flash)
+
+        self.lbl_bit = lbl(parent, "", variante="suave")
+        self.lbl_bit.grid(row=2, column=0, sticky="w", pady=(6, 0))
+
+    def _refrescar_bitacora(self):
+        from repositorio import get_bitacora
+        filtro = getattr(self, "v_bit_accion", None)
+        accion = filtro.get() if filtro else "Todas"
+        try:
+            filas = get_bitacora(accion=None if accion == "Todas" else accion)
+            todas = get_bitacora()
+        except Exception as exc:
+            self.lbl_bit.config(text=f"No se pudo leer la bitacora: {exc}")
+            return
+
+        self.cb_bit.config(values=["Todas"] + sorted({b["accion"] for b in todas}))
+        self.tree_bit.delete(*self.tree_bit.get_children())
+        for b in filas:
+            # Las que mueven plata van resaltadas: son las que hay que
+            # mirar cuando el arqueo no cuadra.
+            tag = "plata" if b["accion"] in ("Anulacion de venta",
+                                             "Devolucion") else ""
+            self.tree_bit.insert("", "end", tags=(tag,) if tag else (), values=(
+                (b["fecha"] or "")[:16], b["accion"], b["responsable"],
+                f"$ {b['monto']:,.2f}" if b["monto"] else "—",
+                (b["detalle"] or "")[:70]))
+
+        plata = sum(b["monto"] or 0 for b in filas
+                    if b["accion"] in ("Anulacion de venta", "Devolucion"))
+        self.lbl_bit.config(
+            text=(f"{len(filas)} accion(es)   ·   "
+                  f"$ {plata:,.2f} en anulaciones y devoluciones"))
 
     # ── Acciones ──────────────────────────────────────────────────────────────
 
@@ -356,6 +469,12 @@ class CajaUI(ttk.Frame):
         self.refrescar()
 
     def _cerrar_caja(self):
+        """Cierre CON arqueo: se cuenta la plata antes de cerrar.
+
+        Antes el cierre solo mostraba lo que el sistema creia y pedia
+        confirmar. Un faltante por un vuelto mal dado o un cobro no
+        registrado no dejaba rastro y nunca se podia rastrear a un turno.
+        """
         sesion = get_sesion_abierta()
         if not sesion:
             messagebox.showinfo("Info", "No hay sesion abierta.", parent=self)
@@ -367,29 +486,161 @@ class CajaUI(ttk.Frame):
         total = (resumen["total_efectivo"] + resumen["total_tarjeta"] +
                  resumen["total_qr"]       + resumen["total_cuenta_corriente"])
 
-        msg = (
-            f"Resumen sesion #{sid}\n\n"
-            f"Efectivo:        $ {resumen['total_efectivo']:,.2f}\n"
-            f"Tarjeta:         $ {resumen['total_tarjeta']:,.2f}\n"
-            f"QR:              $ {resumen['total_qr']:,.2f}\n"
-            f"Cta. Corriente:  $ {resumen['total_cuenta_corriente']:,.2f}\n"
-            f"{'─'*34}\n"
-            f"TOTAL:           $ {total:,.2f}\n\n"
-            f"Ventas: {ventas_res['cant'] or 0}\n\n"
-            f"Confirmar cierre?"
-        )
-        if not messagebox.askyesno("Cerrar caja", msg, parent=self):
-            return
+        from repositorio import efectivo_esperado
+        ef = efectivo_esperado(sid)
 
-        notas = self.entry_notas_cierre.get().strip()
-        cerrar_sesion_caja(sid, notas)
-        from logger import hacer_backup
-        hacer_backup("cierre_caja")
-        messagebox.showinfo("Caja cerrada",
-            f"Sesion #{sid} cerrada.\nReinicia la aplicacion para abrir una nueva sesion.",
-            parent=self)
-        self.btn_cerrar.config(state="disabled")
-        self.refrescar()
+        d = tk.Toplevel(self)
+        d.title(f"Cerrar caja — sesion #{sid}")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        w, h = 500, 620
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//2)}")
+
+        lbl(d, f"Cierre de caja — sesion #{sid}", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(16, 2))
+        lbl(d, f"{ventas_res['cant'] or 0} ventas   ·   total $ {total:,.2f}",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=20)
+
+        # ── Desglose de lo que TIENE que haber en el cajon ────────────
+        caja = tk.Frame(d, bg=C.acento, padx=16, pady=12)
+        caja.pack(fill="x", padx=20, pady=(14, 8))
+        lbl(caja, "Efectivo que deberia haber en el cajon", variante="suave",
+            bg=C.acento).pack(anchor="w")
+        for etiqueta, valor in (
+                ("Fondo inicial", ef["fondo_inicial"]),
+                ("Ventas en efectivo", ef["ventas_efectivo"]),
+                ("Ingresos manuales", ef["ingresos_manuales"]),
+                ("Egresos", -ef["egresos"])):
+            if valor:
+                f = tk.Frame(caja, bg=C.acento)
+                f.pack(fill="x")
+                tk.Label(f, text=etiqueta, bg=C.acento, fg=C.texto,
+                         font=F.normal, anchor="w").pack(side="left")
+                tk.Label(f, text=f"$ {valor:,.2f}", bg=C.acento, fg=C.texto,
+                         font=F.normal, anchor="e").pack(side="right")
+        tk.Frame(caja, bg=C.texto_suave, height=1).pack(fill="x", pady=6)
+        fe = tk.Frame(caja, bg=C.acento)
+        fe.pack(fill="x")
+        tk.Label(fe, text="ESPERADO", bg=C.acento, fg=C.texto,
+                 font=F.total, anchor="w").pack(side="left")
+        tk.Label(fe, text=f"$ {ef['esperado']:,.2f}", bg=C.acento, fg=C.texto,
+                 font=F.total, anchor="e").pack(side="right")
+
+        lbl(d, "Los otros medios de pago no entran acá: con tarjeta, QR o "
+               "cuenta corriente no entra plata al cajón.",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=20)
+
+        # ── Conteo ────────────────────────────────────────────────────
+        lbl(d, "¿Cuánto contaste?", variante="subtitulo",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(14, 2))
+        v_contado = tk.StringVar()
+        tk.Entry(d, textvariable=v_contado, font=F.total, justify="center",
+                 bg=C.bg, fg=C.texto, relief="solid", bd=1).pack(
+            fill="x", padx=20, ipady=8)
+
+        lbl_dif = tk.Label(d, text="", font=F.total, bg=C.superficie,
+                           anchor="center")
+        lbl_dif.pack(fill="x", padx=20, pady=(10, 0))
+
+        def _calcular(*_a):
+            txt = v_contado.get().strip().replace(",", ".")
+            if not txt:
+                lbl_dif.config(text="", bg=C.superficie)
+                return
+            try:
+                dif = round(float(txt) - ef["esperado"], 2)
+            except ValueError:
+                lbl_dif.config(text="No es un número", fg=C.peligro,
+                               bg=C.superficie)
+                return
+            if abs(dif) < 0.01:
+                lbl_dif.config(text="✓  Cuadra exacto", fg=C.exito, bg=C.ok_flash)
+            elif dif > 0:
+                lbl_dif.config(text=f"Sobran $ {dif:,.2f}", fg=C.texto,
+                               bg=C.advertencia)
+            else:
+                lbl_dif.config(text=f"Faltan $ {abs(dif):,.2f}", fg=C.peligro,
+                               bg=C.err_flash)
+
+        v_contado.trace_add("write", _calcular)
+
+        lbl(d, "Nota del arqueo (si hay diferencia, por qué)",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=20,
+                                                    pady=(12, 2))
+        v_nota = tk.StringVar()
+        tk.Entry(d, textvariable=v_nota, font=F.normal, bg=C.bg, fg=C.texto,
+                 relief="solid", bd=1).pack(fill="x", padx=20, ipady=5)
+
+        def _confirmar():
+            txt = v_contado.get().strip().replace(",", ".")
+            contado = None
+            if txt:
+                try:
+                    contado = float(txt)
+                except ValueError:
+                    messagebox.showwarning("Cerrar caja",
+                                           "El monto contado no es un número.",
+                                           parent=d)
+                    return
+            else:
+                if not messagebox.askyesno(
+                        "Sin arqueo",
+                        "No cargaste cuánto contaste.\n\n"
+                        "La caja se va a cerrar sin arqueo: si falta o sobra "
+                        "plata, no va a quedar registro de hoy.\n\n"
+                        "¿Cerrar igual?", parent=d):
+                    return
+
+            dif = (round(contado - ef["esperado"], 2)
+                   if contado is not None else None)
+            if dif is not None and abs(dif) >= 0.01:
+                estado = "sobran" if dif > 0 else "faltan"
+                if not messagebox.askyesno(
+                        "Confirmar diferencia",
+                        f"Contaste $ {contado:,.2f} y el sistema esperaba "
+                        f"$ {ef['esperado']:,.2f}.\n\n"
+                        f"{estado.upper()} $ {abs(dif):,.2f}.\n\n"
+                        "¿Cerrar así?", parent=d):
+                    return
+
+            d.destroy()
+            notas = self.entry_notas_cierre.get().strip()
+            cerrar_sesion_caja(sid, notas, contado, v_nota.get().strip())
+            from logger import hacer_backup
+            hacer_backup("cierre_caja")
+
+            # Aviso diario: si no salio en todo el dia, este es el ultimo
+            # momento util para enterarse de lo que hay que reponer manana.
+            from config import cfg
+            if cfg().get("aviso_diario_al_cerrar_caja"):
+                import threading
+
+                def _avisar():
+                    try:
+                        from impresion import enviar_aviso_diario
+                        enviar_aviso_diario("cierre de caja")
+                    except Exception as exc:
+                        logging.warning(f"Aviso diario al cerrar: {exc}")
+
+                threading.Thread(target=_avisar, daemon=True).start()
+            extra = ""
+            if dif is not None:
+                extra = ("\nArqueo: cuadra exacto." if abs(dif) < 0.01
+                         else f"\nArqueo: diferencia de $ {dif:,.2f}.")
+            messagebox.showinfo("Caja cerrada",
+                f"Sesion #{sid} cerrada.{extra}\n\n"
+                "Reinicia la aplicacion para abrir una nueva sesion.",
+                parent=self)
+            self.btn_cerrar.config(state="disabled")
+            self.refrescar()
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x", pady=16)
+        btn(pie, "Cerrar caja", variante="peligro",
+            comando=_confirmar).pack(side="left", padx=(20, 6))
+        btn(pie, "Cancelar", variante="neutro",
+            comando=d.destroy).pack(side="left")
 
     def _devolver(self):
         """Devolucion parcial: vuelven algunos items, no toda la venta."""
@@ -419,11 +670,32 @@ class CajaUI(ttk.Frame):
             messagebox.showinfo("Atencion", "Selecciona una venta.", parent=self)
             return
         vid = int(sel[0])
+        # Anular saca la venta de la caja: sin autorizacion ni registro,
+        # un faltante en el arqueo es indistinguible de un robo.
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            self, f"Anular la venta #{vid} requiere autorizacion.")
+        if not responsable:
+            return
+
         if not messagebox.askyesno("Anular venta",
                                     f"Anular venta #{vid}?\nSe restaurara el stock.",
                                     parent=self):
             return
+        # El monto se lee ANTES de anular: despues queda en cero
+        monto = 0.0
+        try:
+            monto = float(self.tree_ventas.item(sel[0])["values"][5]
+                          .replace("$", "").replace(".", "").replace(",", "."))
+        except (ValueError, IndexError, AttributeError):
+            pass
+
         ok = anular_venta(vid)
+        if ok:
+            from repositorio import registrar_bitacora
+            registrar_bitacora("Anulacion de venta", responsable,
+                               f"Venta #{vid} anulada, stock restaurado",
+                               monto or None, vid)
         if ok:
             toast(self, f"Venta #{vid} anulada — stock restaurado")
         else:

@@ -491,6 +491,153 @@ def generar_html_informe_stock(productos: list, umbral: int) -> str:
     """
 
 
+def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, str]:
+    """UN mail por dia con stock critico + vencimientos, todo junto.
+
+    Antes eran dos avisos por caminos distintos: el de vencimientos al
+    abrir la app y el de stock por una tarea programada de Windows que
+    hay que crear a mano (y si no se crea, nunca llega nada). Uno solo,
+    disparado por lo que uno ya hace todos los dias — abrir el sistema,
+    abrir o cerrar la caja — no depende de nada externo.
+
+    motivo: de donde se disparo, para el log.
+    forzar: saltea la guarda de una vez por dia (para probar).
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from datetime import date
+    from repositorio import get_vencimientos_proximos, get_reposicion
+
+    c = cfg()
+    if not c.get("aviso_diario_activo"):
+        return False, "Aviso diario desactivado (Config → Aviso diario)."
+    if not c.get("email_activo"):
+        return False, "Email no configurado en Config → Email (SMTP)."
+
+    destinatario = (c.get("aviso_diario_destinatario")
+                    or c.get("informe_stock_email_destinatario")
+                    or c.get("email_usuario"))
+    if not destinatario:
+        return False, "Falta el email destinatario."
+
+    hoy = date.today().isoformat()
+    if not forzar and c.get("_aviso_diario_ultimo_envio") == hoy:
+        return False, f"El aviso de hoy ya se mando ({motivo or 'sin motivo'})."
+
+    vtos = get_vencimientos_proximos()
+    # Reposicion por velocidad de venta, no por umbral fijo: el listado
+    # de "stock bajo" daba 86 productos, la mayoria de rotacion lenta que
+    # no urgian. Un mail de 86 lineas se deja de leer a la semana.
+    try:
+        cob = int(c.get("aviso_diario_dias_cobertura", 14) or 14)
+    except (TypeError, ValueError):
+        cob = 14
+    reponer = get_reposicion(30, cob, solo_faltantes=True)
+    criticos = [r for r in reponer if r["urgencia"] in ("sin stock", "urgente")]
+    if not vtos and not reponer:
+        if not forzar:
+            from config import set as cfg_set
+            cfg_set("_aviso_diario_ultimo_envio", hoy)
+        return False, "Nada para avisar: sin vencimientos ni stock critico."
+
+    partes = []
+    if criticos:
+        partes.append(f"{len(criticos)} urgente(s) para reponer")
+    elif reponer:
+        partes.append(f"{len(reponer)} para reponer")
+    vencidos = [v for v in vtos if v["dias_restantes"] < 0]
+    if vtos:
+        partes.append(f"{len(vtos)} por vencer"
+                      + (f" ({len(vencidos)} VENCIDO)" if vencidos else ""))
+    resumen = " · ".join(partes)
+
+    html = [f"""<html><body style="font-family:Segoe UI,Arial,sans-serif">
+      <h2>{c.get('negocio_nombre', 'TPV')} — aviso del dia</h2>
+      <p>{resumen}</p>"""]
+
+    if vtos:
+        total = sum(v["valor_en_riesgo"] for v in vtos)
+        html.append("<h3>Por vencer</h3>"
+                    f"<p>Valor en riesgo: <b>$ {total:,.2f}</b></p>"
+                    "<table border='0' cellpadding='6' cellspacing='0' "
+                    "style='border-collapse:collapse;font-size:14px'>"
+                    "<tr style='background:#DBEAFE'><th align='left'>Producto</th>"
+                    "<th align='right'>Stock</th><th align='right'>Valor</th>"
+                    "<th align='left'>Vence</th><th align='left'>Cuando</th></tr>")
+        for v in vtos:
+            d = v["dias_restantes"]
+            if d < 0:
+                cuando, color = f"VENCIDO hace {-d} d", "#DC2626"
+            elif d == 0:
+                cuando, color = "vence HOY", "#DC2626"
+            elif d <= 2:
+                cuando, color = f"en {d} d", "#EA580C"
+            else:
+                cuando, color = f"en {d} d", "#111827"
+            html.append(f"<tr><td>{v['descripcion']}</td>"
+                        f"<td align='right'>{v['stock']:g}</td>"
+                        f"<td align='right'>$ {v['valor_en_riesgo']:,.2f}</td>"
+                        f"<td>{v['fecha_vencimiento']}</td>"
+                        f"<td style='color:{color};font-weight:bold'>{cuando}</td></tr>")
+        html.append("</table>")
+
+    if reponer:
+        total_inv = sum(r["costo_reposicion"] for r in reponer)
+        html.append(f"<h3>Para reponer</h3>"
+                    f"<p>Ordenado por lo que dura el stock. Comprarlo todo "
+                    f"cuesta <b>$ {total_inv:,.2f}</b> "
+                    f"(cobertura de {cob} dias).</p>"
+                    "<table border='0' cellpadding='6' cellspacing='0' "
+                    "style='border-collapse:collapse;font-size:14px'>"
+                    "<tr style='background:#DBEAFE'>"
+                    "<th align='left'>Producto</th>"
+                    "<th align='left'>Proveedor</th>"
+                    "<th align='right'>Stock</th>"
+                    "<th align='right'>Venta/dia</th>"
+                    "<th align='right'>Dura</th>"
+                    "<th align='right'>Comprar</th></tr>")
+        for r in reponer[:40]:
+            if r["urgencia"] == "sin stock":
+                dura, color = "SIN STOCK", "#DC2626"
+            elif r["urgencia"] == "urgente":
+                dura, color = f"{r['dias_stock']:.1f} d", "#EA580C"
+            else:
+                dura, color = f"{r['dias_stock']:.1f} d", "#111827"
+            html.append(f"<tr><td>{r['descripcion']}</td>"
+                        f"<td>{r['proveedor'] or '—'}</td>"
+                        f"<td align='right'>{r['stock']:g}</td>"
+                        f"<td align='right'>{r['por_dia']:.2f}</td>"
+                        f"<td align='right' style='color:{color};"
+                        f"font-weight:bold'>{dura}</td>"
+                        f"<td align='right'>{r['sugerido']:g}</td></tr>")
+        html.append("</table>")
+        if len(reponer) > 40:
+            html.append(f"<p>…y {len(reponer) - 40} mas. La lista completa "
+                        f"esta en Productos → Reposicion.</p>")
+
+    html.append("</body></html>")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[{c.get('negocio_nombre', 'TPV')}] {resumen}"
+    msg["From"] = f"{c.get('email_remitente', 'TPV')} <{c['email_usuario']}>"
+    msg["To"] = destinatario
+    msg.attach(MIMEText("".join(html), "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP(c["email_smtp_host"], c["email_smtp_port"], timeout=20) as srv:
+            srv.starttls()
+            srv.login(c["email_usuario"], c["email_password"])
+            srv.send_message(msg)
+    except Exception as e:
+        return False, f"No se pudo enviar el aviso diario: {e}"
+
+    if not forzar:
+        from config import set as cfg_set
+        cfg_set("_aviso_diario_ultimo_envio", hoy)
+    return True, f"Aviso diario enviado a {destinatario} ({resumen})."
+
+
 def enviar_alerta_vencimientos(destinatario: str = None,
                                solo_una_vez_por_dia: bool = True) -> tuple[bool, str]:
     """Manda el listado de lo que esta por vencer.

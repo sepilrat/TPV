@@ -69,10 +69,10 @@ def revisar():
             print(f"{OK} La contrasena tiene formato de clave de aplicacion (16)")
 
     _t("2. Destinatarios")
-    dest_vto = c.get("vto_email_destinatario") or c.get("informe_stock_email_destinatario")
+    dest_vto = c.get("aviso_diario_destinatario") or c.get("informe_stock_email_destinatario")
     dest_stock = c.get("informe_stock_email_destinatario")
     for etiqueta, valor, clave in (
-            ("Vencimientos", dest_vto, "vto_email_destinatario"),
+            ("Aviso diario", dest_vto, "aviso_diario_destinatario"),
             ("Informe de stock", dest_stock, "informe_stock_email_destinatario")):
         if valor:
             print(f"{OK} {etiqueta}: {valor}")
@@ -81,12 +81,23 @@ def revisar():
             problemas.append(clave)
 
     _t("3. Interruptores de cada aviso")
-    if c.get("vto_email_activo"):
-        print(f"{OK} Vencimientos por email: ACTIVO")
+    if c.get("aviso_diario_activo"):
+        disparos = [n for n, k in (
+            ("al abrir el sistema", "aviso_diario_al_abrir_app"),
+            ("al abrir la caja",    "aviso_diario_al_abrir_caja"),
+            ("al cerrar la caja",   "aviso_diario_al_cerrar_caja"))
+            if c.get(k)]
+        if disparos:
+            print(f"{OK} Aviso diario: ACTIVO — se manda {', '.join(disparos)}")
+        else:
+            print(f"{MAL} Aviso diario activo pero SIN NINGUN disparador tildado.")
+            print("        Nunca se va a mandar. Tilda al menos uno en")
+            print("        Config → Aviso diario por email.")
+            problemas.append("aviso_diario_sin_disparador")
     else:
-        print(f"{MAL} Vencimientos por email: DESACTIVADO")
-        print("        → Config → Vencimientos → 'Avisar por email al abrir el TPV'")
-        problemas.append("vto_email_activo")
+        print(f"{MAL} Aviso diario: DESACTIVADO")
+        print("        → Config → Aviso diario por email → 'Activar el aviso diario'")
+        problemas.append("aviso_diario_activo")
 
     if c.get("informe_stock_email_activo"):
         print(f"{OK} Informe de stock por email: ACTIVO")
@@ -95,9 +106,9 @@ def revisar():
         print("        → Config → Informe de stock por email")
         problemas.append("informe_stock_email_activo")
 
-    ultimo = c.get("_vto_email_ultimo_envio")
+    ultimo = c.get("_aviso_diario_ultimo_envio")
     if ultimo == date.today().isoformat():
-        print(f"{AVISO} El aviso de vencimientos de HOY ya se marco como enviado.")
+        print(f"{AVISO} El aviso diario de HOY ya se marco como enviado.")
         print("        Por eso no vuelve a salir aunque reabras el TPV.")
         print("        Para probar de nuevo: correr este script con --enviar")
 
@@ -159,9 +170,9 @@ def revisar():
 
 def enviar_pruebas():
     _t("6. Envio de prueba")
-    from impresion import enviar_alerta_vencimientos, enviar_informe_stock
-    ok, msg = enviar_alerta_vencimientos(solo_una_vez_por_dia=False)
-    print(f"{OK if ok else MAL} Vencimientos: {msg}")
+    from impresion import enviar_aviso_diario, enviar_informe_stock
+    ok, msg = enviar_aviso_diario("prueba manual", forzar=True)
+    print(f"{OK if ok else MAL} Aviso diario: {msg}")
     ok2, msg2 = enviar_informe_stock()
     print(f"{OK if ok2 else MAL} Informe de stock: {msg2}")
 

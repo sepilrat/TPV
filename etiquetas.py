@@ -25,11 +25,17 @@ from db import get_connection
 # DATOS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_precios_producto(producto_id: int, precio_base: float) -> list[dict]:
+def _get_precios_producto(producto_id: int, precio_base: float,
+                          recargo: float = 0.0) -> list[dict]:
     """
     Retorna lista de precios ordenados de menor a mayor precio unitario.
     Incluye precio base y todas las promos vigentes.
     Formato: [{"precio": float, "cantidad": int, "label": str}]
+
+    recargo: monto fijo por unidad que se suma a TODOS los escalones
+    (comision de un vendedor). Tiene que aplicarse tambien a las promos
+    de precio fijo: si no, el escalon "x6: $3.900" saldria sin la
+    comision y el vendedor terminaria vendiendo a perdida propia.
     """
     hoy = datetime.now().strftime("%Y-%m-%d")
     with get_connection() as conn:
@@ -47,7 +53,7 @@ def _get_precios_producto(producto_id: int, precio_base: float) -> list[dict]:
     # Agregar promos
     for p in promos:
         precios.append({
-            "precio":   p["precio_unitario"],
+            "precio":   p["precio_unitario"] + recargo,
             "cantidad": p["cantidad_minima"],
             "label":    f"Llevando {p['cantidad_minima']}",
         })
@@ -56,7 +62,7 @@ def _get_precios_producto(producto_id: int, precio_base: float) -> list[dict]:
     cantidades_existentes = {p["cantidad"] for p in precios}
     if 1 not in cantidades_existentes:
         precios.append({
-            "precio":   precio_base,
+            "precio":   precio_base,   # ya viene con el recargo aplicado
             "cantidad": 1,
             "label":    "Precio unitario",
         })
@@ -95,13 +101,52 @@ def generar_pdf_etiquetas(productos: list[dict],
     espacio = c.get("etiqueta_espacio_mm", 0) * mm
     margen_y = c.get("etiqueta_margen_arriba_mm", 10) * mm
 
-    ancho_paso = ancho + espacio    # lo que avanza cada columna
-    alto_paso  = alto + margen_y    # lo que avanza cada fila — el mismo
-                                     # espacio "de arriba" se repite entre
-                                     # TODAS las filas, no solo antes de
-                                     # la primera
+    # Las etiquetas van PEGADAS en vertical: se cortan con guillotina o
+    # tijera por la linea, y un espacio entre filas obliga a hacer dos
+    # cortes por etiqueta en vez de uno. El separador horizontal si se
+    # respeta (viene de las planchas autoadhesivas).
+    # Con las etiquetas pegadas, cada linea sirve para las dos de al
+    # lado: 1 corte vertical parte toda la hoja y 4 horizontales la
+    # terminan. Con separacion hay que cortar dos veces por linea (una
+    # de cada lado) y hacen falta 9. El separador solo tiene sentido en
+    # planchas autoadhesivas troqueladas.
+    if c.get("etiqueta_pegadas", True):
+        espacio = 0
+    ancho_paso = ancho + espacio
+    alto_paso  = alto
 
-    margen_x = (A4[0] - (cols * ancho + (cols - 1) * espacio)) / 2
+    # Cuantas filas ENTRAN de verdad en la hoja. Antes se usaba el numero
+    # de Config sin verificar: si alto x filas pasaba los 297 mm del A4,
+    # la ultima fila salia cortada al medio y no habia forma de darse
+    # cuenta hasta imprimir.
+    margen_abajo = 8 * mm
+    filas_que_entran = int((A4[1] - margen_y - margen_abajo) // alto_paso)
+    if filas_que_entran < 1:
+        filas_que_entran = 1
+    if filas > filas_que_entran:
+        logging.warning(
+            f"Config pide {filas} filas de {alto/mm:.0f} mm, pero en A4 "
+            f"entran {filas_que_entran}. Se usan {filas_que_entran} para "
+            f"que no salgan cortadas.")
+    filas = min(filas, filas_que_entran)
+
+    # Margen lateral: centrado, pero nunca menor al minimo. Muchas
+    # impresoras hogareñas no imprimen los ultimos milimetros del borde,
+    # asi que con etiquetas anchas las guias de corte (y a veces el borde
+    # de la etiqueta) se perdian. Si no entran, se achica la etiqueta.
+    min_lateral = c.get("etiqueta_margen_lateral_mm", 12) * mm
+    ocupado = cols * ancho + (cols - 1) * espacio
+    disponible = A4[0] - 2 * min_lateral
+    if ocupado > disponible:
+        # Se reparte el faltante entre las columnas en vez de imprimir
+        # pegado al borde
+        ancho = (disponible - (cols - 1) * espacio) / cols
+        ocupado = cols * ancho + (cols - 1) * espacio
+        logging.warning(
+            f"Las etiquetas no entran con {min_lateral/mm:.0f} mm de margen "
+            f"lateral: se achican a {ancho/mm:.1f} mm de ancho.")
+        ancho_paso = ancho + espacio
+    margen_x = (A4[0] - ocupado) / 2
 
     if not ruta_salida:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -111,8 +156,31 @@ def generar_pdf_etiquetas(productos: list[dict],
     cv = canvas.Canvas(ruta_salida, pagesize=A4)
     pg_ancho, pg_alto = A4
 
+    def _guias(n_filas_dibujadas):
+        """Marcas de corte en los bordes: cortar a ojo sale torcido."""
+        if not c.get("etiqueta_guias_corte", True):
+            return
+        cv.setStrokeColorRGB(0.75, 0.75, 0.75)
+        cv.setLineWidth(0.4)
+        largo = 4 * mm
+        for col in range(cols + 1):
+            x = margen_x + col * ancho_paso - (espacio / 2 if col and col < cols else 0)
+            if col == cols:
+                x = margen_x + (cols - 1) * ancho_paso + ancho
+            y0 = pg_alto - margen_y
+            y1 = y0 - n_filas_dibujadas * alto_paso
+            cv.line(x, y0, x, y0 + largo)          # arriba
+            cv.line(x, y1, x, y1 - largo)          # abajo
+        for fila in range(n_filas_dibujadas + 1):
+            y = pg_alto - margen_y - fila * alto_paso
+            x0 = margen_x
+            x1 = margen_x + (cols - 1) * ancho_paso + ancho
+            cv.line(x0 - largo, y, x0, y)
+            cv.line(x1, y, x1 + largo, y)
+
     idx = 0
     while idx < len(productos):
+        dibujadas = 0
         for fila in range(filas):
             for col in range(cols):
                 if idx >= len(productos):
@@ -122,7 +190,9 @@ def generar_pdf_etiquetas(productos: list[dict],
                 x = margen_x + col * ancho_paso
                 y = pg_alto - margen_y - fila * alto_paso - alto
                 _dibujar_etiqueta(cv, prod, x, y, ancho, alto)
+                dibujadas = fila + 1
 
+        _guias(dibujadas)
         if idx < len(productos):
             cv.showPage()
 
@@ -298,6 +368,47 @@ def _font_size_para_ancho(cv, texto, ancho_max, size_max, size_min):
 # UI — Selector de productos
 # ─────────────────────────────────────────────────────────────────────────────
 
+def aprovechamiento_hoja(cfg_dict=None) -> dict:
+    """Cuanto de la hoja se usa y que alto convendria.
+
+    Con el alto por defecto quedaba casi un quinto de la hoja en blanco
+    abajo: son etiquetas que se dejan de imprimir en cada tanda.
+    """
+    from config import cfg as _cfg
+    c = cfg_dict or _cfg()
+    A4_ALTO, A4_ANCHO = 297, 210
+    margen_ab = 8
+
+    alto = float(c.get("etiqueta_alto_mm", 45))
+    ancho = float(c.get("etiqueta_ancho_mm", 95))
+    cols = int(c.get("etiqueta_cols", 2))
+    marg = float(c.get("etiqueta_margen_arriba_mm", 10))
+    lat = float(c.get("etiqueta_margen_lateral_mm", 12))
+
+    util = A4_ALTO - marg - margen_ab
+    filas = max(1, int(util // alto))
+    sobra = util - filas * alto
+
+    # Alturas que aprovechan mejor. No se baja de 28 mm: abajo de eso el
+    # precio deja de leerse desde el pasillo, que es para lo que sirve.
+    opciones = []
+    for f in range(filas, filas + 6):
+        a = util / f
+        if a < 28:
+            break
+        opciones.append({"filas": f, "alto": a, "por_hoja": f * cols})
+
+    return {
+        "filas_actuales": filas,
+        "por_hoja": filas * cols,
+        "sobra_mm": sobra,
+        "pct_desperdiciado": (sobra + marg) / A4_ALTO * 100,
+        "opciones": opciones,
+        "cols_max": max(1, int((A4_ANCHO - 2 * lat) // ancho)),
+        "ancho_max": (A4_ANCHO - 2 * lat) / cols,
+    }
+
+
 def abrir_selector_etiquetas(parent, productos_presel=None):
     """
     Diálogo para seleccionar productos y cantidad de etiquetas.
@@ -334,6 +445,23 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
                              bg=C.superficie, fg=C.texto,
                              relief="solid", bd=1)
     entry_buscar.pack(side="left", ipady=5)
+
+    # Filtro por categoria: las etiquetas de gondola se reponen por
+    # sector (la gondola de limpieza, la de almacen), no de a todo el
+    # catalogo junto.
+    from repositorio import get_categorias
+    lbl(bar, "Categoria:").pack(side="left", padx=(14, 6))
+    _cats = [{"id": None, "nombre": "Todas"}] + list(get_categorias())
+    var_cat = tk.StringVar(value="Todas")
+    combo_cat = ttk.Combobox(bar, textvariable=var_cat, width=20,
+                             state="readonly",
+                             values=[c["nombre"] for c in _cats])
+    combo_cat.pack(side="left")
+
+    var_con_stock = tk.BooleanVar(value=False)
+    tk.Checkbutton(bar, text="Solo con stock", variable=var_con_stock,
+                   bg=C.bg, fg=C.texto, font=F.normal, selectcolor=C.bg,
+                   activebackground=C.bg).pack(side="left", padx=(14, 0))
 
     # Tabla
     COLS = [
@@ -376,7 +504,10 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
     def cargar(filtro=""):
         for r in tree.get_children():
             tree.delete(r)
-        for p in get_productos(filtro=filtro):
+        cat_id = _cats[[c["nombre"] for c in _cats].index(var_cat.get())]["id"]
+        for p in get_productos(filtro=filtro, categoria_id=cat_id):
+            if var_con_stock.get() and (p.get("stock") or 0) <= 0:
+                continue
             todos_prods[p["codigo"]] = p
             cant   = cantidades.get(p["codigo"], 1)
             sel    = "x" if p["codigo"] in cantidades else ""
@@ -403,6 +534,13 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
                     tree.set(cod, "cant", "1")
 
     cargar()
+    def _recargar(*_a):
+        cargar(entry_buscar.get().strip())
+        _actualizar_lbl()
+
+    combo_cat.bind("<<ComboboxSelected>>", _recargar)
+    var_con_stock.trace_add("write", _recargar)
+
     entry_buscar.bind("<KeyRelease>",
                       lambda e: cargar(entry_buscar.get().strip()))
 
@@ -484,8 +622,52 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
             tree.set(iid, "cant", "")
         _actualizar_lbl()
 
-    btn(bot, "Todo", variante="neutro", comando=_sel_todo).pack(side="left", padx=(0,4))
-    btn(bot, "Nada", variante="neutro", comando=_desel_todo).pack(side="left")
+    # Con filtros activos, "Todo" hacia pensar que marcaba el catalogo entero
+    def _aprovechar():
+        """Muestra cuanto se desperdicia y deja arreglarlo en el momento."""
+        from config import set as cfg_set
+        r = aprovechamiento_hoja()
+        if r["pct_desperdiciado"] < 8:
+            messagebox.showinfo(
+                "Aprovechamiento",
+                f"La hoja está bien aprovechada: entran {r['por_hoja']} "
+                f"etiquetas y sobran {r['sobra_mm']:.0f} mm.", parent=d)
+            return
+
+        opciones = [o for o in r["opciones"] if o["por_hoja"] > r["por_hoja"]]
+        if not opciones:
+            messagebox.showinfo(
+                "Aprovechamiento",
+                f"Entran {r['por_hoja']} etiquetas y sobran "
+                f"{r['sobra_mm']:.0f} mm, pero achicarlas más dejaría el "
+                "precio ilegible desde el pasillo.", parent=d)
+            return
+
+        mejor = opciones[0]
+        gana = mejor["por_hoja"] - r["por_hoja"]
+        if messagebox.askyesno(
+                "Se puede aprovechar mejor",
+                f"Hoy entran {r['por_hoja']} etiquetas por hoja y quedan "
+                f"{r['sobra_mm']:.0f} mm sin usar abajo "
+                f"({r['pct_desperdiciado']:.0f}% de la hoja).\n\n"
+                f"Bajando el alto de {cfg().get('etiqueta_alto_mm')} mm a "
+                f"{mejor['alto']:.0f} mm entran {mejor['por_hoja']} "
+                f"({gana} más por hoja).\n\n"
+                "¿Lo aplico? Podés volver a cambiarlo en Config → "
+                "Etiquetas de góndola.", parent=d):
+            cfg_set("etiqueta_alto_mm", int(mejor["alto"]))
+            cfg_set("etiqueta_filas", mejor["filas"])
+            messagebox.showinfo(
+                "Listo",
+                f"Ahora entran {mejor['por_hoja']} etiquetas por hoja.\n\n"
+                "Generá el PDF para verlo.", parent=d)
+
+    btn(bot, "📐 Aprovechar la hoja", variante="neutro",
+        comando=_aprovechar).pack(side="left", padx=(0,10))
+    btn(bot, "Marcar los visibles", variante="neutro",
+        comando=_sel_todo).pack(side="left", padx=(0,4))
+    btn(bot, "Desmarcar todo", variante="neutro",
+        comando=_desel_todo).pack(side="left")
 
     def generar():
         if not cantidades:

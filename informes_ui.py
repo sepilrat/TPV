@@ -126,6 +126,7 @@ class InformesUI(ttk.Frame):
             ("  Productos  ",   self._build_productos),
             ("  Stock  ",       self._build_stock),
             ("  Rentabilidad ", self._build_rentabilidad),
+            ("  Cuando vendo ", self._build_cuando),
         ]
         for nombre, builder in tabs:
             f = ttk.Frame(nb)
@@ -433,6 +434,12 @@ class InformesUI(ttk.Frame):
         self._refrescar_dashboard()
         self._refrescar_stock()
 
+    def _rango_por_defecto(self):
+        """Ultimos 30 dias: el periodo que mejor muestra un patron."""
+        hoy = datetime.now()
+        return ((hoy - timedelta(days=29)).strftime("%Y-%m-%d"),
+                hoy.strftime("%Y-%m-%d"))
+
     def _on_tab_interno(self, event):
         """Refresca automáticamente al cambiar de tab interno."""
         tab = event.widget.tab(event.widget.select(), "text").strip()
@@ -445,6 +452,8 @@ class InformesUI(ttk.Frame):
             "Stock":        self._refrescar_stock,
             "Rentabilidad": lambda: self._refrescar_rentabilidad(
                                 self.r_desde.get(), self.r_hasta.get()),
+            "Cuando vendo": lambda: self._refrescar_cuando(
+                                self.c_desde.get(), self.c_hasta.get()),
         }
         fn = metodos.get(tab)
         if fn:
@@ -662,3 +671,152 @@ class InformesUI(ttk.Frame):
                 v["fecha_vencimiento"],
                 _fmt_cant(v['stock']),
             ), tags=tags)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Tab "Cuándo vendo" — comparación de períodos y ventas por hora
+# ══════════════════════════════════════════════════════════════════════════
+
+def _build_cuando(self, parent):
+    """Comparacion contra el periodo anterior y ventas por hora/dia.
+
+    Un numero solo no dice si vendiste bien: "$2.400.000" puede ser
+    excelente o pesimo. Y la hora ya estaba guardada en ventas.fecha
+    desde siempre, sin que nadie la mirara.
+    """
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(2, weight=1)
+
+    bar, self.c_desde, self.c_hasta = self._filtro_fechas(
+        parent, self._refrescar_cuando)
+    bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    # Arranca en los ultimos 30 dias: un mes suelto no alcanza para ver
+    # un patron de horarios.
+    d0, h0 = self._rango_por_defecto()
+    self.c_desde.delete(0, "end"); self.c_desde.insert(0, d0)
+    self.c_hasta.delete(0, "end"); self.c_hasta.insert(0, h0)
+
+    # ── Comparación vs período anterior ──────────────────────────────
+    card_cmp = card(parent)
+    card_cmp.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+    self.lbl_cmp_titulo = lbl(card_cmp, "", variante="subtitulo",
+                              bg=C.superficie)
+    self.lbl_cmp_titulo.pack(anchor="w", padx=16, pady=(12, 6))
+
+    self._cmp_filas = {}
+    grilla = tk.Frame(card_cmp, bg=C.superficie)
+    grilla.pack(fill="x", padx=16, pady=(0, 14))
+    for i, etq in enumerate(("", "Este período", "Anterior", "Variación")):
+        tk.Label(grilla, text=etq, bg=C.superficie, fg=C.texto_suave,
+                 font=F.pequeña, anchor="w" if i == 0 else "e",
+                 width=18 if i == 0 else 15).grid(row=0, column=i, sticky="ew",
+                                                  padx=4, pady=(0, 4))
+    for fila, (clave, etq) in enumerate((
+            ("facturado", "Facturado"), ("tickets", "Tickets"),
+            ("unidades", "Unidades"), ("ticket_prom", "Ticket promedio")),
+            start=1):
+        tk.Label(grilla, text=etq, bg=C.superficie, fg=C.texto,
+                 font=F.normal, anchor="w").grid(row=fila, column=0,
+                                                 sticky="w", padx=4, pady=2)
+        celdas = []
+        for col in (1, 2, 3):
+            l = tk.Label(grilla, text="—", bg=C.superficie, fg=C.texto,
+                         font=F.normal if col < 3 else F.subtitulo, anchor="e")
+            l.grid(row=fila, column=col, sticky="e", padx=4, pady=2)
+            celdas.append(l)
+        self._cmp_filas[clave] = celdas
+
+    # ── Por hora y por día ───────────────────────────────────────────
+    cont = tk.Frame(parent, bg=C.bg)
+    cont.grid(row=2, column=0, sticky="nsew")
+    cont.columnconfigure(0, weight=3)
+    cont.columnconfigure(1, weight=2)
+    cont.rowconfigure(0, weight=1)
+
+    izq = card(cont)
+    izq.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    lbl(izq, "A qué hora vendés", variante="subtitulo",
+        bg=C.superficie).pack(anchor="w", padx=16, pady=(12, 2))
+    lbl(izq, "Las horas sin ventas también se muestran: los huecos "
+             "son información.", variante="suave",
+        bg=C.superficie).pack(anchor="w", padx=16)
+    self.txt_horas = tk.Text(izq, font=F.mono, bg=C.superficie, fg=C.texto,
+                             relief="flat", height=16, wrap="none")
+    self.txt_horas.pack(fill="both", expand=True, padx=16, pady=(8, 14))
+
+    der = card(cont)
+    der.grid(row=0, column=1, sticky="nsew")
+    lbl(der, "Qué día vendés más", variante="subtitulo",
+        bg=C.superficie).pack(anchor="w", padx=16, pady=(12, 2))
+    lbl(der, "Promedio por jornada, no total: un período con 5 lunes y "
+             "4 martes haría parecer que el lunes vende más.",
+        variante="suave", bg=C.superficie).pack(anchor="w", padx=16)
+    self.txt_dias = tk.Text(der, font=F.mono, bg=C.superficie, fg=C.texto,
+                            relief="flat", height=16, wrap="none")
+    self.txt_dias.pack(fill="both", expand=True, padx=16, pady=(8, 14))
+
+
+def _refrescar_cuando(self, desde, hasta):
+    from repositorio import (comparar_periodos, get_ventas_por_hora,
+                             get_ventas_por_dia_semana)
+    self._cuando_rango = (desde, hasta)
+    try:
+        cmp_ = comparar_periodos(desde, hasta)
+        horas = get_ventas_por_hora(desde, hasta)
+        dias = get_ventas_por_dia_semana(desde, hasta)
+    except Exception as exc:
+        self.lbl_cmp_titulo.config(text=f"No se pudo calcular: {exc}")
+        return
+
+    a, b = cmp_["anterior"], cmp_["actual"]
+    self.lbl_cmp_titulo.config(
+        text=(f"{b['desde']} a {b['hasta']} ({cmp_['dias']} días)   "
+              f"contra   {a['desde']} a {a['hasta']}"))
+
+    def _fmt(clave, valor):
+        if clave in ("facturado", "ticket_prom"):
+            return f"$ {valor:,.2f}"
+        return f"{valor:g}"
+
+    for clave, celdas in self._cmp_filas.items():
+        celdas[0].config(text=_fmt(clave, cmp_["actual"][clave]))
+        celdas[1].config(text=_fmt(clave, cmp_["anterior"][clave]))
+        var = cmp_["var"][clave]
+        if var is None:
+            celdas[2].config(text="—", fg=C.texto_suave)
+        else:
+            celdas[2].config(text=f"{var:+.1f}%",
+                             fg=C.exito if var >= 0 else C.peligro)
+
+    # Barras de texto: se leen igual que un gráfico y no dependen de
+    # ninguna librería de dibujo.
+    self.txt_horas.config(state="normal")
+    self.txt_horas.delete("1.0", "end")
+    con_venta = [h for h in horas if h["tickets"]]
+    if not con_venta:
+        self.txt_horas.insert("end", "Sin ventas en el período.")
+    else:
+        maxf = max(h["facturado"] for h in horas) or 1
+        h_ini = max(0, min(h["h"] for h in con_venta) - 1)
+        h_fin = min(23, max(h["h"] for h in con_venta) + 1)
+        pico = max(con_venta, key=lambda x: x["facturado"])
+        for h in horas[h_ini:h_fin + 1]:
+            barra = "█" * int(h["facturado"] / maxf * 26)
+            marca = "  ← pico" if h["h"] == pico["h"] else ""
+            self.txt_horas.insert(
+                "end", f"{h['h']:02d}:00  {h['tickets']:>4} tk  "
+                       f"$ {h['facturado']:>10,.0f}  {barra}{marca}\n")
+    self.txt_horas.config(state="disabled")
+
+    self.txt_dias.config(state="normal")
+    self.txt_dias.delete("1.0", "end")
+    maxd = max((d["promedio_dia"] for d in dias), default=0) or 1
+    for d in dias:
+        barra = "█" * int(d["promedio_dia"] / maxd * 14)
+        self.txt_dias.insert(
+            "end", f"{d['dia'][:9]:<10} $ {d['promedio_dia']:>9,.0f}  {barra}\n")
+    self.txt_dias.config(state="disabled")
+
+
+InformesUI._build_cuando = _build_cuando
+InformesUI._refrescar_cuando = _refrescar_cuando

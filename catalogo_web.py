@@ -7,6 +7,7 @@ TPV v2.0
 Requiere tener desplegada la Apps Script Web App (ver
 apps_script_catalogo.gs) y su URL cargada en Config > Catálogo web.
 """
+import logging
 import json
 import urllib.request
 import urllib.error
@@ -157,6 +158,16 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
         else:
             detalle = (f" — {con_foto_convertida} de {con_foto_asignada} foto(s) "
                       f"incluida(s). Fallaron: " + "; ".join(errores[:5]))
+        # Queda registrado para poder avisar si alguien reparte un link de
+        # vendedor sin haber subido nunca el catalogo.
+        try:
+            from config import set as cfg_set
+            from datetime import datetime as _dt
+            cfg_set("catalogo_web_ultima_sync",
+                    _dt.now().strftime("%Y-%m-%d %H:%M"))
+            cfg_set("catalogo_web_ultima_cantidad", int(data.get("cantidad", 0)))
+        except Exception as e:
+            logging.debug(f"No se pudo registrar la fecha de sincronizacion: {e}")
         return True, f"Sincronizados {data.get('cantidad', 0)} producto(s).{detalle}"
     return False, f"El servicio devolvió un error: {data.get('error', '(sin detalle)')}"
 
@@ -237,7 +248,8 @@ def sincronizar_vendedores(url: str = None) -> tuple[bool, str]:
     if not url:
         return False, "No hay una URL de sincronización configurada."
 
-    from repositorio import get_vendedores
+    from repositorio import (get_vendedores, get_categorias,
+                             get_categorias_vendedor)
     vendedores = [{
         "codigo": v["codigo"],
         "nombre": v["nombre"],
@@ -246,6 +258,12 @@ def sincronizar_vendedores(url: str = None) -> tuple[bool, str]:
         "telefono": v.get("telefono") or "",
         "comision_pct": v["comision_pct"],
         "modo_cobro": v["modo_cobro"],
+        "modo_comision": v["modo_comision"] if "modo_comision" in v.keys()
+                         else "recargo",
+        # Categorias habilitadas, separadas por "|". Vacio = ve todo.
+        "categorias": "|".join(
+            c["nombre"] for c in get_categorias()
+            if c["id"] in set(get_categorias_vendedor(v["id"]))),
         "activo": bool(v["activo"]),
     } for v in get_vendedores()]
 

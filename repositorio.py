@@ -112,185 +112,6 @@ def resolver_codigo(codigo: str) -> dict | None:
     return prod
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PIEZAS (mercaderia de peso variable: hormas, piezas de fiambre)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def registrar_piezas(producto_id, piezas, proveedor_id=None, notas="") -> dict:
-    """Ingresa varias piezas en un mismo lote, cada una con SU peso y costo.
-
-    piezas: [{"peso": 3.850, "costo_kg": 10416.67, "etiqueta": "H-001",
-              "vencimiento": "2026-09-15", "merma_pct": 4.0}, ...]
-
-    Crea un lote por los kilos totales (para que el stock global siga
-    cuadrando) y una fila en piezas por cada horma. El lote sirve para el
-    total; la pieza es la que manda a la hora de imputar costo.
-    """
-    if not piezas:
-        raise ValueError("No se cargo ninguna pieza")
-
-    total_kg = sum(float(p["peso"]) for p in piezas)
-    if total_kg <= 0:
-        raise ValueError("El peso total tiene que ser mayor a cero")
-    costo_prom = sum(float(p["peso"]) * float(p.get("costo_kg") or 0)
-                     for p in piezas) / total_kg
-
-    conn = get_connection()
-    try:
-        cur = conn.execute("""
-            INSERT INTO lotes (producto_id, proveedor_id, cantidad,
-                               cantidad_restante, costo_unitario, tipo, notas)
-            VALUES (?,?,?,?,?,'ingreso',?)
-        """, (producto_id, proveedor_id, total_kg, total_kg, costo_prom,
-              notas or f"{len(piezas)} pieza(s) de peso variable"))
-        lote_id = cur.lastrowid
-
-        ids = []
-        for i, pz in enumerate(piezas, start=1):
-            peso = float(pz["peso"])
-            etiqueta = (pz.get("etiqueta") or "").strip() or None
-            c2 = conn.execute("""
-                INSERT INTO piezas (producto_id, lote_id, etiqueta, peso_inicial,
-                                    peso_restante, costo_kg, merma_pct,
-                                    estado, vencimiento)
-                VALUES (?,?,?,?,?,?,?,'cerrada',?)
-            """, (producto_id, lote_id, etiqueta, peso, peso,
-                  float(pz.get("costo_kg") or 0), float(pz.get("merma_pct") or 0),
-                  pz.get("vencimiento")))
-            pid = c2.lastrowid
-            if not etiqueta:
-                conn.execute("UPDATE piezas SET etiqueta=? WHERE id=?",
-                             (f"#{pid}", pid))
-            ids.append(pid)
-
-        conn.execute("""
-            UPDATE productos SET costo_ultimo=?,
-                   modificado_en=datetime('now','localtime')
-            WHERE id=?
-        """, (costo_prom, producto_id))
-        conn.commit()
-        return {"lote_id": lote_id, "pieza_ids": ids,
-                "total_kg": total_kg, "costo_promedio": costo_prom}
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def get_piezas(producto_id=None, estados=("cerrada", "abierta")) -> list:
-    cond, params = ["p.peso_restante > 0.0001"], []
-    if producto_id:
-        cond.append("p.producto_id = ?"); params.append(producto_id)
-    if estados:
-        cond.append("p.estado IN (%s)" % ",".join("?" * len(estados)))
-        params += list(estados)
-    with get_connection() as conn:
-        return [dict(r) for r in conn.execute(f"""
-            SELECT p.*, pr.descripcion as producto_descripcion
-            FROM piezas p JOIN productos pr ON pr.id = p.producto_id
-            WHERE {" AND ".join(cond)}
-            ORDER BY (p.estado='abierta') DESC, p.vencimiento IS NULL,
-                     p.vencimiento, p.id
-        """, params).fetchall()]
-
-
-def get_pieza_activa(producto_id) -> dict | None:
-    """La pieza que se esta cortando ahora. None si no hay ninguna abierta."""
-    abiertas = get_piezas(producto_id, estados=("abierta",))
-    return abiertas[0] if abiertas else None
-
-
-def abrir_pieza(pieza_id) -> dict:
-    with get_connection() as conn:
-        conn.execute("""
-            UPDATE piezas SET estado='abierta',
-                   abierta_en=COALESCE(abierta_en, datetime('now','localtime'))
-            WHERE id=? AND estado='cerrada'
-        """, (pieza_id,))
-        return dict(conn.execute("SELECT * FROM piezas WHERE id=?",
-                                 (pieza_id,)).fetchone())
-
-
-def consumir_pieza(pieza_id, cantidad, detalle_venta_id=None) -> dict:
-    """Descuenta kilos de UNA pieza concreta y deja el rastro del costo.
-
-    No usa FIFO: el cortador elige de que horma corta, y el costo que se
-    imputa es el de esa horma. Es la unica forma de que la rentabilidad
-    refleje lo que paso de verdad.
-    """
-    cantidad = float(cantidad)
-    conn = get_connection()
-    try:
-        pz = conn.execute("SELECT * FROM piezas WHERE id=?", (pieza_id,)).fetchone()
-        if not pz:
-            raise ValueError("La pieza no existe")
-        if cantidad <= 0:
-            raise ValueError("La cantidad tiene que ser mayor a cero")
-        if cantidad > pz["peso_restante"] + 1e-6:
-            raise ValueError(
-                f"La pieza {pz['etiqueta']} tiene {pz['peso_restante']:.3f} kg, "
-                f"no alcanzan para {cantidad:.3f} kg")
-
-        restante = pz["peso_restante"] - cantidad
-        estado = "terminada" if restante <= 1e-6 else "abierta"
-        conn.execute("""
-            UPDATE piezas
-            SET peso_restante=?, estado=?,
-                abierta_en=COALESCE(abierta_en, datetime('now','localtime')),
-                cerrada_en=CASE WHEN ?='terminada'
-                                THEN datetime('now','localtime') ELSE cerrada_en END
-            WHERE id=?
-        """, (max(0.0, restante), estado, estado, pieza_id))
-
-        if detalle_venta_id:
-            conn.execute("""
-                INSERT INTO detalle_ventas_piezas
-                    (detalle_venta_id, pieza_id, cantidad, costo_kg)
-                VALUES (?,?,?,?)
-            """, (detalle_venta_id, pieza_id, cantidad, pz["costo_kg"]))
-
-        conn.commit()
-        return {"pieza_id": pieza_id, "restante": max(0.0, restante),
-                "estado": estado, "costo_kg": pz["costo_kg"],
-                "costo_total": cantidad * pz["costo_kg"]}
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def rendimiento_pieza(pieza_id) -> dict | None:
-    """Cuanto rindio realmente una horma ya terminada.
-
-    Compara el peso que se cargo contra el que se llego a vender. La
-    diferencia es la merma REAL, que es el numero que sirve para calibrar
-    el porcentaje estimado de la proxima compra.
-    """
-    with get_connection() as conn:
-        pz = conn.execute("SELECT * FROM piezas WHERE id=?", (pieza_id,)).fetchone()
-        if not pz:
-            return None
-        vendido = conn.execute("""
-            SELECT COALESCE(SUM(cantidad), 0) FROM detalle_ventas_piezas
-            WHERE pieza_id = ?
-        """, (pieza_id,)).fetchone()[0]
-
-    inicial = pz["peso_inicial"]
-    merma_real = inicial - vendido - pz["peso_restante"]
-    return {
-        "etiqueta": pz["etiqueta"],
-        "peso_inicial": inicial,
-        "vendido": vendido,
-        "restante": pz["peso_restante"],
-        "merma_real_kg": merma_real,
-        "merma_real_pct": (merma_real / inicial * 100) if inicial else 0,
-        "merma_estimada_pct": pz["merma_pct"],
-        "estado": pz["estado"],
-    }
-
-
 def describir_stock(producto_id: int) -> str:
     """Traduce el stock a como esta fisicamente en la gondola.
 
@@ -302,22 +123,6 @@ def describir_stock(producto_id: int) -> str:
         1630 unidades  ->  "9 bolsas 800 g cerradas + 136 sueltos"
     """
     stock = get_stock_producto(producto_id)
-
-    # Peso variable: lo que importa no son los kilos totales sino cuantas
-    # piezas cerradas quedan y cuanto le queda a la que esta abierta.
-    piezas = get_piezas(producto_id)
-    if piezas:
-        cerradas = [p for p in piezas if p["estado"] == "cerrada"]
-        abiertas = [p for p in piezas if p["estado"] == "abierta"]
-        partes = []
-        if cerradas:
-            kg = sum(p["peso_restante"] for p in cerradas)
-            partes.append(f"{len(cerradas)} pieza{'s' if len(cerradas) > 1 else ''} "
-                          f"cerrada{'s' if len(cerradas) > 1 else ''} ({kg:.3f} kg)")
-        for p in abiertas:
-            partes.append(f"{p['etiqueta']} abierta con {p['peso_restante']:.3f} kg")
-        return " + ".join(partes) if partes else "sin stock"
-
     presentaciones = get_presentaciones(producto_id)
     if not presentaciones:
         return f"{stock:g}"
@@ -410,6 +215,10 @@ def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
 def actualizar_producto(pid, descripcion, codigo, categoria_id,
                         precio_base, costo_ultimo=None, margen_pct=None,
                         vendido_por_peso=0, imagen_url=None, marca=None):
+    # El redondeo es una regla del negocio, no una accion aparte: si
+    # se aplica solo en algunas pantallas, el catalogo termina mitad
+    # redondeado y mitad con decimales.
+    precio_base = redondear_precio(precio_base)
     with get_connection() as conn:
         conn.execute("""
             UPDATE productos
@@ -612,7 +421,10 @@ def abrir_pieza_entera(producto_entero_id: int, producto_fraccionado_id: int,
                      diferencia, motivo, notas, autorizado_por)
                 VALUES (?,?,?,?,?,?,?,?)
             """, (pid, lote_nuevo if dif > 0 else None, ant, nue, dif,
-                  "Apertura de horma", txt, autorizado_por or None))
+                  "Fraccionamiento", txt,
+                  # NOT NULL en la tabla: sin autorizacion explicita queda
+                  # constancia de que lo hizo el sistema, no un usuario.
+                  autorizado_por or "sistema"))
 
         conn.commit()
         return {"peso": peso, "costo_kg": costo_kg,
@@ -643,6 +455,164 @@ def get_historial_ajustes(producto_id: int = None, limit: int = 100) -> list:
                 ORDER BY a.fecha DESC LIMIT ?
             """, (limit,)).fetchall()
         return [dict(r) for r in filas]
+
+
+def get_reposicion(dias_historial=30, dias_cobertura=14,
+                   solo_faltantes=True) -> list:
+    """Que comprar, calculado por velocidad de venta y no por un umbral fijo.
+
+    "Stock bajo" con un numero fijo para todo el catalogo no sirve: 5
+    unidades de algo que se vende 20 por dia es una urgencia, y 5 de algo
+    que sale uno por mes es sobrestock. Lo que importa es cuantos DIAS
+    dura lo que hay.
+
+    dias_historial: sobre cuantos dias se mide la velocidad de venta.
+    dias_cobertura: para cuantos dias se quiere tener stock.
+    """
+    from datetime import timedelta
+    hasta = datetime.now()
+    desde = (hasta - timedelta(days=dias_historial)).strftime("%Y-%m-%d")
+
+    with get_connection() as conn:
+        filas = [dict(r) for r in conn.execute("""
+            SELECT p.id, p.codigo, p.descripcion, p.marca, p.precio_base,
+                   p.costo_ultimo, p.vendido_por_peso,
+                   c.nombre as categoria,
+                   COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
+                              WHERE l.producto_id = p.id), 0) as stock,
+                   COALESCE((SELECT SUM(dv.cantidad)
+                               FROM detalle_ventas dv
+                               JOIN ventas v ON v.id = dv.venta_id
+                              WHERE dv.producto_id = p.id
+                                AND v.anulada = 0
+                                AND date(v.fecha) >= date(?)), 0) as vendido,
+                   (SELECT pv.nombre FROM lotes l
+                      LEFT JOIN proveedores pv ON pv.id = l.proveedor_id
+                     WHERE l.producto_id = p.id AND pv.nombre IS NOT NULL
+                  ORDER BY l.fecha_ingreso DESC LIMIT 1) as proveedor
+            FROM productos p
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            WHERE COALESCE(p.activo, 1) = 1
+              AND COALESCE(p.ignorar_alerta, 0) = 0
+        """, (desde,)).fetchall()]
+
+    salida = []
+    for f in filas:
+        por_dia = (f["vendido"] or 0) / dias_historial
+        stock = f["stock"] or 0
+        if por_dia > 0:
+            dias = stock / por_dia
+        else:
+            # Sin ventas en el periodo no hay velocidad que medir. Se
+            # marca aparte en vez de inventar un numero.
+            dias = None
+        sugerido = max(0.0, por_dia * dias_cobertura - stock) if por_dia > 0 else 0.0
+        if f["vendido_por_peso"]:
+            sugerido = round(sugerido, 3)
+        else:
+            sugerido = float(int(sugerido + 0.999))   # unidades enteras
+
+        f["por_dia"] = por_dia
+        f["dias_stock"] = dias
+        f["sugerido"] = sugerido
+        f["costo_reposicion"] = sugerido * (f["costo_ultimo"] or 0)
+        if dias is None:
+            f["urgencia"] = "sin ventas"
+        elif stock <= 0:
+            f["urgencia"] = "sin stock"
+        elif dias <= 3:
+            f["urgencia"] = "urgente"
+        elif dias <= dias_cobertura:
+            f["urgencia"] = "reponer"
+        else:
+            f["urgencia"] = "ok"
+
+        if solo_faltantes and f["urgencia"] in ("ok", "sin ventas"):
+            continue
+        salida.append(f)
+
+    orden = {"sin stock": 0, "urgente": 1, "reponer": 2, "ok": 3, "sin ventas": 4}
+    salida.sort(key=lambda x: (orden[x["urgencia"]],
+                               x["dias_stock"] if x["dias_stock"] is not None else 999))
+    return salida
+
+
+def get_stock_muerto(dias=90, minimo_valor=0.0) -> list:
+    """Plata parada: lo que tiene stock y no rota.
+
+    Es el reverso de get_reposicion(). Alla se ve que falta; aca, que
+    sobra. Un producto con 30 unidades y cero ventas en 90 dias es
+    capital dormido en gondola, y no aparece en ninguna alerta porque
+    justamente NO se esta agotando.
+
+    Devuelve cada producto con:
+        dias_sin_vender   dias desde la ultima venta (None = nunca se vendio)
+        capital           stock x costo, o sea la plata inmovilizada
+        vendido_periodo   unidades vendidas en la ventana
+    """
+    from datetime import timedelta
+    hoy = datetime.now()
+    desde = (hoy - timedelta(days=dias)).strftime("%Y-%m-%d")
+
+    with get_connection() as conn:
+        filas = [dict(r) for r in conn.execute("""
+            SELECT p.id, p.codigo, p.descripcion, p.marca, p.precio_base,
+                   p.costo_ultimo, c.nombre as categoria,
+                   COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
+                              WHERE l.producto_id = p.id), 0) as stock,
+                   COALESCE((SELECT SUM(dv.cantidad) FROM detalle_ventas dv
+                               JOIN ventas v ON v.id = dv.venta_id
+                              WHERE dv.producto_id = p.id AND v.anulada = 0
+                                AND date(v.fecha) >= date(?)), 0) as vendido,
+                   (SELECT MAX(v.fecha) FROM detalle_ventas dv
+                      JOIN ventas v ON v.id = dv.venta_id
+                     WHERE dv.producto_id = p.id AND v.anulada = 0) as ultima_venta,
+                   (SELECT MIN(l.fecha_ingreso) FROM lotes l
+                     WHERE l.producto_id = p.id AND l.cantidad_restante > 0)
+                       as ingreso_mas_viejo
+            FROM productos p
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            WHERE COALESCE(p.activo, 1) = 1
+        """, (desde,)).fetchall()]
+
+    salida = []
+    for f in filas:
+        if (f["stock"] or 0) <= 0 or (f["vendido"] or 0) > 0:
+            continue          # sin stock no hay plata parada; si vendio, rota
+
+        if f["ultima_venta"]:
+            try:
+                ult = datetime.strptime(f["ultima_venta"][:10], "%Y-%m-%d")
+                f["dias_sin_vender"] = (hoy - ult).days
+            except ValueError:
+                f["dias_sin_vender"] = None
+        else:
+            f["dias_sin_vender"] = None      # nunca se vendio
+
+        f["capital"] = (f["stock"] or 0) * (f["costo_ultimo"] or 0)
+        f["vendido_periodo"] = f["vendido"] or 0
+        if f["capital"] < minimo_valor:
+            continue
+        salida.append(f)
+
+    # Primero donde hay mas plata atrapada: es donde conviene actuar
+    salida.sort(key=lambda x: -x["capital"])
+    return salida
+
+
+def valor_inventario() -> dict:
+    """Cuanta plata hay en gondola, a costo y a precio de venta."""
+    with get_connection() as conn:
+        r = conn.execute("""
+            SELECT COUNT(DISTINCT p.id) as productos,
+                   COALESCE(SUM(l.cantidad_restante * l.costo_unitario), 0) as costo,
+                   COALESCE(SUM(l.cantidad_restante * p.precio_base), 0) as venta
+            FROM lotes l
+            JOIN productos p ON p.id = l.producto_id
+            WHERE l.cantidad_restante > 0 AND COALESCE(p.activo, 1) = 1
+        """).fetchone()
+    return {"productos": r["productos"], "costo": r["costo"] or 0.0,
+            "venta": r["venta"] or 0.0}
 
 
 def get_informe_stock(solo_criticos=False, umbral=None) -> list:
@@ -811,29 +781,48 @@ def toggle_ignorar_alerta(pid: int, valor: int):
         conn.commit()
 
 
-def redondear_precio(precio: float, paso: int = None) -> float:
-    """Redondea SIEMPRE hacia arriba al multiplo configurado.
+def redondear_precio(precio: float, paso: int = None, modo: str = None) -> float:
+    """Redondea al multiplo configurado.
 
-    Hacia arriba y no al mas cercano: redondear para abajo es regalar
-    margen en cada venta. La diferencia por unidad es centavos, pero sobre
-    miles de tickets no lo es.
+    modo:
+      "cercano" — al multiplo mas proximo. Con paso 100: 1.440 baja a 1.400
+                  y 1.460 sube a 1.500. Justo la mitad sube.
+      "arriba"  — siempre al siguiente multiplo. Nunca se pierde margen,
+                  pero puede empujar bastante los precios bajos.
+      "abajo"   — siempre al multiplo anterior. Deja precios prolijos y
+                  algo mas baratos, a costa de resignar margen.
 
-    paso=0 (o None con la config en 0) devuelve el precio tal cual.
+    paso=0 (o la config en 0) devuelve el precio tal cual.
     """
     import math
-    if paso is None:
+    if paso is None or modo is None:
         try:
             from config import cfg
-            paso = cfg().get("redondeo_precios", 0)
+            c = cfg()
+            if paso is None:
+                paso = c.get("redondeo_precios", 0)
+            if modo is None:
+                modo = c.get("redondeo_modo", "cercano")
         except Exception:
-            paso = 0
+            paso = paso if paso is not None else 0
+            modo = modo or "cercano"
+
     paso = int(paso or 0)
     if paso <= 0:
         return round(float(precio), 2)
-    return float(math.ceil(float(precio) / paso) * paso)
+
+    valor = float(precio)
+    if modo == "arriba":
+        return float(math.ceil(valor / paso) * paso)
+    if modo == "abajo":
+        return float(math.floor(valor / paso) * paso)
+
+    # cercano: la mitad exacta sube, que es lo habitual en precios
+    return float(math.floor(valor / paso + 0.5) * paso)
 
 
-def redondear_todos_los_precios(paso: int = None, solo_activos: bool = True) -> dict:
+def redondear_todos_los_precios(paso: int = None, solo_activos: bool = True,
+                                modo: str = None) -> dict:
     """Aplica el redondeo a todo el catalogo. Devuelve el detalle de cambios."""
     cond = "WHERE COALESCE(activo,1)=1" if solo_activos else ""
     cambios = []
@@ -844,7 +833,7 @@ def redondear_todos_los_precios(paso: int = None, solo_activos: bool = True) -> 
             viejo = float(f["precio_base"] or 0)
             if viejo <= 0:
                 continue
-            nuevo = redondear_precio(viejo, paso)
+            nuevo = redondear_precio(viejo, paso, modo)
             if abs(nuevo - viejo) < 0.005:
                 continue
             conn.execute("""UPDATE productos SET precio_base=?,
@@ -897,10 +886,29 @@ def evaluar_cambio_costo(producto_id: int, costo_nuevo: float) -> dict:
         direccion = "bajo"
     else:
         direccion = "igual"
+    # Stock que queda del costo VIEJO. Es el dato que decide: con FIFO
+    # ese stock se vende primero, asi que bajar el precio ahora significa
+    # venderlo con el margen (o la perdida) del costo nuevo.
+    with get_connection() as conn:
+        stock_viejo = conn.execute(
+            "SELECT COALESCE(SUM(cantidad_restante), 0) FROM lotes "
+            "WHERE producto_id = ? AND cantidad_restante > 0",
+            (producto_id,)).fetchone()[0] or 0.0
+
+    def _margen(precio, costo):
+        return ((precio - costo) / costo * 100) if costo else 0.0
+
     return {
         "costo_anterior": costo_anterior, "costo_nuevo": costo_nuevo,
         "precio_actual": precio_actual, "precio_sugerido": precio_sugerido,
         "direccion": direccion,
+        "stock_viejo": stock_viejo,
+        "margen_si_no_toca": _margen(precio_actual, costo_nuevo),
+        "margen_sugerido": _margen(precio_sugerido, costo_nuevo),
+        # Vender el stock viejo al precio nuevo puede dar perdida
+        "bajo_costo_viejo": (precio_sugerido < costo_anterior
+                             and stock_viejo > 0),
+        "perdida_por_unidad": max(0.0, costo_anterior - precio_sugerido),
     }
 
 
@@ -1242,12 +1250,59 @@ def eliminar_promocion(pid):
 
 
 def actualizar_precio(pid, nuevo_precio):
+    nuevo_precio = redondear_precio(nuevo_precio)
     with get_connection() as conn:
         conn.execute("""
             UPDATE productos SET precio_base=?,
             modificado_en=datetime('now','localtime') WHERE id=?
         """, (nuevo_precio, pid))
         conn.commit()
+
+
+def productos_bajo_costo(ids=None) -> list:
+    """Productos cuyo precio de venta quedo por debajo del costo.
+
+    Se usa para avisar ANTES de guardar un precio: vender bajo costo
+    puede ser deliberado (liquidar algo por vencer), pero por descuido
+    es plata que se pierde en cada venta sin que nada lo marque.
+    """
+    cond, params = ["COALESCE(p.activo,1)=1",
+                    "COALESCE(p.costo_ultimo,0) > 0",
+                    "p.precio_base < p.costo_ultimo"], []
+    if ids:
+        cond.append("p.id IN (%s)" % ",".join("?" * len(ids)))
+        params += list(ids)
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute(f"""
+            SELECT p.id, p.codigo, p.descripcion, p.precio_base,
+                   p.costo_ultimo,
+                   (p.costo_ultimo - p.precio_base) as perdida_unidad
+            FROM productos p
+            WHERE {" AND ".join(cond)}
+            ORDER BY perdida_unidad DESC
+        """, params).fetchall()]
+
+
+def _redondear_ids(conn, ids):
+    """Aplica el redondeo configurado a los productos indicados."""
+    paso = 0
+    try:
+        from config import cfg
+        paso = int(cfg().get("redondeo_precios", 0) or 0)
+        modo = str(cfg().get("redondeo_modo", "cercano"))
+    except Exception:
+        modo = "cercano"
+    if paso <= 0:
+        return
+    marcas = ",".join("?" * len(ids))
+    filas = conn.execute(
+        f"SELECT id, precio_base FROM productos WHERE id IN ({marcas})",
+        ids).fetchall()
+    for f in filas:
+        nuevo = redondear_precio(f["precio_base"] or 0, paso, modo)
+        if abs(nuevo - (f["precio_base"] or 0)) >= 0.005:
+            conn.execute("UPDATE productos SET precio_base=? WHERE id=?",
+                         (nuevo, f["id"]))
 
 
 def aplicar_aumento_bulk(ids: list, pct: float):
@@ -1258,6 +1313,7 @@ def aplicar_aumento_bulk(ids: list, pct: float):
                 modificado_en = datetime('now','localtime')
             WHERE id IN ({','.join('?'*len(ids))})
         """, [pct] + ids)
+        _redondear_ids(conn, ids)
         conn.commit()
 
 
@@ -1279,6 +1335,7 @@ def aplicar_margen_nuevo_bulk(ids: list, margen_pct: float):
                 modificado_en = datetime('now','localtime')
             WHERE id IN ({','.join('?'*len(ids))})
         """, [margen_pct, margen_pct] + ids)
+        _redondear_ids(conn, ids)
         conn.commit()
 
 
@@ -1300,6 +1357,7 @@ def aplicar_margen_bulk(ids: list):
                 modificado_en = datetime('now','localtime')
             WHERE id IN ({','.join('?'*len(ids))}) AND costo_ultimo > 0
         """, ids)
+        _redondear_ids(conn, ids)
         conn.commit()
 
 
@@ -1422,6 +1480,42 @@ def aplicar_promocion_bulk(ids: list, escalas: list[tuple[int, float]],
 # VENTAS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def validar_stock_carrito(items) -> list:
+    """Que items del carrito no tienen stock suficiente.
+
+    Se usa ANTES de cobrar: descubrirlo cuando ya se conto la plata
+    obliga a rehacer la venta con el cliente esperando.
+
+    Devuelve [{"descripcion", "pedido", "disponible"}] — vacio si esta ok.
+    """
+    faltantes = []
+    # Un mismo producto puede estar en dos lineas (granel + presentacion)
+    pedido = {}
+    for it in items:
+        pid = it.get("producto_id")
+        if pid:
+            pedido[pid] = pedido.get(pid, 0) + float(it.get("cantidad") or 0)
+
+    with get_connection() as conn:
+        for pid, cant in pedido.items():
+            r = conn.execute("""
+                SELECT p.descripcion, p.vendido_por_peso,
+                       COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
+                                  WHERE l.producto_id = p.id), 0) as stock
+                FROM productos p WHERE p.id = ?
+            """, (pid,)).fetchone()
+            if not r:
+                continue
+            # Margen de 1 g / 1 milesimo para no trabar por redondeo
+            if cant > (r["stock"] or 0) + 0.001:
+                faltantes.append({
+                    "descripcion": r["descripcion"],
+                    "pedido": cant, "disponible": r["stock"] or 0,
+                    "por_peso": bool(r["vendido_por_peso"]),
+                })
+    return faltantes
+
+
 def registrar_venta(sesion_id, items, metodo_pago,
                     descuento_pct=0.0, cliente_id=None) -> int | None:
     conn = get_connection()
@@ -1475,7 +1569,10 @@ def registrar_venta(sesion_id, items, metodo_pago,
         conn.rollback()
         import logging
         logging.error(f"Error registrando venta: {e}")
-        return None
+        # El motivo NO se traga: "no se pudo registrar la venta" no le
+        # sirve a nadie con un cliente esperando. Quien llama decide como
+        # mostrarlo, pero tiene que saber que producto fallo.
+        raise
     finally:
         conn.close()
 
@@ -1728,6 +1825,55 @@ def registrar_devolucion(venta_id: int, sesion_id: int, items: list,
         conn.close()
 
 
+def efectivo_esperado(sesion_id: int) -> dict:
+    """Cuanta plata TIENE que haber en el cajon ahora mismo.
+
+    fondo inicial + ventas en efectivo + ingresos manuales - egresos.
+    Las ventas con tarjeta, QR o cuenta corriente NO cuentan: no entra
+    plata al cajon. Confundir el total de la sesion con el efectivo es
+    el error clasico que hace parecer que falta plata todos los dias.
+    """
+    with get_connection() as conn:
+        s = conn.execute("SELECT fondo_inicial, total_efectivo "
+                         "FROM sesiones_caja WHERE id = ?", (sesion_id,)).fetchone()
+        if not s:
+            return {}
+        movs = conn.execute("""
+            SELECT COALESCE(SUM(CASE WHEN tipo='ingreso' THEN monto ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN tipo='egreso'  THEN monto ELSE 0 END), 0)
+            FROM movimientos_caja WHERE sesion_id = ?
+        """, (sesion_id,)).fetchone()
+
+    fondo = s["fondo_inicial"] or 0.0
+    ventas = s["total_efectivo"] or 0.0
+    ingresos, egresos = movs[0] or 0.0, movs[1] or 0.0
+    return {
+        "fondo_inicial": fondo,
+        "ventas_efectivo": ventas,
+        "ingresos_manuales": ingresos,
+        "egresos": egresos,
+        "esperado": round(fondo + ventas + ingresos - egresos, 2),
+    }
+
+
+def get_arqueos(desde=None, hasta=None, limit=60) -> list:
+    """Historial de cierres con su diferencia, para ver si hay un patron."""
+    cond, params = ["cerrada = 1"], []
+    if desde:
+        cond.append("date(cierre_en) >= date(?)"); params.append(desde)
+    if hasta:
+        cond.append("date(cierre_en) <= date(?)"); params.append(hasta)
+    params.append(limit)
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute(f"""
+            SELECT id, apertura_en, cierre_en, fondo_inicial, total_efectivo,
+                   efectivo_contado, diferencia, arqueo_notas, notas
+            FROM sesiones_caja
+            WHERE {" AND ".join(cond)}
+            ORDER BY cierre_en DESC LIMIT ?
+        """, params).fetchall()]
+
+
 def buscar_ventas(texto="", desde=None, hasta=None, solo_devolvibles=True,
                   limite=200) -> list:
     """Busca ventas para devolver, sin depender de la sesion abierta.
@@ -1874,6 +2020,106 @@ def get_ventas_periodo(desde, hasta) -> dict:
             FROM ventas
             WHERE date(fecha) BETWEEN ? AND ? AND anulada=0
         """, (desde, hasta)).fetchone())
+
+
+def comparar_periodos(desde, hasta) -> dict:
+    """El periodo elegido contra el anterior de la MISMA duracion.
+
+    Un numero solo no dice nada: "vendi $2.400.000" puede ser bueno o
+    malo. Y con inflacion, comparar solo pesos tampoco alcanza — por eso
+    se comparan tambien las unidades y la cantidad de tickets, que no se
+    inflan solos.
+    """
+    from datetime import datetime as _dt, timedelta
+    d1 = _dt.strptime(desde, "%Y-%m-%d").date()
+    d2 = _dt.strptime(hasta, "%Y-%m-%d").date()
+    dias = (d2 - d1).days + 1
+    ant_hasta = d1 - timedelta(days=1)
+    ant_desde = ant_hasta - timedelta(days=dias - 1)
+
+    def _medir(a, b):
+        with get_connection() as conn:
+            v = conn.execute("""
+                SELECT COUNT(*) as tickets,
+                       COALESCE(SUM(total), 0) as facturado,
+                       COALESCE(AVG(total), 0) as ticket_prom
+                FROM ventas
+                WHERE date(fecha) BETWEEN ? AND ? AND anulada = 0
+            """, (a.isoformat(), b.isoformat())).fetchone()
+            u = conn.execute("""
+                SELECT COALESCE(SUM(dv.cantidad), 0) as unidades,
+                       COUNT(DISTINCT dv.producto_id) as productos
+                FROM detalle_ventas dv
+                JOIN ventas ve ON ve.id = dv.venta_id
+                WHERE date(ve.fecha) BETWEEN ? AND ? AND ve.anulada = 0
+            """, (a.isoformat(), b.isoformat())).fetchone()
+        return {**dict(v), **dict(u), "desde": a.isoformat(), "hasta": b.isoformat()}
+
+    act = _medir(d1, d2)
+    ant = _medir(ant_desde, ant_hasta)
+
+    def _var(clave):
+        base = ant.get(clave) or 0
+        nuevo = act.get(clave) or 0
+        if not base:
+            return None            # sin base no hay porcentaje que valga
+        return (nuevo - base) / base * 100
+
+    return {
+        "dias": dias, "actual": act, "anterior": ant,
+        "var": {k: _var(k) for k in
+                ("tickets", "facturado", "ticket_prom", "unidades", "productos")},
+    }
+
+
+def get_ventas_por_hora(desde, hasta) -> list:
+    """Ventas agrupadas por hora del dia.
+
+    La hora ya se guarda en ventas.fecha desde siempre y nadie la usaba.
+    Sirve para saber cuando hace falta gente en el mostrador y cuando
+    conviene una promo para llenar los huecos.
+    """
+    with get_connection() as conn:
+        filas = {int(r["h"]): dict(r) for r in conn.execute("""
+            SELECT CAST(strftime('%H', fecha) AS INTEGER) as h,
+                   COUNT(*) as tickets,
+                   COALESCE(SUM(total), 0) as facturado
+            FROM ventas
+            WHERE date(fecha) BETWEEN ? AND ? AND anulada = 0
+            GROUP BY h
+        """, (desde, hasta)).fetchall()}
+    # Todas las horas, incluso las vacias: los huecos son informacion
+    return [filas.get(h, {"h": h, "tickets": 0, "facturado": 0.0})
+            for h in range(24)]
+
+
+def get_ventas_por_dia_semana(desde, hasta) -> list:
+    """Ventas por dia de la semana. 0 = domingo en SQLite."""
+    nombres = ["Domingo", "Lunes", "Martes", "Miercoles", "Jueves",
+               "Viernes", "Sabado"]
+    with get_connection() as conn:
+        filas = {int(r["d"]): dict(r) for r in conn.execute("""
+            SELECT CAST(strftime('%w', fecha) AS INTEGER) as d,
+                   COUNT(*) as tickets,
+                   COALESCE(SUM(total), 0) as facturado,
+                   COUNT(DISTINCT date(fecha)) as dias_contados
+            FROM ventas
+            WHERE date(fecha) BETWEEN ? AND ? AND anulada = 0
+            GROUP BY d
+        """, (desde, hasta)).fetchall()}
+    salida = []
+    for d in range(7):
+        f = filas.get(d, {"tickets": 0, "facturado": 0.0, "dias_contados": 0})
+        n = f.get("dias_contados") or 0
+        salida.append({
+            "dia": nombres[d], "tickets": f["tickets"],
+            "facturado": f["facturado"], "dias_contados": n,
+            # Promedio por jornada: sin esto, un periodo con 5 lunes y 4
+            # martes hace parecer que el lunes vende mas
+            "promedio_dia": (f["facturado"] / n) if n else 0.0,
+        })
+    # Se muestra de lunes a domingo, que es como uno piensa la semana
+    return salida[1:] + salida[:1]
 
 
 def get_ventas_por_dia(desde, hasta) -> list:
@@ -2290,8 +2536,278 @@ def get_vendedor_por_id(vid: int) -> dict | None:
         return dict(row) if row else None
 
 
+def productos_para_vendedor(productos: list, vendedor_id) -> tuple[list, float]:
+    """Adapta una lista de productos al precio y al surtido de un vendedor.
+
+    Devuelve (productos_ajustados, comision_pct).
+
+    - Si el vendedor tiene categorias asignadas, filtra a esas.
+    - Si su modo_comision es "recargo", suma costo x comision% al
+      precio_base y deja el recargo por unidad en la clave "_recargo",
+      para que las promos de precio fijo tambien lo incluyan.
+    - Si es "descuento", los precios quedan como estan: el cliente paga
+      lo mismo y la comision sale del margen del negocio.
+
+    vendedor_id None devuelve la lista intacta (lista general).
+    """
+    if not vendedor_id:
+        return list(productos), 0.0
+
+    with get_connection() as conn:
+        v = conn.execute("SELECT * FROM vendedores WHERE id=?",
+                         (vendedor_id,)).fetchone()
+    if not v:
+        return list(productos), 0.0
+    v = dict(v)
+
+    permitidas = set(get_categorias_vendedor(vendedor_id))
+    if permitidas:
+        nombres = {c["nombre"] for c in get_categorias() if c["id"] in permitidas}
+        productos = [p for p in productos if (p.get("categoria") or "") in nombres]
+
+    comision = float(v.get("comision_pct") or 0)
+    recarga = str(v.get("modo_comision") or "recargo").lower() == "recargo"
+
+    salida = []
+    for p in productos:
+        q = dict(p)
+        recargo = (float(q.get("costo_ultimo") or 0) * comision / 100) if recarga else 0.0
+        if recargo:
+            q["precio_base"] = round(float(q.get("precio_base") or 0) + recargo, 2)
+        q["_recargo"] = recargo
+        salida.append(q)
+    return salida, comision
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COLA DE REVISION — lista de trabajo de productos
+# ─────────────────────────────────────────────────────────────────────────────
+
+MOTIVOS_REVISION = ("Precio", "Costo", "Categoria", "Foto", "Descripcion",
+                    "Stock", "Otro")
+
+
+def marcar_para_revisar(producto_ids, motivo="Otro", notas="") -> int:
+    """Agrega productos a la cola. Si ya estaban, los vuelve a pendiente.
+
+    Devuelve cuantos quedaron pendientes.
+    """
+    ids = [producto_ids] if isinstance(producto_ids, int) else list(producto_ids)
+    if not ids:
+        return 0
+    with get_connection() as conn:
+        for pid in ids:
+            conn.execute("""
+                INSERT INTO revision_productos (producto_id, estado, motivo, notas)
+                VALUES (?, 'pendiente', ?, ?)
+                ON CONFLICT(producto_id) DO UPDATE SET
+                    estado = 'pendiente',
+                    motivo = excluded.motivo,
+                    notas = excluded.notas,
+                    creado_en = datetime('now','localtime'),
+                    revisado_en = NULL
+            """, (int(pid), motivo, notas))
+        conn.commit()
+    return len(ids)
+
+
+def cambiar_estado_revision(producto_ids, estado, notas=None):
+    """estado: 'pendiente' | 'revisado' | 'descartado'."""
+    ids = [producto_ids] if isinstance(producto_ids, int) else list(producto_ids)
+    if not ids:
+        return
+    with get_connection() as conn:
+        for pid in ids:
+            conn.execute("""
+                UPDATE revision_productos
+                SET estado = ?,
+                    revisado_en = CASE WHEN ? = 'pendiente' THEN NULL
+                                       ELSE datetime('now','localtime') END,
+                    notas = COALESCE(?, notas)
+                WHERE producto_id = ?
+            """, (estado, estado, notas, int(pid)))
+        conn.commit()
+
+
+def quitar_de_revision(producto_ids):
+    ids = [producto_ids] if isinstance(producto_ids, int) else list(producto_ids)
+    with get_connection() as conn:
+        for pid in ids:
+            conn.execute("DELETE FROM revision_productos WHERE producto_id = ?",
+                         (int(pid),))
+        conn.commit()
+
+
+def set_precio_base(producto_id: int, precio: float):
+    """Cambia solo el precio de venta. No toca costo ni margen."""
+    precio = redondear_precio(precio)
+    with get_connection() as conn:
+        conn.execute("""UPDATE productos SET precio_base = ?,
+                        modificado_en = datetime('now','localtime')
+                        WHERE id = ?""", (float(precio), int(producto_id)))
+        conn.commit()
+
+
+def get_productos_revision(estado=None, categoria_id=None, filtro="") -> list:
+    """TODOS los productos con su estado de revision.
+
+    Los que nunca se tocaron figuran como 'sin revisar': la revision es
+    un recorrido completo del catalogo, no una lista aparte. Lo que uno
+    necesita saber es por donde va, no que aparto.
+    """
+    cond, params = ["COALESCE(p.activo, 1) = 1"], []
+    if filtro:
+        cond.append("(p.descripcion LIKE ? OR p.codigo LIKE ? OR p.marca LIKE ?)")
+        like = f"%{filtro}%"
+        params += [like, like, like]
+    if categoria_id:
+        cond.append("p.categoria_id = ?"); params.append(categoria_id)
+    if estado == "sin_revisar":
+        cond.append("(r.estado IS NULL OR r.estado = 'pendiente')")
+    elif estado == "revisado":
+        cond.append("r.estado = 'revisado'")
+
+    with get_connection() as conn:
+        return [dict(x) for x in conn.execute(f"""
+            SELECT p.id as producto_id, p.codigo, p.descripcion, p.marca,
+                   p.precio_base, p.costo_ultimo, p.categoria_id,
+                   c.nombre as categoria,
+                   COALESCE(r.estado, 'sin revisar') as estado,
+                   r.notas, r.revisado_en,
+                   (SELECT COALESCE(SUM(cantidad_restante), 0) FROM lotes l
+                     WHERE l.producto_id = p.id) as stock
+            FROM productos p
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            LEFT JOIN revision_productos r ON r.producto_id = p.id
+            WHERE {" AND ".join(cond)}
+            ORDER BY c.nombre, p.descripcion
+        """, params).fetchall()]
+
+
+def progreso_revision() -> dict:
+    """Cuantos del catalogo activo ya se revisaron."""
+    with get_connection() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM productos WHERE COALESCE(activo,1)=1"
+        ).fetchone()[0]
+        hechos = conn.execute("""
+            SELECT COUNT(*) FROM revision_productos r
+            JOIN productos p ON p.id = r.producto_id
+            WHERE r.estado = 'revisado' AND COALESCE(p.activo,1)=1
+        """).fetchone()[0]
+    return {"total": total, "revisados": hechos,
+            "pendientes": total - hechos,
+            "pct": (hechos / total * 100) if total else 0.0}
+
+
+def reiniciar_revision():
+    """Arranca una revision nueva: todo vuelve a 'sin revisar'."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM revision_productos")
+        conn.commit()
+
+
+def get_revision(estado=None) -> list:
+    """Cola de revision con los datos del producto para poder decidir."""
+    cond, params = ["1=1"], []
+    if estado:
+        cond.append("r.estado = ?"); params.append(estado)
+    with get_connection() as conn:
+        return [dict(x) for x in conn.execute(f"""
+            SELECT r.producto_id, r.estado, r.motivo, r.notas,
+                   r.creado_en, r.revisado_en,
+                   p.codigo, p.descripcion, p.marca, p.precio_base,
+                   p.costo_ultimo, p.imagen_url, c.nombre as categoria,
+                   (SELECT COALESCE(SUM(cantidad_restante), 0) FROM lotes l
+                     WHERE l.producto_id = p.id) as stock
+            FROM revision_productos r
+            JOIN productos p ON p.id = r.producto_id
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            WHERE {" AND ".join(cond)}
+            ORDER BY (r.estado = 'pendiente') DESC, r.creado_en DESC
+        """, params).fetchall()]
+
+
+def contar_revision_pendiente() -> int:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM revision_productos WHERE estado='pendiente'"
+        ).fetchone()[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BITACORA — quien autorizo cada accion sensible
+# ─────────────────────────────────────────────────────────────────────────────
+
+def registrar_bitacora(accion, responsable, detalle="", monto=None,
+                       referencia=None):
+    """Deja constancia de una accion que mueve plata o stock.
+
+    No es un log tecnico: es lo que permite explicar una diferencia de
+    caja tres dias despues. Se guarda quien la autorizo, cuanto y sobre
+    que.
+    """
+    try:
+        with get_connection() as conn:
+            conn.execute("""
+                INSERT INTO bitacora (accion, detalle, monto, responsable,
+                                      referencia)
+                VALUES (?,?,?,?,?)
+            """, (accion, detalle, monto, responsable or "sin identificar",
+                  str(referencia) if referencia is not None else None))
+            conn.commit()
+    except Exception as e:
+        # Nunca frenar la operacion por no poder registrarla
+        logging.warning(f"No se pudo escribir en la bitacora: {e}")
+
+
+def get_bitacora(desde=None, hasta=None, accion=None, limite=300) -> list:
+    cond, params = ["1=1"], []
+    if desde:
+        cond.append("date(fecha) >= date(?)"); params.append(desde)
+    if hasta:
+        cond.append("date(fecha) <= date(?)"); params.append(hasta)
+    if accion:
+        cond.append("accion = ?"); params.append(accion)
+    params.append(limite)
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute(f"""
+            SELECT * FROM bitacora WHERE {" AND ".join(cond)}
+            ORDER BY fecha DESC LIMIT ?
+        """, params).fetchall()]
+
+
+def get_vendedor_por_codigo(codigo: str) -> dict | None:
+    with get_connection() as conn:
+        r = conn.execute("SELECT * FROM vendedores WHERE codigo=?",
+                         (str(codigo).strip(),)).fetchone()
+        return dict(r) if r else None
+
+
+def get_categorias_vendedor(vendedor_id: int) -> list:
+    """IDs de categorias habilitadas. Lista vacia = ve todo el catalogo."""
+    with get_connection() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT categoria_id FROM vendedor_categorias WHERE vendedor_id=?",
+            (vendedor_id,))]
+
+
+def set_categorias_vendedor(vendedor_id: int, categoria_ids: list):
+    """Reemplaza el set completo. Lista vacia = habilita todo."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM vendedor_categorias WHERE vendedor_id=?",
+                     (vendedor_id,))
+        for cid in set(categoria_ids or []):
+            conn.execute("INSERT OR IGNORE INTO vendedor_categorias "
+                         "(vendedor_id, categoria_id) VALUES (?,?)",
+                         (vendedor_id, int(cid)))
+        conn.commit()
+
+
 def guardar_vendedor(vid, codigo, nombre, usuario, password_plano,
-                     telefono, comision_pct, modo_cobro) -> tuple[bool, str]:
+                     telefono, comision_pct, modo_cobro,
+                     modo_comision="recargo",
+                     nombre_comercial="") -> tuple[bool, str]:
     """
     password_plano: si es None/vacío al EDITAR, se mantiene la
     contraseña que ya tenía (no se pisa). Al crear uno nuevo es
@@ -2315,28 +2831,33 @@ def guardar_vendedor(vid, codigo, nombre, usuario, password_plano,
                 conn.execute("""
                     UPDATE vendedores
                     SET codigo=?, nombre=?, usuario=?, password_hash=?,
-                        telefono=?, comision_pct=?, modo_cobro=?
+                        telefono=?, comision_pct=?, modo_cobro=?,
+                        modo_comision=?, nombre_comercial=?
                     WHERE id=?
                 """, (codigo, nombre.strip(), usuario, hash_password(password_plano),
-                      telefono.strip(), comision_pct, modo_cobro, vid))
+                      telefono.strip(), comision_pct, modo_cobro,
+                      modo_comision, (nombre_comercial or "").strip(), vid))
             else:
                 conn.execute("""
                     UPDATE vendedores
                     SET codigo=?, nombre=?, usuario=?,
-                        telefono=?, comision_pct=?, modo_cobro=?
+                        telefono=?, comision_pct=?, modo_cobro=?,
+                        modo_comision=?, nombre_comercial=?
                     WHERE id=?
                 """, (codigo, nombre.strip(), usuario,
-                      telefono.strip(), comision_pct, modo_cobro, vid))
+                      telefono.strip(), comision_pct, modo_cobro,
+                      modo_comision, (nombre_comercial or "").strip(), vid))
         else:
             if not password_plano:
                 return False, "La contraseña es obligatoria para un vendedor nuevo."
             conn.execute("""
                 INSERT INTO vendedores
                     (codigo, nombre, usuario, password_hash, telefono,
-                     comision_pct, modo_cobro)
-                VALUES (?,?,?,?,?,?,?)
+                     comision_pct, modo_cobro, modo_comision, nombre_comercial)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (codigo, nombre.strip(), usuario, hash_password(password_plano),
-                  telefono.strip(), comision_pct, modo_cobro))
+                  telefono.strip(), comision_pct, modo_cobro, modo_comision,
+                  (nombre_comercial or "").strip()))
         conn.commit()
         return True, ""
 

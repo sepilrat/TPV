@@ -153,6 +153,11 @@ class PreciosUI(ttk.Frame):
         self.tree_pr.bind("<<TreeviewSelect>>", self._on_sel_promo)
 
         # Acciones
+        # DOS filas: ocho botones en una sola no entraban a lo ancho y
+        # los ultimos quedaban cortados fuera de la pantalla (asi se
+        # habia "perdido" el de Placas y el de Actualizar).
+        # Arriba lo que opera sobre las promociones; abajo, lo que
+        # exporta hacia afuera.
         ac = tk.Frame(parent, bg=C.bg)
         ac.grid(row=1, column=0, sticky="ew")
 
@@ -162,11 +167,42 @@ class PreciosUI(ttk.Frame):
             comando=self._dialogo_promocion_masiva).pack(side="left", padx=6)
         btn(ac, "⏸  Pausar/Activar",   variante="neutro",   comando=self._toggle_promo).pack(side="left")
         btn(ac, "🗑  Eliminar",         variante="peligro",  comando=self._eliminar_promo).pack(side="left", padx=6)
-        btn(ac, "📄  Exportar lista de precios", variante="neutro",
-            comando=self._exportar_lista_precios).pack(side="left", padx=6)
-        btn(ac, "🗞️  Exportar folleto de ofertas", variante="neutro",
-            comando=self._exportar_folleto).pack(side="left", padx=6)
         btn(ac, "🔄  Actualizar",       variante="neutro",   comando=self._refrescar_promos).pack(side="right")
+
+        ac2 = tk.Frame(parent, bg=C.bg)
+        ac2.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        lbl(ac2, "Exportar:", variante="suave").pack(side="left", padx=(0, 8))
+        btn(ac2, "📄  Lista de precios", variante="neutro",
+            comando=self._exportar_lista_precios).pack(side="left", padx=(0, 6))
+        btn(ac2, "🗞️  Folleto de ofertas", variante="neutro",
+            comando=self._exportar_folleto).pack(side="left", padx=6)
+        btn(ac2, "📱  Placas para estados", variante="neutro",
+            comando=self._placas_estados).pack(side="left", padx=6)
+
+    def _avisar_bajo_costo(self, ids, parent=None):
+        """Avisa si alguna operacion masiva dejo precios bajo costo.
+
+        En masa no se puede preguntar antes producto por producto, pero
+        callarlo es peor: quedarian vendiendose a perdida sin que nada
+        lo marque.
+        """
+        from repositorio import productos_bajo_costo
+        try:
+            malos = productos_bajo_costo(ids)
+        except Exception:
+            return
+        if not malos:
+            return
+        detalle = "\n".join(
+            f"  · {m['descripcion'][:34]}: se vende a $ {m['precio_base']:,.2f} "
+            f"y cuesta $ {m['costo_ultimo']:,.2f}" for m in malos[:8])
+        extra = f"\n  ...y {len(malos) - 8} más" if len(malos) > 8 else ""
+        messagebox.showwarning(
+            "Quedaron precios bajo costo",
+            f"{len(malos)} producto(s) quedaron por debajo de su costo:\n\n"
+            f"{detalle}{extra}\n\n"
+            "Revisalos en Productos → A revisar, o volvé a fijarles el precio.",
+            parent=parent or self)
 
     def _exportar_lista_precios(self):
         from lista_precios import abrir_selector_lista_precios
@@ -175,6 +211,11 @@ class PreciosUI(ttk.Frame):
     def _exportar_folleto(self):
         from folleto_precios import abrir_selector_folleto
         abrir_selector_folleto(self)
+
+    def _placas_estados(self):
+        """Imagenes sueltas por producto o combo, para estados y feed."""
+        from placas import abrir_selector_placas
+        abrir_selector_placas(self)
 
     # ── Datos ─────────────────────────────────────────────────────────────────
 
@@ -274,9 +315,20 @@ class PreciosUI(ttk.Frame):
             messagebox.showwarning("Error", "Porcentaje invalido.", parent=self)
             return
         ids = [int(i) for i in self._seleccionados]
+        # Un aumento masivo toca el precio de decenas de productos: si
+        # sale mal no hay "deshacer", solo volver a calcularlo al reves.
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            self, f"Aplicar {pct:+g}% a {len(ids)} producto(s).")
+        if not responsable:
+            return
+
         if messagebox.askyesno("Confirmar",
                                 f"Aplicar +{pct}% a {len(ids)} productos?", parent=self):
             aplicar_aumento_bulk(ids, pct)
+            from repositorio import registrar_bitacora
+            registrar_bitacora("Aumento masivo de precios", responsable,
+                               f"{pct:+g}% sobre {len(ids)} producto(s)")
             toast(self, f"Precios actualizados (+{pct}%)")
             import catalogo_web
             catalogo_web.sincronizar_stock_en_segundo_plano()
@@ -287,10 +339,21 @@ class PreciosUI(ttk.Frame):
             messagebox.showinfo("Atención", "Selecciona productos primero.", parent=self)
             return
         ids = [int(i) for i in self._seleccionados]
+        # Un aumento masivo toca el precio de decenas de productos: si
+        # sale mal no hay "deshacer", solo volver a calcularlo al reves.
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            self, f"Recalcular por margen {len(ids)} producto(s).")
+        if not responsable:
+            return
+
         if messagebox.askyesno("Confirmar",
                                 f"Recalcular precio por margen de categoria para {len(ids)} productos?\n"
                                 "El precio = costo x (1 + margen%)", parent=self):
             aplicar_margen_bulk(ids)
+            from repositorio import registrar_bitacora
+            registrar_bitacora("Recalculo por margen", responsable,
+                               f"{len(ids)} producto(s)")
             toast(self, "Precios recalculados por margen")
             import catalogo_web
             catalogo_web.sincronizar_stock_en_segundo_plano()
@@ -559,6 +622,30 @@ class PreciosUI(ttk.Frame):
                 if valor <= 0:
                     messagebox.showwarning("Error", "El precio debe ser mayor a 0.", parent=d)
                     return
+                # Vender bajo costo puede ser deliberado (liquidar algo por
+                # vencer), pero por descuido es plata que se pierde en cada
+                # venta sin que nada lo marque.
+                bajo = [p for p in prods
+                        if (p.get("costo_ultimo") or 0) > 0
+                        and valor < p["costo_ultimo"]]
+                if bajo:
+                    if len(bajo) == 1:
+                        b = bajo[0]
+                        det = (f"«{b['descripcion']}» cuesta "
+                               f"$ {b['costo_ultimo']:,.2f} y lo estás "
+                               f"poniendo a $ {valor:,.2f}.\n\n"
+                               f"Perdés $ {b['costo_ultimo'] - valor:,.2f} "
+                               f"en cada unidad que vendas.")
+                    else:
+                        peor = max(bajo, key=lambda x: x["costo_ultimo"])
+                        det = (f"{len(bajo)} de {len(prods)} productos quedan "
+                               f"por debajo de su costo.\n\n"
+                               f"El peor: «{peor['descripcion']}», cuesta "
+                               f"$ {peor['costo_ultimo']:,.2f}.")
+                    if not messagebox.askyesno(
+                            "Precio por debajo del costo", det +
+                            "\n\n¿Guardar igual?", parent=d):
+                        return
                 for p in prods:
                     actualizar_precio(p["id"], valor)
                 msg = f"Precio actualizado a $ {valor:,.2f}" if len(prods) == 1 \
@@ -566,6 +653,7 @@ class PreciosUI(ttk.Frame):
             elif tipo.get() == "porcentaje":
                 ids = [p["id"] for p in prods]
                 aplicar_aumento_bulk(ids, valor)
+                self._avisar_bajo_costo(ids, d)
                 signo = "+" if valor >= 0 else ""
                 msg = f"Ajuste de {signo}{valor}% aplicado a {len(prods)} producto(s)"
             else:
@@ -575,6 +663,7 @@ class PreciosUI(ttk.Frame):
                 ids = [p["id"] for p in prods]
                 sin_costo = [p for p in prods if not p.get("costo_ultimo")]
                 aplicar_margen_nuevo_bulk(ids, valor)
+                self._avisar_bajo_costo(ids, d)
                 msg = f"Margen fijado en {valor}% para {len(prods)} producto(s)"
                 if sin_costo:
                     msg += f" ({len(sin_costo)} sin costo cargado, no se les pudo recalcular el precio)"

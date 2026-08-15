@@ -270,6 +270,14 @@ def dialogo_devolucion(parent, venta_id: int, sesion_id: int):
             "cuenta_corriente": f"Se le descuentan $ {total:,.2f} de la cuenta.",
             "sin_reintegro": "No se devuelve plata (cambio de mercaderia).",
         }[metodo]
+        # Devolver saca plata del cajon: hace falta autorizacion y que
+        # quede registrado quien la dio.
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            d, f"Devolver $ {total:,.2f} requiere autorizacion.")
+        if not responsable:
+            return
+
         if not messagebox.askyesno(
                 "Confirmar devolucion",
                 f"{len(items)} producto(s) vuelven al stock.\n\n{texto_metodo}\n\n"
@@ -278,7 +286,8 @@ def dialogo_devolucion(parent, venta_id: int, sesion_id: int):
         try:
             dev_id = registrar_devolucion(
                 venta_id, sesion_id, items,
-                motivo=v_motivo.get(), metodo_reintegro=metodo)
+                motivo=v_motivo.get(), metodo_reintegro=metodo,
+                autorizado_por=responsable)
         except Exception as exc:
             messagebox.showerror("Devolucion",
                                  f"No se pudo registrar:\n\n{exc}\n\n"
@@ -288,6 +297,11 @@ def dialogo_devolucion(parent, venta_id: int, sesion_id: int):
             messagebox.showerror("Devolucion",
                                  "No se pudo registrar la devolucion.", parent=d)
             return
+        from repositorio import registrar_bitacora
+        registrar_bitacora(
+            "Devolucion", responsable,
+            f"Venta #{venta_id} — {len(items)} item(s) — {v_motivo.get()} "
+            f"({metodo})", total, venta_id)
         resultado[0] = dev_id
         d.destroy()
 

@@ -365,16 +365,30 @@ class VentasUI(ttk.Frame):
             self._flash(error=True)
             toast(self, f"No se encontro: {codigo}", error=True)
             return self.foco_scanner()
-        if get_stock_producto(prod["id"]) <= 0:
-            self._flash(error=True)
-            toast(self, f"Sin stock: {prod['descripcion']}", error=True)
-            return self.foco_scanner()
+        # Sin stock se AVISA, no se frena: hay productos que se venden
+        # sin haber pasado nunca por ingreso de stock, y dejar al cliente
+        # esperando en la caja por eso es peor que el descuadre.
+        # El aviso concreto (cuanto queda) sale mas abajo, ya con la
+        # cantidad calculada.
 
         pres = prod.get("_presentacion")
         # Si escanearon una bolsa cerrada, cada "unidad" son N gramos.
         factor = float(prod.get("_cantidad_sugerida") or 1)
         cant = (self.cant_pendiente or 1) * factor
         es_peso = bool(prod.get("vendido_por_peso"))
+
+        # Producto por peso sin cantidad tipeada: hay que preguntar. Antes
+        # entraba 1 kg por defecto, que casi nunca es lo que el cliente
+        # se lleva — y si el cajero no lo notaba, se cobraba mal.
+        # Una presentacion cerrada (una bolsa con su EAN) no se pesa: ya
+        # trae su peso en el factor.
+        if es_peso and self.cant_pendiente is None and not pres:
+            peso = self._pedir_peso(prod)
+            if peso is None:
+                self.cant_pendiente = None
+                self.lbl_cant.config(text="x1")
+                return self.foco_scanner()
+            cant = peso
 
         if not es_peso and cant != int(cant):
             self._flash(error=True)
@@ -392,6 +406,24 @@ class VentasUI(ttk.Frame):
                           if i["producto_id"] == prod["id"]
                           and i.get("presentacion_id") == clave_pres), None)
         cant_total = (existente["cantidad"] if existente else 0) + cant
+
+        # El stock se AVISA aca, no se bloquea: hay productos que se
+        # venden sin haber pasado nunca por ingreso de stock (los que se
+        # cargaron a mano, los que se reponen sin registrar), y frenar la
+        # venta por eso deja al cliente esperando en la caja.
+        # Bloquear seria peor que el problema que resuelve.
+        try:
+            disponible = float(get_stock_producto(prod["id"]) or 0)
+        except Exception:
+            disponible = None
+        if disponible is not None and cant_total > disponible + 0.001:
+            unidad = "kg" if es_peso else "u"
+            if disponible <= 0:
+                aviso = f"⚠ {prod['descripcion']}: sin stock registrado"
+            else:
+                aviso = (f"⚠ {prod['descripcion']}: quedan {disponible:g} "
+                         f"{unidad} y llevás {cant_total:g}")
+            toast(self, aviso, error=True)
 
         if pres:
             # Precio fijo de la bolsa, prorrateado por gramo para que el
@@ -420,6 +452,120 @@ class VentasUI(ttk.Frame):
         self._actualizar_tabla()
         self._actualizar_totales()
         self.foco_scanner()
+
+    def _pedir_peso(self, prod):
+        """Pide el peso de un producto que se vende por kilo.
+
+        Devuelve los kg, o None si se cancelo. El campo arranca vacio a
+        proposito: un valor precargado se acepta sin mirar, y cobrar
+        1 kg cuando el cliente lleva 300 g es plata regalada en cada
+        venta.
+        """
+        d = tk.Toplevel(self)
+        d.title("Peso")
+        d.configure(bg=C.superficie)
+        d.transient(self.winfo_toplevel())
+        d.grab_set()
+        _centrar_dialogo(d, 430, 300)
+
+        lbl(d, prod["descripcion"][:40], variante="subtitulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(14, 0))
+        precio_kg = float(prod.get("precio_base") or 0)
+        stock_disp = 0.0
+        try:
+            from repositorio import get_stock_producto
+            stock_disp = float(get_stock_producto(prod["id"]) or 0)
+        except Exception:
+            pass
+        lbl(d, f"$ {precio_kg:,.2f} por kg   ·   hay {stock_disp:g} kg",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
+
+        lbl(d, "Peso en kg", variante="suave", bg=C.superficie).pack(
+            anchor="w", padx=18, pady=(12, 2))
+        v_peso = tk.StringVar()
+        f_in = tk.Frame(d, bg=C.superficie)
+        f_in.pack(fill="x", padx=18)
+        e = tk.Entry(f_in, textvariable=v_peso, font=F.total, justify="center",
+                     bg=C.bg, fg=C.texto, relief="solid", bd=1)
+        e.pack(side="left", fill="x", expand=True, ipady=8)
+        e.focus_set()
+
+        lbl_bal = tk.Label(d, text="", bg=C.superficie, fg=C.texto_suave,
+                           font=F.pequeña, anchor="w")
+        lbl_bal.pack(fill="x", padx=18, pady=(3, 0))
+
+        def _pesar():
+            try:
+                import balanza
+            except ImportError:
+                lbl_bal.config(text="No se pudo usar la balanza.")
+                return
+            peso, msg = balanza.leer_peso()
+            if peso is None:
+                lbl_bal.config(text=f"Balanza: {msg}")
+                return
+            v_peso.set(f"{peso:.3f}")
+            lbl_bal.config(text="Leído de la balanza")
+
+        btn(f_in, "Pesar", variante="primario", comando=_pesar).pack(
+            side="left", padx=(8, 0))
+
+        # El subtotal en vivo: es lo que el cajero le canta al cliente
+        lbl_sub = tk.Label(d, text="", bg=C.acento, fg=C.texto, font=F.total,
+                           pady=10)
+        lbl_sub.pack(fill="x", padx=18, pady=(10, 0))
+
+        def _calcular(*_a):
+            txt = (v_peso.get() or "").strip().replace(",", ".")
+            try:
+                kg = float(txt)
+            except ValueError:
+                lbl_sub.config(text="Poné el peso o usá la balanza")
+                return
+            if kg <= 0:
+                lbl_sub.config(text="El peso tiene que ser mayor a cero",
+                               bg=C.acento)
+                return
+            if stock_disp and kg > stock_disp + 0.001:
+                lbl_sub.config(text=f"Solo hay {stock_disp:g} kg",
+                               bg=C.err_flash, fg=C.peligro)
+                return
+            lbl_sub.config(text=f"{kg:.3f} kg   =   $ {kg * precio_kg:,.2f}",
+                           bg=C.acento, fg=C.texto)
+
+        v_peso.trace_add("write", _calcular)
+        _calcular()
+
+        resultado = [None]
+
+        def aceptar(_ev=None):
+            txt = (v_peso.get() or "").strip().replace(",", ".")
+            try:
+                kg = float(txt)
+            except ValueError:
+                lbl_bal.config(text="Escribí un peso válido.")
+                return
+            if kg <= 0:
+                lbl_bal.config(text="El peso tiene que ser mayor a cero.")
+                return
+            if stock_disp and kg > stock_disp + 0.001:
+                lbl_bal.config(text=f"No hay tanto: quedan {stock_disp:g} kg.")
+                return
+            resultado[0] = kg
+            d.destroy()
+
+        e.bind("<Return>", aceptar)
+        d.bind("<Escape>", lambda ev: d.destroy())
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x", pady=14)
+        btn(pie, "Agregar  (Enter)", variante="exito",
+            comando=aceptar).pack(side="left", padx=(18, 6))
+        btn(pie, "Cancelar  (Esc)", variante="neutro",
+            comando=d.destroy).pack(side="left")
+
+        self.wait_window(d)
+        return resultado[0]
 
     def _elegir_producto(self, candidatos, texto_buscado):
         """
@@ -740,9 +886,15 @@ class VentasUI(ttk.Frame):
             cliente_id = None
 
         # ── Registrar ─────────────────────────────────────────────────────────
-        vid = registrar_venta(
-            self.app.sesion_id, self.carrito,
-            metodo_db, desc_pct, cliente_id=cliente_id)
+        try:
+            vid = registrar_venta(
+                self.app.sesion_id, self.carrito,
+                metodo_db, desc_pct, cliente_id=cliente_id)
+        except Exception as exc:
+            messagebox.showerror("No se pudo cobrar",
+                                 self._detalle_error_venta(exc), parent=self)
+            self.foco_scanner()
+            return
 
         if vid:
             if metodo_db == "cuenta_corriente" and cliente_id:
@@ -763,6 +915,17 @@ class VentasUI(ttk.Frame):
             messagebox.showerror("Error",
                 "No se pudo registrar la venta.", parent=self)
             self.foco_scanner()
+
+    def _detalle_error_venta(self, exc):
+        """Traduce el error de registrar_venta a algo accionable."""
+        texto = str(exc)
+        if "Stock insuficiente" in texto:
+            prod = texto.split(":", 1)[-1].strip()
+            return (f"No alcanza el stock de «{prod}».\n\n"
+                    "Puede que se haya vendido desde otra caja mientras "
+                    "armabas esta venta.\n\n"
+                    "Sacalo del carrito o ajustá la cantidad.")
+        return f"No se pudo registrar la venta.\n\nDetalle: {texto}"
 
     def _dialogo_cobro(self, total: float, desc_pct: float) -> dict | None:
         """

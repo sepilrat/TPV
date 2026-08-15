@@ -133,11 +133,26 @@ class ProductosUI(ttk.Frame):
 
         btn(bar, "Limpiar", variante="neutro",
             comando=self._limpiar_filtros).pack(side="left", padx=8)
+        # Va arriba, junto a los filtros: seleccionar todo es una accion
+        # sobre la LISTA (lo que dejo el filtro), no sobre un producto.
+        btn(bar, "☑  Seleccionar todo", variante="neutro",
+            comando=self._seleccionar_todo_prod).pack(side="left", padx=4)
+        # Aviso visible cuando hay fotos que dependen de internet: antes
+        # el problema solo aparecia en el log, que nadie mira.
+        self.lbl_fotos_url = lbl(bar, "", variante="suave")
+        self.lbl_fotos_url.pack(side="left", padx=(12, 0))
         btn(bar, "🔄 Actualizar", variante="neutro",
             comando=self._refrescar).pack(side="right")
 
         # Tabla
         frame_t, self.tree_prod = tabla(parent, COLS_PROD, con_iconos=True)
+        # Varios a la vez: marcar para revisar suele hacerse en tanda
+        # (todos los que quedaron sin costo, todos los de una categoria).
+        self.tree_prod.configure(selectmode="extended")
+        # Ctrl+A selecciona lo que se ve, respetando el filtro activo:
+        # con un filtro puesto, "todo" es lo filtrado, no el catalogo entero.
+        self.tree_prod.bind("<Control-a>", self._seleccionar_todo_prod)
+        self.tree_prod.bind("<Control-A>", self._seleccionar_todo_prod)
         frame_t.grid(row=1, column=0, sticky="nsew")
         self.tree_prod.bind("<Double-1>", self._editar_producto)
         self.tree_prod.tag_configure("sin_alerta", foreground=C.texto_suave, font=("Segoe UI", 10))
@@ -145,29 +160,40 @@ class ProductosUI(ttk.Frame):
                                      font=("Segoe UI", 10, "overstrike"))
         self.tree_prod.bind("<<TreeviewSelect>>", self._on_sel_prod)
 
-        # Acciones
+        # Acciones en DOS filas: once botones en una sola no entraban a
+        # lo ancho y los ultimos quedaban cortados fuera de la pantalla
+        # (asi se habia "perdido" el de Etiquetas).
+        # Arriba lo que toca el producto; abajo, stock y salidas.
         ac = tk.Frame(parent, bg=C.bg)
         ac.grid(row=2, column=0, sticky="ew", pady=(8,0))
         btn(ac, "Editar",          variante="primario", comando=self._editar_producto).pack(side="left")
         btn(ac, "Activar/Desactivar", variante="peligro", comando=self._toggle_activo).pack(side="left", padx=6)
         btn(ac, "Eliminar",           variante="peligro",  comando=self._eliminar).pack(side="left", padx=6)
-        btn(ac, "Alerta stock ON/OFF", variante="neutro",
-            comando=self._toggle_alerta).pack(side="left", padx=6)
-        btn(ac, "Ajustar stock", variante="neutro",
-            comando=self._ajustar_stock).pack(side="left", padx=6)
-        btn(ac, "Vencimientos", variante="neutro",
-            comando=self._vencimientos_producto).pack(side="left", padx=6)
-        btn(ac, "Redondear precios", variante="neutro",
-            comando=self._redondear_precios).pack(side="left", padx=6)
-        btn(ac, "Abrir horma", variante="neutro",
-            comando=self._abrir_horma).pack(side="left", padx=6)
         btn(ac, "Presentaciones", variante="neutro",
             comando=self._presentaciones).pack(side="left", padx=6)
-        btn(ac, "Historial ajustes", variante="neutro",
-            comando=self._historial_ajustes).pack(side="left", padx=6)
-        btn(ac, "Etiquetas", variante="neutro",
+        btn(ac, "Redondear precios", variante="neutro",
+            comando=self._redondear_precios).pack(side="left", padx=6)
+        btn(ac, "🏷  Etiquetas de góndola", variante="exito",
             comando=self._imprimir_etiquetas).pack(side="left", padx=6)
-        lbl(ac, "Doble click para editar", variante="suave").pack(side="right")
+        btn(ac, "📌  Marcar para revisar", variante="neutro",
+            comando=self._marcar_revisar).pack(side="left", padx=6)
+        lbl(ac, "Doble click para editar", variante="suave").pack(side="right", padx=(12, 0))
+
+        ac2 = tk.Frame(parent, bg=C.bg)
+        ac2.grid(row=3, column=0, sticky="ew", pady=(6,0))
+        lbl(ac2, "Stock:", variante="suave").pack(side="left", padx=(0, 8))
+        btn(ac2, "Ajustar stock", variante="neutro",
+            comando=self._ajustar_stock).pack(side="left", padx=(0, 6))
+        btn(ac2, "Historial ajustes", variante="neutro",
+            comando=self._historial_ajustes).pack(side="left", padx=6)
+        btn(ac2, "Vencimientos", variante="neutro",
+            comando=self._vencimientos_producto).pack(side="left", padx=6)
+        btn(ac2, "Alerta stock ON/OFF", variante="neutro",
+            comando=self._toggle_alerta).pack(side="left", padx=6)
+        btn(ac2, "Fraccionar", variante="neutro",
+            comando=self._abrir_horma).pack(side="left", padx=6)
+        btn(ac2, "🖼  Guardar fotos localmente", variante="neutro",
+            comando=self._fotos_externas).pack(side="right")
 
     # ── Tab Categorías ────────────────────────────────────────────────────────
 
@@ -226,6 +252,7 @@ class ProductosUI(ttk.Frame):
         self._refrescar_categorias()
 
     def _refrescar_productos(self):
+        self._chequear_fotos_url()
         filtro = self.entry_buscar.get().strip()
         cat_nombre = self.combo_filtro_cat.get()
         cat_id = self._cat_map.get(cat_nombre)
@@ -403,6 +430,16 @@ class ProductosUI(ttk.Frame):
 
             ajustar_stock(pid, nueva, combo_motivo.get(),
                          responsable, e_notas.get().strip())
+            # Ademas del historial de ajustes, va a la bitacora: ahi se
+            # ve junto con anulaciones y devoluciones al explicar un
+            # descuadre.
+            from repositorio import registrar_bitacora
+            dif = nueva - stock_actual
+            registrar_bitacora(
+                "Ajuste de stock", responsable,
+                f"{prod['descripcion']}: {_fmt_cant(stock_actual)} → "
+                f"{_fmt_cant(nueva)} ({dif:+g}) — {combo_motivo.get()}",
+                abs(dif) * (prod.get("costo_ultimo") or 0), pid)
             d.destroy()
             toast(self, "✅  Stock ajustado")
             self._refrescar_productos()
@@ -471,7 +508,146 @@ class ProductosUI(ttk.Frame):
         dialogo_lotes_producto(self, self._prod_sel)
         self.refrescar()
 
+    def _seleccionar_todo_prod(self, event=None):
+        """Selecciona las filas VISIBLES (las que dejo el filtro)."""
+        hijos = self.tree_prod.get_children()
+        self.tree_prod.selection_set(hijos)
+        if hijos:
+            self.tree_prod.focus(hijos[0])
+        return "break"
+
+    def _chequear_fotos_url(self):
+        """Cuenta las fotos que apuntan a internet y lo muestra."""
+        try:
+            import imagenes
+            n = len(imagenes.productos_con_foto_externa())
+        except Exception:
+            return
+        if n:
+            self.lbl_fotos_url.config(
+                text=(f"⚠ {n} producto(s) sin foto propia — "
+                      f"clic acá para resolverlo"), cursor="hand2")
+            self.lbl_fotos_url.bind("<Button-1>",
+                                    lambda e: self._fotos_externas())
+        else:
+            self.lbl_fotos_url.config(text="", cursor="")
+
+    def _fotos_externas(self):
+        """Baja a la carpeta del sistema las fotos que hoy son una URL.
+
+        Son fotos elegidas a mano: se conservan, no se borran. Lo que se
+        arregla es que dejen de depender de un sitio ajeno, que es lo que
+        cuelga la pantalla cuando responde lento.
+        """
+        import imagenes
+        externas = imagenes.productos_con_foto_externa()
+        if not externas:
+            messagebox.showinfo(
+                "Fotos por URL",
+                "Todas las fotos ya están guardadas en la carpeta del "
+                "sistema. No hay ninguna que dependa de internet.",
+                parent=self)
+            return
+
+        # Dos salidas reales: intentar bajarlas, o dejarlos sin foto para
+        # cargarles una propia. Las fotos externas no se muestran en la
+        # grilla, asi que dejarlas como estan no es una opcion util.
+        resp = messagebox.askyesnocancel(
+            "Fotos por URL",
+            f"{len(externas)} producto(s) tienen la foto apuntando a un "
+            f"sitio de internet. Esas fotos NO se muestran en la lista: "
+            f"bajarlas en cada repintado trababa la pantalla.\n\n"
+            f"SÍ  → intentar descargarlas ahora ({len(externas)} descargas, "
+            f"puede tardar y muchas pueden fallar si el sitio no responde).\n\n"
+            f"NO  → dejar esos productos sin foto, para cargarles una propia "
+            f"con «Buscar fotos» o subiendo la tuya.\n\n"
+            f"CANCELAR → no hacer nada.", parent=self)
+
+        if resp is None:
+            return
+        if resp is False:
+            if not messagebox.askyesno(
+                    "Quitar las fotos por URL",
+                    f"Se les va a quitar la foto a {len(externas)} "
+                    f"producto(s).\n\nEl producto no se toca: solo queda "
+                    f"sin foto, listo para cargarle una propia.\n\n"
+                    "¿Confirmás?", parent=self):
+                return
+            r = imagenes.quitar_fotos_externas()
+            toast(self, f"{r['quitadas']} producto(s) quedaron sin foto")
+            self._refrescar()
+            return
+
+        # Ventana de progreso: con decenas de fotos, sin esto la app
+        # parece colgada varios minutos.
+        prog = tk.Toplevel(self)
+        prog.title("Guardando fotos")
+        prog.configure(bg=C.superficie)
+        prog.grab_set()
+        prog.geometry("460x150")
+        lbl(prog, "Descargando fotos…", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 4))
+        barra = ttk.Progressbar(prog, mode="determinate",
+                                maximum=len(externas))
+        barra.pack(fill="x", padx=18)
+        lbl_act = tk.Label(prog, text="", bg=C.superficie, fg=C.texto_suave,
+                           font=F.pequeña, anchor="w")
+        lbl_act.pack(fill="x", padx=18, pady=(8, 0))
+
+        def _avance(hecho, total, desc):
+            barra["value"] = hecho
+            lbl_act.config(text=f"{hecho} de {total} — {desc[:44]}")
+            prog.update_idletasks()
+
+        try:
+            r = imagenes.descargar_fotos_externas(progreso=_avance)
+        except Exception as exc:
+            prog.destroy()
+            messagebox.showerror("Fotos por URL", f"Falló la descarga:\n{exc}",
+                                 parent=self)
+            return
+        prog.destroy()
+
+        msg = f"{r['ok']} de {r['total']} foto(s) guardadas en la carpeta."
+        if r["errores"]:
+            detalle = "\n".join(f"  · {e}" for e in r["errores"][:6])
+            extra = (f"\n  ...y {len(r['errores']) - 6} más"
+                     if len(r["errores"]) > 6 else "")
+            msg += (f"\n\nNo se pudieron bajar {len(r['errores'])}:\n\n"
+                    f"{detalle}{extra}\n\n"
+                    "Esas siguen apuntando a internet. Si el sitio ya las "
+                    "borró, cargales una foto propia desde Editar producto.")
+        messagebox.showinfo("Fotos por URL", msg, parent=self)
+        # La cache de fallidas guarda las que ya no responden: se limpia
+        # para que un reintento posterior valga la pena.
+        imagenes._URLS_FALLIDAS.clear()
+        self._refrescar()
+
+    def _marcar_revisar(self):
+        """Manda los productos seleccionados a la cola de revision.
+
+        Acepta varios: lo normal es detectar un problema mirando la
+        lista (varios sin costo, varios de una categoria dudosa) y
+        querer marcarlos todos de una.
+        """
+        sel = self.tree_prod.selection()
+        ids = [int(i) for i in sel] if sel else (
+            [self._prod_sel] if self._prod_sel else [])
+        if not ids:
+            messagebox.showinfo("Atención", "Seleccioná al menos un producto.",
+                                parent=self)
+            return
+        desc = ""
+        if len(ids) == 1:
+            from repositorio import get_producto_completo
+            desc = (get_producto_completo(ids[0]) or {}).get("descripcion", "")
+        from revision_ui import dialogo_marcar
+        if dialogo_marcar(self, ids, desc):
+            toast(self, f"{len(ids)} producto(s) marcado(s) — mirá la solapa "
+                        f"«A revisar»")
+
     def _redondear_precios(self):
+        """Toca el precio de TODO el catalogo de una."""
         """Aplica el redondeo configurado a todo el catalogo, de una."""
         from config import cfg
         from repositorio import redondear_todos_los_precios
@@ -483,14 +659,19 @@ class ProductosUI(ttk.Frame):
                 "Elegí el múltiplo en Config → Redondeo de precios "
                 "(1, 10, 50 o 100) y volvé a intentar.", parent=self)
             return
+        modo = str(cfg().get("redondeo_modo", "cercano")).lower()
+        explica = {
+            "cercano": (f"al múltiplo de ${paso} más cercano: menos de la mitad "
+                        f"baja, más de la mitad sube"),
+            "arriba":  f"siempre al siguiente múltiplo de ${paso} (nunca baja)",
+            "abajo":   f"siempre al múltiplo de ${paso} anterior (nunca sube)",
+        }.get(modo, f"al múltiplo de ${paso} más cercano")
         if not messagebox.askyesno(
                 "Redondear precios",
-                f"Se van a redondear TODOS los precios activos hacia arriba, "
-                f"a múltiplos de ${paso}.\n\n"
-                "Siempre para arriba, así no se pierde margen.\n\n"
+                f"Se van a redondear TODOS los precios activos {explica}.\n\n"
                 "¿Confirmás?", parent=self):
             return
-        r = redondear_todos_los_precios(paso)
+        r = redondear_todos_los_precios(paso, modo=modo)
         if not r["cambiados"]:
             messagebox.showinfo("Redondear precios",
                                 f"Los {r['revisados']} precios ya estaban redondos.",
@@ -775,11 +956,24 @@ class ProductosUI(ttk.Frame):
                             f"({error}).\n\nProbá instalando: pip install pywebview")
                         return
                     if url and imagenes.es_url(url):
-                        e_url.delete(0, "end")
-                        e_url.insert(0, url)
-                        estado_img["url"] = url
+                        # Se baja en el momento: guardar la URL dejaba la
+                        # foto colgada de un sitio ajeno, y esas no se
+                        # muestran en la grilla.
+                        try:
+                            imagenes.PERMITIR_DESCARGA_URL = True
+                            rel = imagenes.guardar_imagen_desde_url(pid, url)
+                            estado_img["url"] = rel
+                            e_url.delete(0, "end")
+                            toast(self, "✅  Foto guardada")
+                        except Exception as exc:
+                            messagebox.showwarning(
+                                "No se pudo bajar la foto",
+                                f"{exc}\n\nProbá con otra imagen de la "
+                                "búsqueda.", parent=d)
+                            return
+                        finally:
+                            imagenes.PERMITIR_DESCARGA_URL = False
                         _refrescar_preview()
-                        toast(self, "✅  Foto elegida")
                 d.after(0, _aplicar)
 
             threading.Thread(target=_trabajar, daemon=True).start()
@@ -801,6 +995,9 @@ class ProductosUI(ttk.Frame):
         e_url.pack(side="left", fill="x", expand=True, ipady=4)
 
         def _usar_url():
+            """Baja la foto y la guarda local. Guardar la URL cruda hacia
+            que la foto dependiera de un sitio ajeno: no se mostraba en la
+            grilla y desaparecia el dia que la borraran de alla."""
             url = e_url.get().strip()
             if not url:
                 return
@@ -808,31 +1005,65 @@ class ProductosUI(ttk.Frame):
                 messagebox.showwarning(
                     "Error", "Tiene que empezar con http:// o https://", parent=d)
                 return
-            estado_img["url"] = url
+            d.config(cursor="watch"); d.update_idletasks()
+            try:
+                imagenes.PERMITIR_DESCARGA_URL = True
+                rel = imagenes.guardar_imagen_desde_url(pid, url)
+            except Exception as exc:
+                messagebox.showwarning(
+                    "No se pudo bajar la foto",
+                    f"{exc}\n\nProbá con otra imagen, o descargala a tu "
+                    "compu y usá «Guardar localmente».", parent=d)
+                return
+            finally:
+                imagenes.PERMITIR_DESCARGA_URL = False
+                d.config(cursor="")
+            estado_img["url"] = rel
+            e_url.delete(0, "end")
             _refrescar_preview()
+            toast(self, "✅  Foto guardada en la carpeta del sistema")
 
         def _descargar_localmente():
-            url = estado_img["url"] or e_url.get().strip()
-            if not imagenes.es_url(url):
-                messagebox.showinfo(
-                    "Guardar localmente",
-                    "Esto es para guardar en tu compu una foto que está "
-                    "puesta como link (URL). Ahora mismo no hay ninguna "
-                    "URL cargada para descargar.", parent=d)
-                return
+            # Deja la foto dentro de imagenes_productos/ venga de donde
+            # venga: una URL, un archivo suelto del disco, o eligiendo uno
+            # ahora. Antes solo servia para URLs y con una foto local ya
+            # cargada no hacia nada.
+            origen = e_url.get().strip() or estado_img["url"]
+
+            if not origen:
+                ruta = filedialog.askopenfilename(
+                    title="Elegí la foto del producto",
+                    filetypes=[("Imágenes", "*.jpg *.jpeg *.png *.webp *.bmp"),
+                               ("Todos", "*.*")], parent=d)
+                if not ruta:
+                    return
+                origen = ruta
+
             try:
-                rel = imagenes.guardar_imagen_desde_url(pid, url)
-                estado_img["url"] = rel
-                e_url.delete(0, "end")
-                _refrescar_preview()
-                toast(self, "✅  Foto descargada y guardada en tu compu")
+                rel, que_paso = imagenes.incorporar_imagen(pid, origen)
             except Exception as e:
                 messagebox.showwarning(
-                    "Error", f"No se pudo descargar la imagen: {e}", parent=d)
+                    "Guardar localmente",
+                    f"No se pudo guardar la imagen:\n\n{e}", parent=d)
+                return
 
-        btn(fila_url, "Usar URL", variante="neutro",
+            if que_paso == "ya_estaba":
+                messagebox.showinfo(
+                    "Guardar localmente",
+                    "Esta foto ya está guardada en la carpeta del sistema.\n\n"
+                    f"{rel}", parent=d)
+                return
+
+            estado_img["url"] = rel
+            e_url.delete(0, "end")
+            _refrescar_preview()
+            toast(self, "✅  Foto guardada en la carpeta del sistema"
+                        if que_paso == "copiada"
+                        else "✅  Foto descargada y guardada")
+
+        btn(fila_url, "Bajar y usar", variante="primario",
             comando=_usar_url).pack(side="left", padx=(6,0))
-        btn(fila_url, "📥 Guardar localmente", variante="neutro",
+        btn(fila_url, "📁 Desde mi compu", variante="neutro",
             comando=_descargar_localmente).pack(side="left", padx=(6,0))
 
         _refrescar_preview()
@@ -939,14 +1170,26 @@ class ProductosUI(ttk.Frame):
         self._refrescar_productos()
 
     def _eliminar(self):
+        """Eliminar un producto borra su historial de ventas asociado."""
         pid = self._prod_sel
         if not pid:
             messagebox.showinfo("Atencion", "Selecciona un producto.", parent=self)
             return
         prod = get_producto_completo(pid)
         if not prod: return
+
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            self, f"Eliminar «{prod['descripcion']}» del catálogo.")
+        if not responsable:
+            return
+
         ok, motivo = eliminar_producto_si_posible(pid)
         if ok:
+            from repositorio import registrar_bitacora
+            registrar_bitacora("Eliminacion de producto", responsable,
+                               f"{prod['descripcion']} (cod {prod.get('codigo') or '—'})",
+                               None, pid)
             imagenes.eliminar_imagen_local(pid)
             messagebox.showinfo("Eliminado", "Producto eliminado correctamente.", parent=self)
             self._prod_sel = None

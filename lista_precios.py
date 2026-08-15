@@ -89,7 +89,8 @@ def generar_pdf_lista_precios(productos: list[dict],
 
     for prod in productos:
         cat = prod.get("categoria") or "Sin categoría"
-        precios = _get_precios_producto(prod["id"], prod["precio_base"])
+        precios = _get_precios_producto(prod["id"], prod["precio_base"],
+                                            prod.get("_recargo", 0.0))
         alto_prod = _altura_fila(len(precios))
 
         necesita = alto_prod + (alto_cat if cat != categoria_actual else 0)
@@ -237,6 +238,38 @@ def abrir_selector_lista_precios(parent):
                             bg=C.superficie, fg=C.texto, relief="solid", bd=1)
     entry_buscar.pack(side="left", ipady=5)
 
+    # ── Lista de precios de un vendedor ───────────────────────────────
+    # Un vendedor con comision "recargo" tiene SU propia lista: precio
+    # normal + costo x comision%, y solo sus categorias habilitadas.
+    from repositorio import get_vendedores, productos_para_vendedor
+    _vends = [{"id": None, "nombre": "Lista general (precios propios)"}] + [
+        dict(v) for v in get_vendedores() if v["activo"]]
+    lbl(bar, "Precios de:").pack(side="left", padx=(14, 6))
+    var_vend = tk.StringVar(value=_vends[0]["nombre"])
+    combo_vend = ttk.Combobox(bar, textvariable=var_vend, width=26,
+                              state="readonly",
+                              values=[v["nombre"] for v in _vends])
+    combo_vend.pack(side="left")
+
+    def _vendedor_elegido():
+        return _vends[[v["nombre"] for v in _vends].index(var_vend.get())]["id"]
+
+    # Filtro por categoria y por foto, igual que en el folleto: una lista
+    # de precios suele ser de un rubro, no del catalogo entero.
+    from repositorio import get_categorias
+    lbl(bar, "Categoria:").pack(side="left", padx=(14, 6))
+    _cats = [{"id": None, "nombre": "Todas"}] + list(get_categorias())
+    var_cat = tk.StringVar(value="Todas")
+    combo_cat = ttk.Combobox(bar, textvariable=var_cat, width=20,
+                             state="readonly",
+                             values=[c["nombre"] for c in _cats])
+    combo_cat.pack(side="left")
+
+    var_solo_foto = tk.BooleanVar(value=False)
+    tk.Checkbutton(bar, text="Solo con foto", variable=var_solo_foto,
+                   bg=C.bg, fg=C.texto, font=F.normal, selectcolor=C.bg,
+                   activebackground=C.bg).pack(side="left", padx=(14, 0))
+
     COLS = [
         ("sel",    "",           30,  "center"),
         ("codigo", "Codigo",     90,  "w"),
@@ -264,8 +297,8 @@ def abrir_selector_lista_precios(parent):
     seleccionados = {}   # codigo -> True
     todos_prods   = {}   # codigo -> dict
 
-    def _resumen_promos(prod_id, precio_base):
-        precios = _get_precios_producto(prod_id, precio_base)
+    def _resumen_promos(prod_id, precio_base, recargo=0.0):
+        precios = _get_precios_producto(prod_id, precio_base, recargo)
         if len(precios) <= 1:
             return "—"
         return "  |  ".join(f"x{p['cantidad']} ${p['precio']:,.0f}" for p in precios)
@@ -273,10 +306,17 @@ def abrir_selector_lista_precios(parent):
     def cargar(filtro=""):
         for r in tree.get_children():
             tree.delete(r)
-        for p in get_productos(filtro=filtro):
+        cat_id = _cats[[c["nombre"] for c in _cats].index(var_cat.get())]["id"]
+        lista, _com = productos_para_vendedor(
+            get_productos(filtro=filtro, categoria_id=cat_id),
+            _vendedor_elegido())
+        for p in lista:
+            if var_solo_foto.get() and not p.get("imagen_url"):
+                continue
             todos_prods[p["codigo"]] = p
             sel = "x" if p["codigo"] in seleccionados else ""
-            promos = _resumen_promos(p["id"], p["precio_base"])
+            promos = _resumen_promos(p["id"], p["precio_base"],
+                                     p.get("_recargo", 0.0))
             tree.insert("", "end", iid=p["codigo"], values=(
                 sel, p["codigo"], p["descripcion"],
                 f"$ {p['precio_base']:,.2f}", promos,
@@ -286,6 +326,13 @@ def abrir_selector_lista_precios(parent):
     cargar()
     entry_buscar.bind("<KeyRelease>",
                       lambda e: cargar(entry_buscar.get().strip()))
+    def _recargar(*_a):
+        cargar(entry_buscar.get().strip())
+        _actualizar_lbl()
+
+    combo_vend.bind("<<ComboboxSelected>>", _recargar)
+    combo_cat.bind("<<ComboboxSelected>>", _recargar)
+    var_solo_foto.trace_add("write", _recargar)
 
     def _on_click(event):
         iid = tree.identify_row(event.y)
@@ -310,8 +357,9 @@ def abrir_selector_lista_precios(parent):
 
     def _actualizar_lbl():
         n = len(seleccionados)
-        lbl_sel.config(text=f"{n} producto{'s' if n != 1 else ''} seleccionado{'s' if n != 1 else ''}"
-                      if n else "Ninguno seleccionado")
+        base = (f"{n} producto{'s' if n != 1 else ''} seleccionado{'s' if n != 1 else ''}"
+                if n else "Ninguno seleccionado")
+        lbl_sel.config(text=f"{base}   ·   {len(tree.get_children())} en pantalla")
 
     def _sel_todo():
         for iid in tree.get_children():
@@ -325,8 +373,12 @@ def abrir_selector_lista_precios(parent):
             tree.set(iid, "sel", "")
         _actualizar_lbl()
 
-    btn(bot, "Todo", variante="neutro", comando=_sel_todo).pack(side="left", padx=(12,4))
-    btn(bot, "Nada", variante="neutro", comando=_desel_todo).pack(side="left")
+    # "Todo" marcaba lo visible, pero con filtros activos el nombre
+    # hacia pensar que marcaba el catalogo entero.
+    btn(bot, "Marcar los visibles", variante="neutro",
+        comando=_sel_todo).pack(side="left", padx=(12,4))
+    btn(bot, "Desmarcar todo", variante="neutro",
+        comando=_desel_todo).pack(side="left")
 
     def generar():
         if not seleccionados:
@@ -343,9 +395,13 @@ def abrir_selector_lista_precios(parent):
         if ruta:
             if sys.platform == "win32":
                 os.startfile(ruta)
+            # Igual que en el folleto: se queda abierto para poder
+            # generar la lista de otro vendedor sin rearmar todo.
             messagebox.showinfo("Listo",
-                f"PDF generado y abierto.\n{ruta}", parent=d)
-            d.destroy()
+                f"PDF generado y abierto.\n{ruta}\n\n"
+                "La ventana queda abierta por si querés generar otra "
+                "(por ejemplo, con los precios de otro vendedor).",
+                parent=d)
         else:
             messagebox.showerror("Error",
                 "No se pudo generar el PDF.\n"
@@ -353,5 +409,5 @@ def abrir_selector_lista_precios(parent):
 
     btn(bot, "📄 Generar PDF", variante="exito",
         comando=generar).pack(side="right")
-    btn(bot, "Cancelar", variante="neutro",
+    btn(bot, "Cerrar", variante="neutro",
         comando=d.destroy).pack(side="right", padx=(0,8))

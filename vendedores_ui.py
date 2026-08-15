@@ -7,7 +7,7 @@ propio (usuario/contraseña) donde ve sus pedidos y comisiones.
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-from styles import C, F, btn, lbl, card, tabla, toast, header_seccion
+from styles import C, F, btn, lbl, card, tabla, toast, header_seccion, scrollable
 from repositorio import (get_vendedores, get_vendedor_por_id, guardar_vendedor,
                          toggle_vendedor, eliminar_vendedor)
 
@@ -83,6 +83,8 @@ class VendedoresUI(ttk.Frame):
             comando=self._eliminar_vendedor).pack(side="left", padx=(0,6))
         btn(bar, "🔗  Copiar link", variante="neutro",
             comando=self._copiar_link).pack(side="left", padx=(0,6))
+        btn(bar, "☁  Subir catálogo", variante="neutro",
+            comando=self._subir_catalogo).pack(side="left", padx=(0,6))
         btn(bar, "☁️  Sincronizar al Sheet", variante="primario",
             comando=self._sincronizar).pack(side="right")
 
@@ -183,21 +185,75 @@ class VendedoresUI(ttk.Frame):
                 "Atención",
                 "Primero cargá la URL del catálogo web en Config.", parent=self)
             return
+        # El link de vendedor apunta al catalogo COMPARTIDO. Si nunca se
+        # subieron los productos, el vendedor abre una pagina vacia y no
+        # hay forma de darse cuenta desde aca.
+        c = cfg()
+        if not c.get("catalogo_web_ultima_sync"):
+            if messagebox.askyesno(
+                    "Catálogo vacío",
+                    "Todavía no subiste el catálogo de productos.\n\n"
+                    "El link del vendedor va a abrir una página vacía: crear "
+                    "un vendedor solo sincroniza la lista de vendedores, no "
+                    "los productos.\n\n¿Subo el catálogo ahora?", parent=self):
+                if not self._subir_catalogo():
+                    return
+            else:
+                return
+
         link = f"{url}?v={v['codigo']}"
         self.clipboard_clear()
         self.clipboard_append(link)
-        toast(self, f"Link de {v['nombre']} copiado")
+        c = cfg()
+        toast(self, f"Link de {v['nombre']} copiado — catálogo con "
+                    f"{c.get('catalogo_web_ultima_cantidad', 0)} producto(s)")
+
+    def _subir_catalogo(self) -> bool:
+        """Sube los PRODUCTOS (no solo los vendedores) al catálogo web."""
+        from repositorio import get_productos
+        elegibles = [p for p in get_productos(solo_activos=True)
+                     if p["precio_base"] and p["precio_base"] > 0]
+        if not elegibles:
+            messagebox.showwarning(
+                "Subir catálogo",
+                "No hay ningún producto para publicar.\n\n"
+                "Al catálogo web solo van los productos ACTIVOS y con "
+                "precio mayor a cero.", parent=self)
+            return False
+
+        import catalogo_web
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            ok, msg = catalogo_web.sincronizar()
+        finally:
+            self.config(cursor="")
+        if ok:
+            toast(self, msg)
+        else:
+            messagebox.showwarning("Subir catálogo", msg, parent=self)
+        return ok
 
     def _dialogo_vendedor(self, vend=None):
         d = tk.Toplevel(self)
         d.title("Editar vendedor" if vend else "Nuevo vendedor")
-        _centrar(d, 420, 480)
+        # Alto acotado a la pantalla: el formulario crecio (modo de
+        # comision + categorias) y a 480px fijos quedaba cortado sin
+        # forma de bajar.
+        alto = min(720, d.winfo_screenheight() - 120)
+        _centrar(d, 460, alto)
         d.resizable(True, True)
         d.configure(bg=C.superficie)
         d.grab_set()
 
-        s = tk.Frame(d, bg=C.superficie)
-        s.pack(fill="both", expand=True)
+        # El boton Guardar va FUERA del area con scroll: si estuviera
+        # adentro, con la ventana chica habria que scrollear para
+        # encontrarlo.
+        pie_fijo = tk.Frame(d, bg=C.superficie)
+        pie_fijo.pack(side="bottom", fill="x")
+
+        cont_scroll, s = scrollable(d, bg=C.superficie)
+        cont_scroll.pack(fill="both", expand=True)
 
         campos = [
             ("Código (para el link, sin espacios)", "entry_v_codigo", ""),
@@ -207,6 +263,10 @@ class VendedoresUI(ttk.Frame):
                                                        "entry_v_pass", ""),
             ("Teléfono (solo si cobra él directo)",    "entry_v_tel", ""),
             ("Comisión % sobre el costo",              "entry_v_comision", "10"),
+            # El folleto del vendedor sale con SU nombre: si dice el del
+            # mayorista, el cliente llama directo y el vendedor pierde la venta.
+            ("Nombre para su folleto (vacío = su nombre)",
+                                                       "entry_v_comercial", ""),
         ]
         for label, attr, default in campos:
             lbl(s, label, variante="suave", bg=C.superficie).pack(
@@ -221,6 +281,8 @@ class VendedoresUI(ttk.Frame):
                 elif attr == "entry_v_usuario": e.insert(0, vend["usuario"])
                 elif attr == "entry_v_tel":    e.insert(0, vend["telefono"] or "")
                 elif attr == "entry_v_comision": e.insert(0, f"{vend['comision_pct']:.1f}")
+                elif attr == "entry_v_comercial":
+                    e.insert(0, vend["nombre_comercial"] or "")
             elif not vend:
                 e.insert(0, default)
             e.pack(fill="x", padx=20, ipady=5, pady=(2,0))
@@ -240,11 +302,46 @@ class VendedoresUI(ttk.Frame):
                       font=F.normal, anchor="w", justify="left",
                       wraplength=360).pack(fill="x", anchor="w")
 
-        lbl(s, "El precio que ve el cliente en el link de este vendedor "
-              "es tu precio normal + (costo × comisión%). El cliente paga "
-              "esa diferencia — no sale de tu margen.",
-            variante="suave", bg=C.superficie, wraplength=380,
-            justify="left").pack(padx=20, anchor="w", pady=(10,0))
+        # De donde sale la plata de la comision: la paga el cliente
+        # (recargo) o sale del margen del negocio (descuento).
+        lbl(s, "Quién paga la comisión *", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w", pady=(12,0))
+        modo_com = tk.StringVar(
+            value=(vend.get("modo_comision") or "recargo") if vend else "recargo")
+        f_com = tk.Frame(s, bg=C.superficie)
+        f_com.pack(fill="x", padx=20, pady=(2,0))
+        tk.Radiobutton(f_com,
+                      text="El cliente — ve tu precio + (costo × comisión%). Tu margen no se toca.",
+                      variable=modo_com, value="recargo", bg=C.superficie,
+                      font=F.normal, anchor="w", justify="left",
+                      wraplength=360).pack(fill="x", anchor="w")
+        tk.Radiobutton(f_com,
+                      text="Vos — el cliente ve tu precio de lista y la comisión sale de tu margen.",
+                      variable=modo_com, value="descuento", bg=C.superficie,
+                      font=F.normal, anchor="w", justify="left",
+                      wraplength=360).pack(fill="x", anchor="w")
+
+        # ── Categorias habilitadas ────────────────────────────────────
+        lbl(s, "Qué categorías puede vender", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w", pady=(12,0))
+        lbl(s, "Sin marcar ninguna, ve el catálogo completo.",
+            variante="suave", bg=C.superficie).pack(padx=20, anchor="w")
+
+        from repositorio import get_categorias, get_categorias_vendedor
+        cats = get_categorias()
+        habilitadas = set(get_categorias_vendedor(vend["id"])) if vend else set()
+        vars_cat = {}
+        f_cats = tk.Frame(s, bg=C.superficie, highlightthickness=1,
+                          highlightbackground=C.borde)
+        f_cats.pack(fill="x", padx=20, pady=(4,0))
+        for i, cat in enumerate(cats):
+            v = tk.BooleanVar(value=cat["id"] in habilitadas)
+            vars_cat[cat["id"]] = v
+            tk.Checkbutton(f_cats, text=cat["nombre"], variable=v,
+                           bg=C.superficie, fg=C.texto, font=F.normal,
+                           anchor="w", selectcolor=C.superficie,
+                           activebackground=C.superficie).grid(
+                row=i // 2, column=i % 2, sticky="w", padx=6, pady=1)
 
         def guardar(event=None):
             codigo = self.entry_v_codigo.get().strip()
@@ -264,20 +361,31 @@ class VendedoresUI(ttk.Frame):
                     "Si cobra él directo, hace falta su teléfono.", parent=d)
                 return
 
+            elegidas = [cid for cid, v in vars_cat.items() if v.get()]
             ok, error = guardar_vendedor(
                 vend["id"] if vend else None,
                 codigo, nombre, usuario, password,
-                telefono, comision, modo.get())
+                telefono, comision, modo.get(), modo_com.get(),
+                self.entry_v_comercial.get().strip())
             if not ok:
                 messagebox.showwarning("Error", error, parent=d)
                 return
+
+            # Las categorias se guardan aparte: para un alta hay que
+            # esperar a tener el id que asigno la base.
+            from repositorio import set_categorias_vendedor, get_vendedor_por_codigo
+            destino = vend["id"] if vend else (
+                get_vendedor_por_codigo(codigo) or {}).get("id")
+            if destino:
+                set_categorias_vendedor(destino, elegidas)
 
             d.destroy()
             toast(self, "Vendedor guardado")
             self._sincronizar(silencioso=True)
             self._refrescar()
 
-        btn(s, "💾  Guardar", variante="exito", comando=guardar).pack(pady=16)
+        btn(pie_fijo, "💾  Guardar", variante="exito",
+            comando=guardar).pack(pady=12)
 
     def _sincronizar(self, silencioso=False):
         import catalogo_web

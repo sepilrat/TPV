@@ -23,8 +23,17 @@ DEFAULTS = {
     "negocio_logo_path":    "",
     "folleto_color":        "#2451B0",   # color del encabezado/borde del folleto de ofertas (hex)
     "folleto_color_precio": "#DC2626",   # color de fondo del cartel de precio (hex) — más llamativo
+    # Ultima subida del catalogo web (solo informativo, lo escribe el sistema)
+    "catalogo_web_ultima_sync":     "",
+    "catalogo_web_ultima_cantidad": 0,
+
+    "folleto_foto_pct": 58,
+    # Cartel de precio superpuesto sobre la foto (libera ~10mm para el texto)
+    "folleto_precio_sobre_foto": True,   # % del alto de la celda que ocupa la foto (25-75)
+    "folleto_categoria_pagina_nueva": False,  # True = una hoja por categoria
     "folleto_mostrar_codigo": False,     # incluir codigo/PLU en cada producto del folleto
-    "folleto_titulo":       "OFERTAS INCREIBLES",  # texto grande del encabezado (editable, ej "OFERTAS DE FEBRERO")
+    "folleto_titulo":       "OFERTAS INCREIBLES",  # texto grande centrado. Vacio = no se muestra
+    "folleto_subtitulo":    "Ofertas",             # rotulo chico sobre la linea de color. Vacio = no se muestra
     "negocio_mensaje_pie":  "Gracias por su compra!",
 
     # Impresora térmica
@@ -49,8 +58,25 @@ DEFAULTS = {
     "whatsapp_numero":      "",          # número del negocio (opcional)
 
     # Stock
+    # Vender aunque el stock registrado no alcance. En un autoservicio el
+    # stock nunca esta perfecto y frenar la caja cuesta mas que el
+    # descuadre: el faltante queda en negativo para corregirlo despues.
+    "permitir_venta_sin_stock": True,
     "stock_alerta_umbral":  5,           # unidades mínimas antes de alertar
     "stock_alerta_dias_vto": 7,          # días para alertar vencimientos
+
+    # AVISO DIARIO por email: stock critico + vencimientos, todo junto.
+    # Se manda UNA vez por dia, disparado por lo primero que ocurra de
+    # los eventos tildados. Asi no depende de una tarea programada de
+    # Windows que hay que crear a mano.
+    "aviso_diario_activo":          False,
+    "aviso_diario_destinatario":    "",
+    "aviso_diario_al_abrir_app":    True,
+    "aviso_diario_al_abrir_caja":   True,
+    "aviso_diario_al_cerrar_caja":  False,
+    # Para cuantos dias de venta se quiere tener stock en el mail diario
+    "aviso_diario_dias_cobertura":  14,
+    "_aviso_diario_ultimo_envio":   "",
 
     # Aviso de vencimientos por email al abrir el TPV
     "vto_email_activo":        False,
@@ -59,8 +85,11 @@ DEFAULTS = {
 
     # Redondeo de precios de venta. 0 = sin redondeo.
     # 1 = al peso, 10 = a la decena, 50 y 100 = a esos múltiplos.
-    # Siempre redondea PARA ARRIBA, para no comerse margen.
     "redondeo_precios":        0,
+    # "cercano" = al múltiplo más próximo (menos de la mitad baja, más sube)
+    # "arriba"  = siempre al siguiente múltiplo
+    # "abajo"   = siempre al múltiplo anterior
+    "redondeo_modo":           "cercano",
 
     # Informe de stock automático por email
     "informe_stock_email_activo":         False,
@@ -78,6 +107,13 @@ DEFAULTS = {
     "etiqueta_cols":             2,      # columnas por hoja A4
     "etiqueta_filas":            5,      # filas por hoja A4
     "etiqueta_margen_arriba_mm": 10,     # espacio antes de la primera fila
+    # Etiquetas pegadas entre si: 1 corte vertical parte toda la hoja en
+    # vez de 2 por columna. Destildar solo para planchas autoadhesivas.
+    # Margen lateral minimo. Con menos, las impresoras hogareñas suelen
+    # recortar el borde y se pierden las guias de corte.
+    "etiqueta_margen_lateral_mm": 12,
+    "etiqueta_pegadas":      True,
+    "etiqueta_guias_corte":  True,   # marcas en los bordes para cortar derecho
     "etiqueta_espacio_mm":       0,      # espacio entre etiquetas (filas y columnas)
     "etiqueta_mostrar_barcode": True,
     "etiqueta_mostrar_promo":   True,
@@ -139,15 +175,22 @@ def get(clave: str, default=None):
     return cargar().get(clave, default)
 
 
-def set(clave: str, valor):
-    """Actualiza un valor y lo persiste."""
-    cfg = cargar()
-    cfg[clave] = valor
-    guardar(cfg)
-
-
-# Instancia global cargada una vez
 _cfg = None
+
+
+def set(clave: str, valor):
+    """Actualiza un valor, lo persiste Y refresca la cache en memoria.
+
+    Sin lo ultimo, cambiar un ajuste no tenia efecto hasta reiniciar el TPV:
+    guardar() escribia el archivo pero cfg() seguia devolviendo la copia
+    vieja que cargo al arrancar.
+    """
+    datos = cargar()
+    datos[clave] = valor
+    guardar(datos)
+    if _cfg is not None:
+        _cfg[clave] = valor   # se muta el dict, no hace falta global
+
 
 def cfg() -> dict:
     """Retorna la configuración cacheada. Recargar con reload()."""

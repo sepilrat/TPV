@@ -24,7 +24,14 @@ import imagenes
 
 
 def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
-                        agrupar_por_categoria: bool = True) -> str | None:
+                        agrupar_por_categoria: bool = True,
+                        vendedor: dict = None) -> str | None:
+    """vendedor: si viene, el encabezado sale con SUS datos.
+
+    Un revendedor reparte el folleto como propio: si dice el nombre y el
+    telefono del mayorista, el cliente llama directo al mayorista y el
+    vendedor se queda sin la venta.
+    """
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
@@ -42,6 +49,25 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
         ruta_salida = os.path.join(tempfile.gettempdir(), nombre)
 
     c_cfg = cfg()
+
+    # Encabezado: propio, o el del vendedor si el folleto es para el.
+    # Sin logo del mayorista en ese caso, por el mismo motivo.
+    if vendedor:
+        nombre_encabezado = (vendedor.get("nombre_comercial")
+                             or vendedor.get("nombre") or "")
+        contacto_encabezado = [
+            vendedor.get("telefono"),
+            vendedor.get("web"),
+            vendedor.get("direccion"),
+        ]
+    else:
+        nombre_encabezado = c_cfg.get("negocio_nombre") or ""
+        contacto_encabezado = [
+            c_cfg.get("negocio_web"),
+            c_cfg.get("negocio_direccion"),
+            c_cfg.get("negocio_telefono"),
+        ]
+
     ancho_pagina, alto_pagina = A4
     margen_ext = 6 * mm    # separación entre el borde de color y el borde de la hoja
     margen     = 14 * mm   # margen del contenido, adentro del borde
@@ -90,7 +116,7 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
         # Sin banda de color de fondo: encabezado sobre blanco liso,
         # logo grande y centrado arriba de todo.
         y = y_top
-        logo_path = c_cfg.get("negocio_logo_path")
+        logo_path = None if vendedor else c_cfg.get("negocio_logo_path")
         if logo_path and os.path.exists(logo_path):
             try:
                 img_reader = ImageReader(logo_path)
@@ -114,7 +140,7 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
 
         cv.setFont("Helvetica-Bold", 12)
         cv.setFillColor(color_marca)
-        cv.drawCentredString(ancho_pagina/2, y, c_cfg.get("negocio_nombre") or "")
+        cv.drawCentredString(ancho_pagina/2, y, nombre_encabezado)
         y -= 5.5*mm
 
         titulo_promo = c_cfg.get("folleto_titulo") or ""
@@ -124,11 +150,7 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
             cv.drawCentredString(ancho_pagina/2, y, titulo_promo.upper())
             y -= 6.5*mm
 
-        datos = [d for d in [
-            c_cfg.get("negocio_web"),
-            c_cfg.get("negocio_direccion"),
-            c_cfg.get("negocio_telefono"),
-        ] if d]
+        datos = [d for d in contacto_encabezado if d]
         if datos:
             cv.setFont("Helvetica", 8)
             cv.setFillColor(colors.HexColor("#555555"))
@@ -146,6 +168,33 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
         cv.setLineWidth(1.6)
         cv.line(margen, y_linea, ancho_pagina - margen, y_linea)
 
+    # Cada categoria en su propia hoja, o todo seguido. Con pocas categorias
+    # y pocos productos por categoria, una pagina por categoria desperdicia
+    # papel: quedan hojas con tres productos y el resto en blanco.
+    # Un unico tamano de foto para todas las celdas del folleto.
+    foto_lado_global = _foto_lado_uniforme(cv, productos, cel_ancho, alto_fila)
+
+    pagina_por_categoria = bool(c_cfg.get("folleto_categoria_pagina_nueva", False))
+    # Cuando va todo seguido, el encabezado de hoja lleva el titulo general
+    # del folleto y la categoria va en una banda dentro de la pagina.
+    # Rotulo chico sobre la linea de color. Vacio = no se dibuja.
+    # Antes decia "Ofertas" fijo en el codigo y no habia forma de sacarlo.
+    titulo_hoja = c_cfg.get("folleto_subtitulo", "Ofertas")
+    alto_banda_cat = 9 * mm
+
+    def _banda_categoria(nombre, y_pos):
+        """Encabezado de categoria dentro de la misma hoja."""
+        cv.setFillColor(color_marca)
+        cv.rect(margen, y_pos - alto_banda_cat + 2 * mm,
+                ancho_pagina - 2 * margen, alto_banda_cat - 2.5 * mm,
+                fill=1, stroke=0)
+        cv.setFillColor(colors.white)
+        cv.setFont("Helvetica-Bold", 10)
+        cv.drawString(margen + 3 * mm, y_pos - alto_banda_cat + 4.4 * mm,
+                      nombre.upper())
+        cv.setFillColor(colors.black)
+        return y_pos - alto_banda_cat
+
     if agrupar_por_categoria:
         categoria_actual = None
         y = None
@@ -153,19 +202,42 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
         for prod in productos:
             cat = prod.get("categoria") or "Sin categoría"
             if cat != categoria_actual:
-                if categoria_actual is not None:
+                if categoria_actual is None:
+                    _header(cat if pagina_por_categoria else titulo_hoja)
+                    y = alto_pagina - margen - alto_hdr
+                    if not pagina_por_categoria:
+                        y = _banda_categoria(cat, y)
+                elif pagina_por_categoria:
                     cv.showPage()
+                    _header(cat)
+                    y = alto_pagina - margen - alto_hdr
+                else:
+                    # Cerrar la fila a medias antes de cambiar de categoria
+                    if col > 0:
+                        y -= alto_fila
+                    # Si no entra la banda mas una fila, pasar de hoja
+                    if y - alto_banda_cat - alto_fila < margen_ext + 6 * mm:
+                        cv.showPage()
+                        _header(titulo_hoja)
+                        y = alto_pagina - margen - alto_hdr
+                    else:
+                        y -= 2 * mm
+                    y = _banda_categoria(cat, y)
                 categoria_actual = cat
-                _header(categoria_actual)
-                y = alto_pagina - margen - alto_hdr
                 col = 0
             if col == 0 and y - alto_fila < margen_ext + 6*mm:
                 cv.showPage()
-                _header(categoria_actual)
-                y = alto_pagina - margen - alto_hdr
+                if pagina_por_categoria:
+                    _header(categoria_actual)
+                    y = alto_pagina - margen - alto_hdr
+                else:
+                    _header(titulo_hoja)
+                    y = _banda_categoria(f"{categoria_actual} (cont.)",
+                                         alto_pagina - margen - alto_hdr)
             x = margen + col * cel_ancho
             _dibujar_celda_folleto(cv, prod, x, y - alto_fila, cel_ancho,
-                                  alto_fila, color_marca, color_precio)
+                                  alto_fila, color_marca, color_precio,
+                                  foto_lado_fijo=foto_lado_global)
             col += 1
             if col >= cols:
                 col = 0
@@ -175,18 +247,19 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
                 cv.line(margen, y, ancho_pagina - margen, y)
     else:
         # Modo consolidado: todos los productos juntos, sin separar
-        # por categoría — un único título genérico ("Ofertas").
-        _header("Ofertas")
+        # por categoría — rotulo unico, configurable (puede ir vacio).
+        _header(titulo_hoja)
         y = alto_pagina - margen - alto_hdr
         col = 0
         for prod in productos:
             if col == 0 and y - alto_fila < margen_ext + 6*mm:
                 cv.showPage()
-                _header("Ofertas")
+                _header(titulo_hoja)
                 y = alto_pagina - margen - alto_hdr
             x = margen + col * cel_ancho
             _dibujar_celda_folleto(cv, prod, x, y - alto_fila, cel_ancho,
-                                  alto_fila, color_marca, color_precio)
+                                  alto_fila, color_marca, color_precio,
+                                  foto_lado_fijo=foto_lado_global)
             col += 1
             if col >= cols:
                 col = 0
@@ -199,7 +272,56 @@ def generar_pdf_folleto(productos: list[dict], ruta_salida: str = None,
     return ruta_salida
 
 
-def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_precio):
+def _foto_lado_uniforme(cv, productos, ancho, alto, pad=None):
+    """Un unico tamano de foto para TODO el folleto.
+
+    Si cada celda calcula el suyo segun el largo de su descripcion, las
+    fotos salen de tamanos distintos y los carteles de precio quedan a
+    distinta altura: la grilla se ve desprolija.
+
+    La foto manda: se toma el porcentaje configurado (folleto_foto_pct) y
+    el texto se acomoda a lo que sobra achicando la tipografia. Solo si
+    ni al minimo entra la descripcion se recorta un poco la foto.
+    """
+    from reportlab.lib.units import mm
+    if pad is None:
+        pad = 3 * mm
+
+    try:
+        pct = float(cfg().get("folleto_foto_pct", 58)) / 100.0
+    except Exception:
+        pct = 0.58
+    pct = min(max(pct, 0.25), 0.75)
+
+    lado = min(ancho - 2 * pad, alto * pct)
+
+    # Espacio fijo debajo de la foto: separacion, cartel de precio y codigo
+    reserva = 5 * mm if cfg().get("folleto_precio_sobre_foto", True) else 16 * mm
+    if cfg().get("folleto_mostrar_codigo", True):
+        reserva += 5 * mm
+
+    # Minimo vital para la descripcion mas larga, a 6pt (el piso del
+    # auto-ajuste), mas la linea de marca si algun producto la tiene
+    texto_ancho = ancho - 2 * pad
+    peor, hay_marca = 1, False
+    for prod in productos or []:
+        hay_marca = hay_marca or bool(prod.get("marca"))
+        lineas, linea = 1, ""
+        for palabra in (prod.get("descripcion") or "").upper().split():
+            prueba = (linea + " " + palabra).strip()
+            if cv.stringWidth(prueba, "Helvetica-Bold", 6) <= texto_ancho:
+                linea = prueba
+            else:
+                lineas += 1
+                linea = palabra
+        peor = max(peor, min(lineas, 3))
+    minimo_texto = peor * 2.6 * mm + (5.5 * mm if hay_marca else 0)
+
+    return max(min(lado, alto - reserva - minimo_texto), alto * 0.35)
+
+
+def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_precio,
+                           foto_lado_fijo=None):
     from reportlab.lib import colors
     from reportlab.lib.units import mm
     from reportlab.lib.utils import ImageReader
@@ -207,7 +329,13 @@ def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_preci
     pad = 3 * mm
 
     # ── Foto grande, centrada arriba de la celda ────────────────────
-    foto_lado = min(ancho - 2*pad, alto * 0.58)
+    # El tamano viene calculado para TODO el folleto (ver
+    # _foto_lado_uniforme): asi todas las fotos y todos los carteles de
+    # precio quedan a la misma altura y la grilla se ve pareja.
+    if foto_lado_fijo:
+        foto_lado = foto_lado_fijo
+    else:
+        foto_lado = min(ancho - 2*pad, alto * 0.58)
     foto_x = x + (ancho - foto_lado) / 2
     foto_y = y + alto - foto_lado - 3*mm
 
@@ -232,7 +360,8 @@ def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_preci
     # La más barata va primero, grande, indicando la cantidad necesaria
     # (ej "$1,650 x12"); el resto de las escalas se listan más chico
     # debajo, para no perder la promoción como pasaba antes ──────────
-    precios = _get_precios_producto(prod["id"], prod["precio_base"])
+    precios = _get_precios_producto(prod["id"], prod["precio_base"],
+                                        prod.get("_recargo", 0.0))
     if not precios:
         precios = [{"precio": prod["precio_base"], "cantidad": 1, "label": "Precio unitario"}]
 
@@ -254,7 +383,16 @@ def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_preci
     # Antes el cartel se superponía sobre la parte de abajo de la foto
     # (quedaba raro contra fondos de producto con mucho detalle). Ahora
     # va debajo, sin tocarla.
-    badge_y = foto_y - badge_h - 2*mm
+    # El cartel puede ir superpuesto sobre la foto o debajo de ella.
+    # Superpuesto es lo que permite tener foto grande Y texto completo:
+    # debajo se come unos 10 mm que son justo los que le faltan a la
+    # descripcion. Sobre la foto se apoya en el borde inferior, donde en
+    # las fotos de producto casi siempre hay fondo liso.
+    precio_sobre_foto = bool(cfg().get("folleto_precio_sobre_foto", True))
+    if precio_sobre_foto:
+        badge_y = foto_y + 1.5*mm
+    else:
+        badge_y = foto_y - badge_h - 1.5*mm
 
     # Tag vertical "LLEVANDO N", al costado izquierdo del cartel de
     # precio, con el texto leyéndose de abajo hacia arriba — SOLO
@@ -296,7 +434,8 @@ def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_preci
                         precio_txt)
     cv.setFillColor(colors.black)
 
-    y_bajo = badge_y - 6*mm
+    # Si el cartel va sobre la foto, el texto arranca justo debajo de ella
+    y_bajo = (foto_y - 4.5*mm) if precio_sobre_foto else (badge_y - 4.5*mm)
 
     # Resto de las escalas (si hay), debajo del cartel principal
     resto = precios[1:]
@@ -320,7 +459,7 @@ def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_preci
         cv.setFillColor(colors.HexColor("#666666"))
         cv.drawRightString(badge_x + badge_w, y_bajo, codigo)
         cv.setFillColor(colors.black)
-        y_texto = y_bajo - 6.5*mm
+        y_texto = y_bajo - 5*mm
     else:
         y_texto = y_bajo
 
@@ -336,26 +475,62 @@ def _dibujar_celda_folleto(cv, prod, x, y, ancho, alto, color_marca, color_preci
             marca_txt = marca_txt[:-1]
         cv.drawString(texto_x, y_texto, marca_txt)
         cv.setFillColor(colors.black)
-        y_texto -= 4.5*mm
+        y_texto -= 4.0*mm
 
-    cv.setFont("Helvetica-Bold", 10)
-    palabras = prod["descripcion"].upper().split()
-    lineas, linea = [], ""
-    for palabra in palabras:
-        prueba = (linea + " " + palabra).strip()
-        if cv.stringWidth(prueba, "Helvetica-Bold", 10) <= texto_ancho:
-            linea = prueba
-        else:
-            if linea:
-                lineas.append(linea)
-            linea = palabra
-    if linea:
-        lineas.append(linea)
-    for l in lineas[:2]:
+    # La descripcion completa o nada: cortarla deja carteles que dicen
+    # "MANTA FRANEL LISA" cuando el producto es "Manta franel lisa Bordo
+    # 259 x 229 King". El color y la medida son justo lo que el cliente
+    # necesita para saber si es lo que busca.
+    # En vez de recortar el texto se achica la tipografia hasta que entre.
+    descripcion = (prod["descripcion"] or "").upper()
+
+    def _envolver(texto, fuente, size):
+        lineas, linea = [], ""
+        for palabra in texto.split():
+            prueba = (linea + " " + palabra).strip()
+            if cv.stringWidth(prueba, fuente, size) <= texto_ancho:
+                linea = prueba
+            else:
+                if linea:
+                    lineas.append(linea)
+                # Palabra sola mas ancha que la celda: se parte por letra
+                while cv.stringWidth(palabra, fuente, size) > texto_ancho and len(palabra) > 1:
+                    corte = len(palabra) - 1
+                    while corte > 1 and cv.stringWidth(palabra[:corte], fuente, size) > texto_ancho:
+                        corte -= 1
+                    lineas.append(palabra[:corte])
+                    palabra = palabra[corte:]
+                linea = palabra
+        if linea:
+            lineas.append(linea)
+        return lineas
+
+    alto_disponible = y_texto - (y + pad)
+    fuente_desc = "Helvetica-Bold"
+    size_desc, interlinea, lineas = 10, 4.3*mm, []
+
+    for size in (10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6):
+        interlinea = size * 0.43 * mm
+        lineas = _envolver(descripcion, fuente_desc, size)
+        if len(lineas) * interlinea <= alto_disponible:
+            size_desc = size
+            break
+    else:
+        # Ni al minimo entra: se muestra lo que se pueda y se avisa con "…"
+        size_desc = 6
+        interlinea = size_desc * 0.43 * mm
+        lineas = _envolver(descripcion, fuente_desc, size_desc)
+        cabe = max(1, int(alto_disponible // interlinea))
+        if len(lineas) > cabe:
+            lineas = lineas[:cabe]
+            lineas[-1] = lineas[-1][:max(1, len(lineas[-1]) - 1)] + "…"
+
+    cv.setFont(fuente_desc, size_desc)
+    for l in lineas:
         if y_texto < y + pad:
             break
         cv.drawString(texto_x, y_texto, l)
-        y_texto -= 4.3*mm
+        y_texto -= interlinea
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -396,9 +571,46 @@ def abrir_selector_folleto(parent):
     bar = tk.Frame(d, bg=C.bg)
     bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(0,6))
     lbl(bar, "Buscar:").pack(side="left", padx=(0,6))
-    entry_buscar = tk.Entry(bar, font=F.normal, width=28,
+    entry_buscar = tk.Entry(bar, font=F.normal, width=24,
                             bg=C.superficie, fg=C.texto, relief="solid", bd=1)
     entry_buscar.pack(side="left", ipady=5)
+
+    # Filtro por categoria: un folleto suele ser de un rubro, no del
+    # catalogo entero. Sin esto habia que ir tildando producto por producto.
+    lbl(bar, "Categoria:").pack(side="left", padx=(14, 6))
+    from repositorio import get_categorias
+    _cats = [{"id": None, "nombre": "Todas"}] + list(get_categorias())
+    var_cat = tk.StringVar(value="Todas")
+    combo_cat = ttk.Combobox(bar, textvariable=var_cat, width=22, state="readonly",
+                             values=[c["nombre"] for c in _cats])
+    combo_cat.pack(side="left")
+
+
+    # ── Lista de precios de un vendedor ───────────────────────────────
+    # Un vendedor con comision "recargo" tiene SU propia lista: precio
+    # normal + costo x comision%. Sin esto habia que armarla a mano.
+    from repositorio import get_vendedores, productos_para_vendedor
+    _vends = [{"id": None, "nombre": "Lista general (precios propios)"}] + [
+        dict(v) for v in get_vendedores() if v["activo"]]
+    lbl(bar, "Precios de:").pack(side="left", padx=(14, 6))
+    var_vend = tk.StringVar(value=_vends[0]["nombre"])
+    combo_vend = ttk.Combobox(bar, textvariable=var_vend, width=26,
+                              state="readonly",
+                              values=[v["nombre"] for v in _vends])
+    combo_vend.pack(side="left")
+
+    def _vendedor_elegido():
+        return _vends[[v["nombre"] for v in _vends].index(var_vend.get())]["id"]
+
+    def _vendedor_dict():
+        """El vendedor completo, para el encabezado del folleto."""
+        v = _vends[[x["nombre"] for x in _vends].index(var_vend.get())]
+        return v if v.get("id") else None
+
+    var_solo_foto = tk.BooleanVar(value=False)
+    tk.Checkbutton(bar, text="Solo con foto", variable=var_solo_foto,
+                   bg=C.bg, fg=C.texto, font=F.normal, selectcolor=C.bg,
+                   activebackground=C.bg).pack(side="left", padx=(14, 0))
 
     COLS = [
         ("sel",    "",           30,  "center"),
@@ -430,7 +642,12 @@ def abrir_selector_folleto(parent):
     def cargar(filtro=""):
         for r in tree.get_children():
             tree.delete(r)
-        for p in get_productos(filtro=filtro):
+        cat_id = _cats[[c["nombre"] for c in _cats].index(var_cat.get())]["id"]
+        lista, _com = productos_para_vendedor(
+            get_productos(filtro=filtro, categoria_id=cat_id), _vendedor_elegido())
+        for p in lista:
+            if var_solo_foto.get() and not p.get("imagen_url"):
+                continue
             todos_prods[p["codigo"]] = p
             sel = "x" if p["codigo"] in seleccionados else ""
             tree.insert("", "end", iid=p["codigo"], values=(
@@ -439,9 +656,15 @@ def abrir_selector_folleto(parent):
                 "Sí" if p.get("imagen_url") else "—",
             ))
 
+    def _recargar(*_a):
+        cargar(entry_buscar.get().strip())
+        _actualizar_lbl()
+
     cargar()
-    entry_buscar.bind("<KeyRelease>",
-                      lambda e: cargar(entry_buscar.get().strip()))
+    entry_buscar.bind("<KeyRelease>", _recargar)
+    combo_cat.bind("<<ComboboxSelected>>", _recargar)
+    combo_vend.bind("<<ComboboxSelected>>", _recargar)
+    var_solo_foto.trace_add("write", _recargar)
 
     def _on_click(event):
         iid = tree.identify_row(event.y)
@@ -466,8 +689,10 @@ def abrir_selector_folleto(parent):
 
     def _actualizar_lbl():
         n = len(seleccionados)
-        lbl_sel.config(text=f"{n} producto{'s' if n != 1 else ''} seleccionado{'s' if n != 1 else ''}"
-                      if n else "Ninguno seleccionado")
+        visibles = len(tree.get_children())
+        base = (f"{n} producto{'s' if n != 1 else ''} seleccionado{'s' if n != 1 else ''}"
+                if n else "Ninguno seleccionado")
+        lbl_sel.config(text=f"{base}   ·   {visibles} en pantalla")
 
     def _sel_todo():
         for iid in tree.get_children():
@@ -481,8 +706,10 @@ def abrir_selector_folleto(parent):
             tree.set(iid, "sel", "")
         _actualizar_lbl()
 
-    btn(bot, "Todo", variante="neutro", comando=_sel_todo).pack(side="left", padx=(12,4))
-    btn(bot, "Nada", variante="neutro", comando=_desel_todo).pack(side="left")
+    btn(bot, "Marcar los visibles", variante="neutro",
+        comando=_sel_todo).pack(side="left", padx=(12,4))
+    btn(bot, "Desmarcar todo", variante="neutro",
+        comando=_desel_todo).pack(side="left")
 
     def generar():
         if not seleccionados:
@@ -493,15 +720,22 @@ def abrir_selector_folleto(parent):
 
         d.config(cursor="wait")
         d.update()
-        ruta = generar_pdf_folleto(prods, agrupar_por_categoria=not var_consolidar.get())
+        ruta = generar_pdf_folleto(prods,
+                                   agrupar_por_categoria=not var_consolidar.get(),
+                                   vendedor=_vendedor_dict())
         d.config(cursor="")
 
         if ruta:
             if sys.platform == "win32":
                 os.startfile(ruta)
+            # El selector NO se cierra: lo normal es generar varios
+            # seguidos (uno por vendedor, o por categoria) y volver a
+            # armar la seleccion cada vez era el doble de trabajo.
             messagebox.showinfo("Listo",
-                f"Folleto generado y abierto.\n{ruta}", parent=d)
-            d.destroy()
+                f"Folleto generado y abierto.\n{ruta}\n\n"
+                "La ventana queda abierta por si querés generar otro "
+                "(por ejemplo, con los precios de otro vendedor).",
+                parent=d)
         else:
             messagebox.showerror("Error",
                 "No se pudo generar el PDF.\n"
@@ -509,5 +743,5 @@ def abrir_selector_folleto(parent):
 
     btn(bot, "🗞️ Generar folleto", variante="exito",
         comando=generar).pack(side="right")
-    btn(bot, "Cancelar", variante="neutro",
+    btn(bot, "Cerrar", variante="neutro",
         comando=d.destroy).pack(side="right", padx=(0,8))

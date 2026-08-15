@@ -27,7 +27,6 @@ después conectarlo a tu cuenta de WhatsApp Business desde ahí.
 import os
 import csv
 import tempfile
-import logging
 from datetime import datetime
 
 from config import cfg

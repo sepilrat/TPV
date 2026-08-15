@@ -68,6 +68,8 @@ class AuditoriaUI(ttk.Frame):
             comando=self._aplicar).pack(side="left", padx=6)
         btn(barra, "No avisar mas", variante="neutro",
             comando=self._descartar).pack(side="left")
+        btn(barra, "📌 Marcar para revisar", variante="neutro",
+            comando=self._marcar_revisar).pack(side="left", padx=6)
 
         lbl(barra, "Ver:", variante="suave").pack(side="left", padx=(18, 4))
         self.filtro = tk.StringVar(value="TODOS")
@@ -163,6 +165,22 @@ class AuditoriaUI(ttk.Frame):
         m_prec = getattr(self.app, "modulos", {}).get("Precios")
         if m_prec and hasattr(m_prec, "refrescar"):
             m_prec.refrescar()
+
+    def _marcar_revisar(self):
+        """Un hallazgo que no se resuelve ahora va a la cola de revision.
+
+        Descartarlo lo silencia para siempre; esto lo deja anotado para
+        volver, que es lo que uno quiere cuando el problema es real pero
+        no es el momento de arreglarlo.
+        """
+        h = self._sel()
+        if not h:
+            messagebox.showinfo("Auditoria", "Elegi una fila primero.", parent=self)
+            return
+        from revision_ui import dialogo_marcar
+        if dialogo_marcar(self, h.producto_id, h.descripcion_corta):
+            messagebox.showinfo("Auditoria",
+                                "Anotado en Productos → A revisar.", parent=self)
 
     def _descartar(self):
         h = self._sel()

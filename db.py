@@ -3,6 +3,7 @@ db.py — Base de datos del sistema TPV
 Versión 2.0 — Diseño limpio desde cero
 """
 
+import logging
 import sqlite3
 import os
 import sys
@@ -12,7 +13,23 @@ from datetime import datetime
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "tpv2.db")
+# Base de datos. Se puede apuntar a otra con la variable de entorno
+# TPV_DB, para probar sin tocar la base real:
+#     set TPV_DB=tpv2_prueba.db  &&  python main.py
+# El modo prueba se avisa en el titulo de la ventana (ver main.py).
+DB_PATH = os.environ.get("TPV_DB") or os.path.join(
+    os.path.dirname(__file__), "tpv2.db")
+if not os.path.isabs(DB_PATH):
+    DB_PATH = os.path.join(os.path.dirname(__file__), DB_PATH)
+
+# Modo prueba: se decide por el NOMBRE de la base, no por la variable de
+# entorno. Si la variable no llega al proceso hijo (pasa cuando el TPV se
+# abre con pythonw o desde un acceso directo), la franja de advertencia
+# no se dibujaba y la ventana de prueba parecia la real: el peor de los
+# escenarios posibles.
+MODO_PRUEBA = ("prueba" in os.path.basename(DB_PATH).lower()
+               or "test" in os.path.basename(DB_PATH).lower()
+               or bool(os.environ.get("TPV_DB")))
 
 
 def get_connection():
@@ -129,47 +146,56 @@ def inicializar_db():
         )
     """)
 
-    # ─────────────────────────────────────────
-    # PIEZAS
-    # Para mercaderia de peso variable (hormas, piezas de fiambre). Un lote
-    # agrupa kilos; una pieza es UNA horma concreta, con su peso y su costo.
-    # Hace falta porque dos hormas del mismo ingreso pesan distinto y costaron
-    # distinto: si el FIFO descuenta del lote mas viejo mientras el cortador
-    # esta usando otra horma, el costo imputado a la venta es el equivocado.
-    # ─────────────────────────────────────────
+    # Categorias habilitadas para cada vendedor. Si un vendedor no tiene
+    # ninguna fila, ve el catalogo completo (es lo esperable al crearlo).
     c.execute("""
-        CREATE TABLE IF NOT EXISTS piezas (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            producto_id   INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
-            lote_id       INTEGER REFERENCES lotes(id) ON DELETE SET NULL,
-            etiqueta      TEXT,
-            peso_inicial  REAL NOT NULL,
-            peso_restante REAL NOT NULL,
-            costo_kg      REAL NOT NULL DEFAULT 0,
-            merma_pct     REAL NOT NULL DEFAULT 0,
-            estado        TEXT NOT NULL DEFAULT 'cerrada',
-            vencimiento   TEXT,
-            abierta_en    TEXT,
-            cerrada_en    TEXT,
-            creado_en     TEXT DEFAULT (datetime('now','localtime'))
+        CREATE TABLE IF NOT EXISTS vendedor_categorias (
+            vendedor_id  INTEGER NOT NULL REFERENCES vendedores(id) ON DELETE CASCADE,
+            categoria_id INTEGER NOT NULL REFERENCES categorias(id) ON DELETE CASCADE,
+            PRIMARY KEY (vendedor_id, categoria_id)
         )
     """)
 
+    # ─────────────────────────────────────────
+    # BITACORA DE ACCIONES SENSIBLES
+    # Quien autorizo cada anulacion, devolucion o ajuste de stock. Sin
+    # esto, el arqueo muestra que falta plata pero no por que: una
+    # devolucion de $8.000 y un faltante de $8.000 son indistinguibles
+    # de un faltante sin explicacion.
+    # ─────────────────────────────────────────
     c.execute("""
-        CREATE INDEX IF NOT EXISTS ix_piezas_producto
-            ON piezas(producto_id, estado)
+        CREATE TABLE IF NOT EXISTS bitacora (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            accion       TEXT NOT NULL,
+            detalle      TEXT,
+            monto        REAL,
+            responsable  TEXT NOT NULL,
+            referencia   TEXT,
+            fecha        TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS ix_bitacora_fecha ON bitacora(fecha)
     """)
 
-    # Que pieza se corto en cada venta. Sin esto no se puede saber el costo
-    # real de la venta ni cuanto rindio cada horma.
+    # ─────────────────────────────────────────
+    # COLA DE REVISION
+    # Estado de la revision de catalogo: por donde va uno recorriendo los
+    # productos. Los que no tienen fila figuran como "sin revisar".
+    # ─────────────────────────────────────────
     c.execute("""
-        CREATE TABLE IF NOT EXISTS detalle_ventas_piezas (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            detalle_venta_id INTEGER NOT NULL REFERENCES detalle_ventas(id) ON DELETE CASCADE,
-            pieza_id         INTEGER NOT NULL REFERENCES piezas(id) ON DELETE RESTRICT,
-            cantidad         REAL NOT NULL,
-            costo_kg         REAL NOT NULL
+        CREATE TABLE IF NOT EXISTS revision_productos (
+            producto_id  INTEGER PRIMARY KEY REFERENCES productos(id) ON DELETE CASCADE,
+            estado       TEXT NOT NULL DEFAULT 'pendiente',
+            motivo       TEXT,
+            notas        TEXT,
+            creado_en    TEXT DEFAULT (datetime('now','localtime')),
+            revisado_en  TEXT
         )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS ix_revision_estado
+            ON revision_productos(estado)
     """)
 
     # ─────────────────────────────────────────
@@ -340,6 +366,20 @@ def inicializar_db():
         # Dias de aviso de vencimiento propios del producto. NULL = usar el
         # general de Config. Un yogur no necesita el mismo anticipo que una lata.
         "ALTER TABLE productos ADD COLUMN alerta_dias_vto INTEGER DEFAULT NULL",
+        # ARQUEO: lo que se conto fisicamente al cerrar, contra lo que el
+        # sistema esperaba. Sin este dato un faltante es invisible.
+        "ALTER TABLE sesiones_caja ADD COLUMN efectivo_contado REAL",
+        "ALTER TABLE sesiones_caja ADD COLUMN diferencia REAL",
+        "ALTER TABLE sesiones_caja ADD COLUMN arqueo_notas TEXT",
+        # Como se cobra la comision del vendedor:
+        #   'recargo'   -> el cliente ve el precio con la comision sumada;
+        #                  el margen del negocio queda intacto.
+        #   'descuento' -> el cliente ve el precio de lista y la comision
+        #                  sale del margen del negocio.
+        "ALTER TABLE vendedores ADD COLUMN modo_comision TEXT DEFAULT 'recargo'",
+        # Con que nombre sale el folleto del vendedor. Vacio = su nombre
+        # de pila. Sirve para el que revende con marca propia.
+        "ALTER TABLE vendedores ADD COLUMN nombre_comercial TEXT",
         "ALTER TABLE lotes ADD COLUMN tipo TEXT DEFAULT 'ingreso'",
         "ALTER TABLE lotes ADD COLUMN motivo_ajuste TEXT",
         "ALTER TABLE ajustes_stock ADD COLUMN lote_id INTEGER REFERENCES lotes(id)",
@@ -420,6 +460,27 @@ def inicializar_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_clientes_dni ON clientes(dni)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_cliente ON movimientos_cuenta(cliente_id)")
 
+    # Indices sobre las tablas que crecen con cada venta. Sin estos,
+    # buscar los movimientos de un cliente o los de una sesion obliga a
+    # recorrer la tabla entera: con pocos meses de uso ya se nota.
+    for _idx in (
+        "CREATE INDEX IF NOT EXISTS ix_mov_caja_sesion ON movimientos_caja(sesion_id)",
+        "CREATE INDEX IF NOT EXISTS ix_mov_cuenta_cliente ON movimientos_cuenta(cliente_id)",
+        "CREATE INDEX IF NOT EXISTS ix_cta_cte_cliente ON cuentas_corrientes(cliente_id)",
+        "CREATE INDEX IF NOT EXISTS ix_ajustes_producto ON ajustes_stock(producto_id)",
+        "CREATE INDEX IF NOT EXISTS ix_devoluciones_venta ON devoluciones(venta_id)",
+        "CREATE INDEX IF NOT EXISTS ix_sesiones_cierre ON sesiones_caja(cerrada, cierre_en)",
+        "CREATE INDEX IF NOT EXISTS ix_ventas_fecha ON ventas(fecha)",
+        "CREATE INDEX IF NOT EXISTS ix_detalle_ventas_venta ON detalle_ventas(venta_id)",
+        "CREATE INDEX IF NOT EXISTS ix_detalle_ventas_producto ON detalle_ventas(producto_id)",
+        "CREATE INDEX IF NOT EXISTS ix_lotes_producto ON lotes(producto_id, cantidad_restante)",
+        "CREATE INDEX IF NOT EXISTS ix_lotes_vencimiento ON lotes(fecha_vencimiento)",
+    ):
+        try:
+            c.execute(_idx)
+        except Exception as _e:
+            logging.debug(f"No se pudo crear el indice: {_e}")
+
     conn.commit()
     conn.close()
     print(f"[OK] Base de datos inicializada en: {DB_PATH}")
@@ -460,7 +521,50 @@ def descontar_stock_fifo(producto_id: int, cantidad: float,
 
         total_disponible = sum(l["cantidad_restante"] for l in lotes)
         if total_disponible < cantidad:
-            return False
+            # Sin stock suficiente hay dos posturas y las dos son validas:
+            #   bloquear   -> la venta no se registra (control estricto)
+            #   permitir   -> se vende igual y el stock queda en negativo,
+            #                 para corregirlo despues con un ajuste
+            # En un autoservicio real lo segundo es lo habitual: el stock
+            # nunca esta perfecto y frenar la caja con el cliente adelante
+            # cuesta mas que el descuadre.
+            try:
+                from config import cfg
+                permitir = cfg().get("permitir_venta_sin_stock", True)
+            except Exception:
+                permitir = True
+            if not permitir:
+                return False
+            # Se consume lo que haya y el resto queda como faltante: el
+            # lote mas viejo absorbe el negativo para que quede rastro.
+            if lotes:
+                # El lote mas viejo absorbe el faltante: queda en negativo
+                # y asi el descuadre se ve en el stock, no se pierde.
+                falta = cantidad - total_disponible
+                conn.execute(
+                    "UPDATE lotes SET cantidad_restante = cantidad_restante - ? "
+                    "WHERE id = ?", (falta, lotes[0]["id"]))
+                cantidad = total_disponible
+            else:
+                # Nunca tuvo ingreso: se crea un lote en negativo para que
+                # el faltante quede visible en vez de perderse.
+                cur = conn.execute("""
+                    INSERT INTO lotes (producto_id, cantidad, cantidad_restante,
+                                       costo_unitario, tipo, notas)
+                    SELECT ?, 0, ?, COALESCE(costo_ultimo, 0), 'ajuste',
+                           'Venta sin stock registrado'
+                    FROM productos WHERE id = ?
+                """, (producto_id, -cantidad, producto_id))
+                if detalle_venta_id:
+                    conn.execute("""
+                        INSERT INTO detalle_ventas_lotes
+                            (detalle_venta_id, lote_id, cantidad)
+                        VALUES (?,?,?)
+                    """, (detalle_venta_id, cur.lastrowid, cantidad))
+                if cerrar:
+                    conn.commit()
+                    conn.close()
+                return True
 
         restante = cantidad
         for lote in lotes:
@@ -629,16 +733,41 @@ def get_sesion_abierta() -> dict | None:
         return dict(row) if row else None
 
 
-def cerrar_sesion_caja(sesion_id: int, notas: str = "") -> dict:
-    """Cierra la sesión de caja y retorna el resumen."""
+def cerrar_sesion_caja(sesion_id: int, notas: str = "",
+                       efectivo_contado: float = None,
+                       arqueo_notas: str = "") -> dict:
+    """Cierra la sesión de caja y retorna el resumen.
+
+    efectivo_contado: lo que hay FISICO en el cajón al cerrar. Se guarda
+    junto con la diferencia contra lo esperado. Sin este dato no hay
+    arqueo: un faltante por un vuelto mal dado o un cobro no registrado
+    no deja ningún rastro y nunca se puede rastrear a un turno.
+    """
     with get_connection() as conn:
+        diferencia = None
+        if efectivo_contado is not None:
+            fila = conn.execute(
+                "SELECT fondo_inicial, total_efectivo FROM sesiones_caja "
+                "WHERE id = ?", (sesion_id,)).fetchone()
+            movs = conn.execute("""
+                SELECT COALESCE(SUM(CASE WHEN tipo='ingreso' THEN monto
+                                         ELSE -monto END), 0)
+                FROM movimientos_caja WHERE sesion_id = ?
+            """, (sesion_id,)).fetchone()[0]
+            esperado = ((fila["fondo_inicial"] or 0)
+                        + (fila["total_efectivo"] or 0) + (movs or 0))
+            diferencia = round(float(efectivo_contado) - esperado, 2)
+
         conn.execute("""
             UPDATE sesiones_caja
             SET cerrada = 1,
                 cierre_en = datetime('now','localtime'),
-                notas = ?
+                notas = ?,
+                efectivo_contado = ?,
+                diferencia = ?,
+                arqueo_notas = ?
             WHERE id = ?
-        """, (notas, sesion_id))
+        """, (notas, efectivo_contado, diferencia, arqueo_notas, sesion_id))
         conn.commit()
 
         sesion = conn.execute(

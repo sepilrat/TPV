@@ -372,7 +372,11 @@ class FiadoUI(ttk.Frame):
         der = tk.Frame(self._cont, bg=C.bg)
         der.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=(0, 12))
         der.columnconfigure(0, weight=1)
-        der.rowconfigure(1, weight=1)
+        # La tabla de movimientos (fila 2) es la que se estira.
+        # Antes el rotulo "Movimientos del cliente" estaba en la fila 0,
+        # la misma que la tarjeta de Acciones: se dibujaban uno encima
+        # del otro y la tabla quedaba aplastada contra el borde.
+        der.rowconfigure(2, weight=1)
 
         # Acciones
         ac = card(der)
@@ -400,15 +404,15 @@ class FiadoUI(ttk.Frame):
 
         # Movimientos del cliente seleccionado
         lbl(der, "Movimientos del cliente", variante="subtitulo").grid(
-            row=0, column=0, sticky="w", pady=(8, 4))
+            row=1, column=0, sticky="w", pady=(8, 4))
 
         frame_m, self.tree_movs = tabla(der, COLS_MOVS, altura=10)
-        frame_m.grid(row=1, column=0, sticky="nsew")
+        frame_m.grid(row=2, column=0, sticky="nsew")
         self.tree_movs.tag_configure("cuenta_corriente", foreground=C.peligro)
         self.tree_movs.tag_configure("pago",  foreground=C.exito)
         self.tree_movs.bind("<Double-1>", self._ver_detalle_movimiento)
         lbl(der, "Doble click en un cargo para ver qué productos justifican ese importe",
-            variante="suave").grid(row=2, column=0, sticky="w", pady=(4,0))
+            variante="suave").grid(row=3, column=0, sticky="w", pady=(4,0))
 
         # Barra acciones inferior
         ac2 = tk.Frame(self._cont, bg=C.bg)

@@ -610,15 +610,46 @@ class IngresoUI(ttk.Frame):
         elif (info["direccion"] == "bajo"
               and round(info["precio_sugerido"], 2) != round(info["precio_actual"], 2)):
             nuevo_precio_venta = None
-            if messagebox.askyesno(
-                    "El costo bajó",
-                    f"El costo de este producto bajó de "
-                    f"$ {info['costo_anterior']:,.2f} a $ {info['costo_nuevo']:,.2f}.\n\n"
-                    f"Precio de venta actual: $ {info['precio_actual']:,.2f}\n"
-                    f"Precio sugerido (mismo margen): $ {info['precio_sugerido']:,.2f}\n\n"
-                    f"¿Querés actualizar el precio de venta al nuevo valor?\n"
-                    f"(si decís que no, se mantiene el precio actual)",
-                    parent=self):
+
+            # El cartel muestra los tres datos que realmente deciden:
+            # cuanto stock viejo queda (FIFO lo vende primero), que margen
+            # se tiene si no se toca nada, y si bajar el precio dejaria el
+            # stock viejo vendiendose por debajo de su costo.
+            texto = [
+                f"El costo bajó de $ {info['costo_anterior']:,.2f} "
+                f"a $ {info['costo_nuevo']:,.2f}.",
+                "",
+                f"Si NO tocás nada:   $ {info['precio_actual']:,.2f}"
+                f"   →  margen {info['margen_si_no_toca']:.1f}%",
+                f"Si bajás el precio: $ {info['precio_sugerido']:,.2f}"
+                f"   →  margen {info['margen_sugerido']:.1f}%",
+            ]
+
+            if info["stock_viejo"] > 0:
+                texto += ["",
+                          f"Te quedan {info['stock_viejo']:g} unidad(es) compradas "
+                          f"al costo viejo de $ {info['costo_anterior']:,.2f}."]
+                if info["bajo_costo_viejo"]:
+                    perdida = info["perdida_por_unidad"]
+                    total = perdida * info["stock_viejo"]
+                    texto += [
+                        "",
+                        "⚠  CUIDADO: el precio nuevo queda POR DEBAJO de ese "
+                        "costo viejo.",
+                        f"Como el stock sale por orden de llegada, perderías "
+                        f"$ {perdida:,.2f} por unidad",
+                        f"hasta agotarlo: $ {total:,.2f} en total.",
+                    ]
+                else:
+                    texto += ["Esas unidades se venderían con el margen nuevo, "
+                              "no con el que tenían."]
+
+            texto += ["", "¿Bajás el precio de venta ahora?",
+                      "(si decís que no, se mantiene el precio actual)"]
+
+            titulo = ("El costo bajó — ojo con el stock viejo"
+                      if info["bajo_costo_viejo"] else "El costo bajó")
+            if messagebox.askyesno(titulo, "\n".join(texto), parent=self):
                 nuevo_precio_venta = info["precio_sugerido"]
 
         _, precio_aplicado = registrar_lote(
