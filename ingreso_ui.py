@@ -55,6 +55,12 @@ def _centrar(d, w, h):
     d.geometry(f"{w}x{h}+{x}+{y}")
 
 
+def _unidad(prod):
+    """kg o u. Mostrar "u." en algo que se vende por peso confunde al
+    cargar: 4.093 unidades y 4.093 kg son cosas muy distintas."""
+    return "kg" if (prod or {}).get("vendido_por_peso") else "u."
+
+
 def _fmt_cant(v):
     """Formatea cantidad: entera sin decimales, fraccionaria con hasta
     3 decimales (para productos vendidos por peso)."""
@@ -125,7 +131,8 @@ class IngresoUI(ttk.Frame):
         c_scan.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0,6))
         c_scan.columnconfigure(0, weight=1)
 
-        lbl(c_scan, "Codigo de barras", variante="suave",
+        lbl(c_scan, "Codigo de barras  ·  o escribí el nombre",
+            variante="suave",
             bg=C.superficie).grid(row=0, column=0, columnspan=2,
                                    sticky="w", padx=12, pady=(8,2))
         self.entry_codigo = tk.Entry(c_scan, font=("Segoe UI", 13),
@@ -156,9 +163,10 @@ class IngresoUI(ttk.Frame):
         p.rowconfigure(2, weight=1)
 
         def _lbl(parent, texto, row, col, colspan=1):
-            lbl(parent, texto, variante="suave", bg=C.superficie).grid(
-                row=row, column=col, columnspan=colspan,
-                sticky="w", padx=(12,4), pady=(6,0))
+            w = lbl(parent, texto, variante="suave", bg=C.superficie)
+            w.grid(row=row, column=col, columnspan=colspan,
+                   sticky="w", padx=(12,4), pady=(6,0))
+            return w
 
         def _entry(parent, row, col, default="", colspan=1):
             e = tk.Entry(parent, font=F.normal, bg=C.superficie, fg=C.texto,
@@ -197,7 +205,7 @@ class IngresoUI(ttk.Frame):
             _mostrar()
 
         # Cantidad | Costo
-        _lbl(self.card_form, "Cantidad *",      0, 0)
+        self.lbl_cantidad = _lbl(self.card_form, "Cantidad *", 0, 0)
         _lbl(self.card_form, "Costo unitario *",0, 1)
         self.entry_cantidad = _entry(self.card_form, 1, 0, "1")
         self.entry_costo    = _entry(self.card_form, 1, 1, "")
@@ -428,20 +436,44 @@ class IngresoUI(ttk.Frame):
 
         prod = get_producto_por_codigo(codigo)
 
+        # Si no es un codigo, se busca por nombre: al recibir mercaderia
+        # no siempre se tiene el codigo a mano, y muchos productos
+        # (fraccionados, granel) directamente no vienen etiquetados.
+        if not prod and len(codigo) >= 3:
+            from repositorio import get_productos
+            try:
+                candidatos = get_productos(filtro=codigo)
+            except Exception:
+                candidatos = []
+            if len(candidatos) == 1:
+                prod = get_producto_por_codigo(candidatos[0]["codigo"])
+            elif candidatos:
+                elegido = self._elegir_producto(candidatos, codigo)
+                if elegido:
+                    prod = get_producto_por_codigo(elegido["codigo"])
+                else:
+                    return self.entry_codigo.focus_set()
+
         if prod:
             self._producto_actual = prod
             stock = get_stock_producto(prod["id"])
             self.lbl_info.config(
-                text=f"✓ {prod['descripcion']}  |  Stock actual: {_fmt_cant(stock)} u.  |  Precio: $ {prod['precio_base']:,.2f}",
+                text=(f"✓ {prod['descripcion']}  |  Stock actual: "
+                      f"{_fmt_cant(stock)} {_unidad(prod)}  |  Precio: "
+                      f"$ {prod['precio_base']:,.2f} por {_unidad(prod)}"),
                 fg=C.exito,
             )
             # Al recibir mercadería es cuando uno nota que el nombre está
             # mal escrito o le falta el gramaje. Tener que ir al catálogo
             # a corregirlo hace que nadie lo corrija nunca.
             self.btn_editar_nombre.pack(anchor="w", pady=(4, 0))
+            self.lbl_cantidad.config(
+                text=("Cantidad en kg *" if prod.get("vendido_por_peso")
+                      else "Cantidad *"))
             self._toggle_precio(False)
         else:
             self._producto_actual = None
+            self.lbl_cantidad.config(text="Cantidad *")
             self.btn_editar_nombre.pack_forget()
             self.lbl_info.config(
                 text="Producto nuevo — completá descripción y precio de venta",
@@ -492,6 +524,53 @@ class IngresoUI(ttk.Frame):
                                    "break")[-1])
         self.entry_costo.bind("<Return>", lambda e: self._guardar())
         self.entry_total_linea.bind("<Return>", lambda e: self._guardar())
+
+    def _elegir_producto(self, candidatos, texto):
+        """Lista los productos que coinciden con lo escrito."""
+        d = tk.Toplevel(self)
+        d.title("Elegir producto")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        _centrar(d, 560, 420)
+
+        lbl(d, f'Productos que coinciden con "{texto}"', variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+        lbl(d, "Doble clic o Enter para elegir.", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18)
+
+        cols = [("desc", "Producto", 260, "w"), ("cod", "Código", 130, "w"),
+                ("stock", "Stock", 70, "e"), ("precio", "Precio", 90, "e")]
+        frame_t, tv = tabla(d, cols, altura=11)
+        frame_t.pack(fill="both", expand=True, padx=18, pady=(10, 6))
+        for i, c in enumerate(candidatos[:80]):
+            tv.insert("", "end", iid=str(i), values=(
+                c["descripcion"][:40], c.get("codigo") or "—",
+                f"{c.get('stock') or 0:g}",
+                f"$ {c.get('precio_base') or 0:,.2f}"))
+
+        res = [None]
+
+        def elegir(_ev=None):
+            sel = tv.selection()
+            if sel:
+                res[0] = candidatos[int(sel[0])]
+                d.destroy()
+
+        tv.bind("<Double-1>", elegir)
+        tv.bind("<Return>", elegir)
+        d.bind("<Escape>", lambda ev: d.destroy())
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", pady=12)
+        btn(pie, "Elegir  (Enter)", variante="exito",
+            comando=elegir).pack(side="left", padx=4)
+        btn(pie, "Cancelar", variante="neutro",
+            comando=d.destroy).pack(side="left", padx=4)
+
+        if tv.get_children():
+            tv.selection_set("0")
+            tv.focus_set()
+        self.wait_window(d)
+        return res[0]
 
     def _editar_producto_actual(self):
         """Corrige el nombre y el precio sin salir del ingreso."""
@@ -562,7 +641,8 @@ class IngresoUI(ttk.Frame):
             self._producto_actual = get_producto_completo(p["id"])
             stock = get_stock_producto(p["id"])
             self.lbl_info.config(
-                text=(f"✓ {desc}  |  Stock actual: {_fmt_cant(stock)} u.  |  "
+                text=(f"✓ {desc}  |  Stock actual: {_fmt_cant(stock)} "
+                      f"{_unidad(self._producto_actual)}  |  "
                       f"Precio: $ {self._producto_actual['precio_base']:,.2f}"),
                 fg=C.exito)
             toast(self, "Producto corregido")

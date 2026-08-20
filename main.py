@@ -170,10 +170,12 @@ class AppTPV(tk.Tk):
         # Tab Caja — con sub-tab Fiado
         f_caja_cont = ttk.Frame(nb)
         nb.add(f_caja_cont, text="  Caja  ")
+        from tickets_ui import TicketsUI
         nb_caja = ttk.Notebook(f_caja_cont)
         nb_caja.pack(fill="both", expand=True)
         for nombre_c, Clase_c in [
             ("  Caja  ", CajaUI),
+            ("  Tickets  ", TicketsUI),
             ("  Fiado  ", FiadoUI),
         ]:
             fc = ttk.Frame(nb_caja)
