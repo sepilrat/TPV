@@ -223,6 +223,7 @@ class AppTPV(tk.Tk):
         from auditoria_ui import AuditoriaUI, OfertasUI
         from revision_ui import RevisionUI
         from reposicion_ui import ReposicionUI
+        from recargos_ui import RecargosUI
 
         nb2 = ttk.Notebook(parent, style="Productos.TNotebook")
         nb2.pack(fill="both", expand=True)
@@ -232,6 +233,7 @@ class AppTPV(tk.Tk):
             ("  Precios   ",  PreciosUI),
             ("  Stock     ",  IngresoUI),
             ("  Reposicion",  ReposicionUI),
+            ("  Recargos  ",  RecargosUI),
             ("  A revisar ",  RevisionUI),
             ("  Auditoria ",  AuditoriaUI),
             ("  Ofertas   ",  OfertasUI),

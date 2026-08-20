@@ -144,6 +144,9 @@ class IngresoUI(ttk.Frame):
         self.frame_info.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0,4))
         self.lbl_info = lbl(self.frame_info, "", variante="suave")
         self.lbl_info.pack(anchor="w")
+        self.btn_editar_nombre = btn(
+            self.frame_info, "✏️  Corregir nombre o precio", variante="neutro",
+            comando=lambda: self._editar_producto_actual())
 
         # ── Formulario compacto ───────────────────────────────
         self.card_form = card(p)
@@ -186,8 +189,11 @@ class IngresoUI(ttk.Frame):
                     _mostrar()
 
             entry._mostrar_placeholder = _mostrar
-            entry.bind("<FocusIn>", _focus_in)
-            entry.bind("<FocusOut>", _focus_out)
+            entry._texto_placeholder = texto
+            # add="+" para no pisar binds que ya tenga el campo: sin esto,
+            # cualquier <FocusIn> definido antes se perdia en silencio.
+            entry.bind("<FocusIn>", _focus_in, add="+")
+            entry.bind("<FocusOut>", _focus_out, add="+")
             _mostrar()
 
         # Cantidad | Costo
@@ -197,11 +203,54 @@ class IngresoUI(ttk.Frame):
         self.entry_costo    = _entry(self.card_form, 1, 1, "")
         _placeholder(self.entry_costo, "0.00")
 
+        # En el ticket del mayorista figura el TOTAL de la linea, no el
+        # unitario: "12 un. x $2.220 = $26.640". Tener que dividir a mano
+        # es donde se cuelan los costos mal cargados.
+        # Va en su propia fila, ocupando el ancho: meterlo como tercera
+        # columna corria todos los campos de abajo.
+        f_tot = tk.Frame(self.card_form, bg=C.superficie)
+        f_tot.grid(row=2, column=0, columnspan=2, sticky="ew",
+                   padx=(12, 4), pady=(2, 4))
+        tk.Label(f_tot, text="¿El ticket muestra el total?", bg=C.superficie,
+                 fg=C.texto_suave, font=F.pequeña).pack(side="left")
+        self.entry_total_linea = tk.Entry(f_tot, font=F.normal, width=12,
+                                          bg=C.bg, fg=C.texto,
+                                          relief="solid", bd=1)
+        self.entry_total_linea.pack(side="left", padx=6, ipady=2)
+        _placeholder(self.entry_total_linea, "14000.00")
+
+
+        def _desde_total(*_a):
+            """Total ÷ cantidad = unitario. Se recalcula al escribir."""
+            # El placeholder es texto real dentro del Entry. En vez de
+            # adivinar por color (que no distingue "escrito" de "aun con
+            # placeholder"), se compara contra el texto del placeholder.
+            e_tot = self.entry_total_linea
+            txt = e_tot.get().strip().replace(",", ".")
+            if not txt or txt == getattr(e_tot, "_texto_placeholder", None):
+                return
+            try:
+                total = float(txt)
+                cant = float((self.entry_cantidad.get() or "1")
+                             .strip().replace(",", "."))
+            except ValueError:
+                return
+            if cant <= 0 or total <= 0:
+                return
+            unit = total / cant
+            self.entry_costo.delete(0, "end")
+            self.entry_costo.insert(0, f"{unit:.2f}")
+            self.entry_costo.config(fg=C.texto)
+
+
+        self.entry_total_linea.bind("<KeyRelease>", _desde_total, add="+")
+        self.entry_cantidad.bind("<KeyRelease>", _desde_total, add="+")
+
 
         # Vencimiento | Proveedor
-        _lbl(self.card_form, "Vencimiento",  2, 0)
-        _lbl(self.card_form, "Proveedor",    2, 1)
-        self.entry_vence = _entry(self.card_form, 3, 0, "")
+        _lbl(self.card_form, "Vencimiento",  3, 0)
+        _lbl(self.card_form, "Proveedor",    3, 1)
+        self.entry_vence = _entry(self.card_form, 4, 0, "")
         _placeholder(self.entry_vence, "DD/MM/AAAA")
 
         def _formatear_fecha_vence(event=None):
@@ -231,16 +280,16 @@ class IngresoUI(ttk.Frame):
         self.entry_vence.bind("<KeyRelease>", _formatear_fecha_vence)
 
         f_prov = tk.Frame(self.card_form, bg=C.superficie)
-        f_prov.grid(row=3, column=1, sticky="ew", padx=(12,4), pady=(2,0))
-        f_prov.columnconfigure(0, weight=1)
+        f_prov.grid(row=4, column=1, sticky="ew", padx=(12,4), pady=(2,0))
+        f_prov.columnconfigure(0, weight=1, minsize=130)
         self.combo_prov = ttk.Combobox(f_prov, font=F.normal, state="readonly")
         self.combo_prov.grid(row=0, column=0, sticky="ew", ipady=4)
         btn(f_prov, "+", variante="neutro",
             comando=self._nuevo_proveedor).grid(row=0, column=1, padx=(4,0))
 
         # Notas
-        _lbl(self.card_form, "Notas", 4, 0, colspan=2)
-        self.entry_notas = _entry(self.card_form, 5, 0, "", colspan=2)
+        _lbl(self.card_form, "Notas", 5, 0, colspan=2)
+        self.entry_notas = _entry(self.card_form, 6, 0, "", colspan=2)
 
         # Precio + Categoria (solo producto nuevo) — oculto por defecto
         self.frame_precio = tk.Frame(self.card_form, bg=C.superficie)
@@ -263,12 +312,15 @@ class IngresoUI(ttk.Frame):
         # Categoria con boton + Nueva
         f_cat = tk.Frame(self.frame_precio, bg=C.superficie)
         f_cat.grid(row=1, column=1, sticky="ew", padx=(12,4), pady=(2,6))
-        f_cat.columnconfigure(0, weight=1)
+        # minsize: sin esto el boton "+ Nueva" se come el ancho y el
+        # combo queda mostrando cuatro letras del nombre de la categoria.
+        f_cat.columnconfigure(0, weight=1, minsize=130)
 
-        self.combo_cat = ttk.Combobox(f_cat, font=F.normal, state="readonly")
+        self.combo_cat = ttk.Combobox(f_cat, font=F.normal, state="readonly",
+                                      width=16)
         self.combo_cat.grid(row=0, column=0, sticky="ew", ipady=4)
 
-        btn(f_cat, "+ Nueva", variante="neutro",
+        btn(f_cat, "+", variante="neutro",
             comando=self._nueva_categoria).grid(row=0, column=1, padx=(4,0))
 
         self.var_peso = tk.BooleanVar(value=False)
@@ -293,12 +345,20 @@ class IngresoUI(ttk.Frame):
         self.lbl_foto_nueva.grid(row=3, column=1, sticky="w", padx=(12,4), pady=(0,6))
 
         # Botón guardar
-        btn(self.card_form, "Registrar ingreso", variante="exito",
-            comando=self._guardar).grid(row=7, column=0, columnspan=2,
-                                         sticky="ew", padx=12, pady=12)
+        btn(self.card_form, "Registrar ingreso   (F4 o Enter)",
+            variante="exito",
+            comando=self._guardar).grid(row=8, column=0, columnspan=2,
+                                         sticky="ew", padx=12, pady=(12, 2))
+        lbl(self.card_form,
+            "F2 código   ·   F4 registrar   ·   F6 limpiar   ·   "
+            "F7 corregir producto   ·   F8 historial",
+            variante="suave").grid(row=9, column=0, columnspan=2,
+                                   sticky="w", padx=12, pady=(0, 10))
 
         self._cargar_combos()
         self._toggle_precio(False)
+        # Al final: los binds necesitan que los campos ya existan.
+        self._atajos()
 
     def _panel_tablas(self):
         p = tk.Frame(self._contenedor, bg=C.bg)
@@ -375,9 +435,14 @@ class IngresoUI(ttk.Frame):
                 text=f"✓ {prod['descripcion']}  |  Stock actual: {_fmt_cant(stock)} u.  |  Precio: $ {prod['precio_base']:,.2f}",
                 fg=C.exito,
             )
+            # Al recibir mercadería es cuando uno nota que el nombre está
+            # mal escrito o le falta el gramaje. Tener que ir al catálogo
+            # a corregirlo hace que nadie lo corrija nunca.
+            self.btn_editar_nombre.pack(anchor="w", pady=(4, 0))
             self._toggle_precio(False)
         else:
             self._producto_actual = None
+            self.btn_editar_nombre.pack_forget()
             self.lbl_info.config(
                 text="Producto nuevo — completá descripción y precio de venta",
                 fg=C.advertencia,
@@ -388,9 +453,139 @@ class IngresoUI(ttk.Frame):
         self.entry_cantidad.focus_set()
         self.entry_cantidad.select_range(0, "end")
 
+    def _atajos(self):
+        """Circuito completo de teclado para cargar mercadería.
+
+        Recibir un pedido son decenas de items seguidos: soltar el
+        teclado para buscar el mouse en cada uno cuesta más que toda la
+        carga junta.
+
+        El recorrido natural queda encadenado con Enter:
+            código → cantidad → costo (o total) → Enter registra
+        """
+        raiz = self.winfo_toplevel()
+
+        def _si_visible(fn):
+            """Las F son del toplevel: solo actúan si esta pantalla se ve."""
+            def _wrap(ev=None):
+                if not self.winfo_ismapped():
+                    return None
+                fn()
+                return "break"
+            return _wrap
+
+        for tecla, accion in (
+                ("<F2>",  lambda: (self.entry_codigo.focus_set(),
+                                   self.entry_codigo.select_range(0, "end"))),
+                ("<F4>",  lambda: self._guardar()),
+                ("<F6>",  lambda: self._limpiar()),
+                ("<F7>",  lambda: (self._editar_producto_actual()
+                                   if self._producto_actual else None)),
+                ("<F8>",  lambda: self._historial_lotes())):
+            raiz.bind(tecla, _si_visible(accion), add="+")
+
+        # Enter encadena el recorrido: cada campo lleva al siguiente y el
+        # último registra, sin tocar el mouse en ningún momento.
+        self.entry_cantidad.bind(
+            "<Return>", lambda e: (self.entry_costo.focus_set(),
+                                   self.entry_costo.select_range(0, "end"),
+                                   "break")[-1])
+        self.entry_costo.bind("<Return>", lambda e: self._guardar())
+        self.entry_total_linea.bind("<Return>", lambda e: self._guardar())
+
+    def _editar_producto_actual(self):
+        """Corrige el nombre y el precio sin salir del ingreso."""
+        from repositorio import get_producto_completo, actualizar_producto
+        prod = self._producto_actual
+        if not prod:
+            return
+        p = get_producto_completo(prod["id"])
+        if not p:
+            return
+
+        d = tk.Toplevel(self)
+        d.title("Corregir producto")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        _centrar(d, 470, 300)
+
+        lbl(d, "Corregir producto", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+        lbl(d, f"Código {p.get('codigo') or '—'}", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18)
+
+        lbl(d, "Descripción", variante="suave", bg=C.superficie).pack(
+            anchor="w", padx=18, pady=(14, 2))
+        v_desc = tk.StringVar(value=p["descripcion"])
+        e_d = tk.Entry(d, textvariable=v_desc, font=F.normal, bg=C.bg,
+                       fg=C.texto, relief="solid", bd=1)
+        e_d.pack(fill="x", padx=18, ipady=5)
+
+        lbl(d, "Precio de venta", variante="suave", bg=C.superficie).pack(
+            anchor="w", padx=18, pady=(12, 2))
+        v_pre = tk.StringVar(value=f"{p.get('precio_base') or 0:.2f}")
+        e_p = tk.Entry(d, textvariable=v_pre, font=F.subtitulo,
+                       justify="center", bg=C.bg, fg=C.texto,
+                       relief="solid", bd=1)
+        e_p.pack(fill="x", padx=18, ipady=5)
+
+        def guardar(_ev=None):
+            desc = v_desc.get().strip()
+            if not desc:
+                messagebox.showwarning("Corregir", "La descripción no puede "
+                                                   "quedar vacía.", parent=d)
+                return
+            try:
+                precio = float(v_pre.get().replace(",", "."))
+            except ValueError:
+                messagebox.showwarning("Corregir", "El precio no es un "
+                                                   "número.", parent=d)
+                return
+            costo = float(p.get("costo_ultimo") or 0)
+            if costo and precio < costo:
+                if not messagebox.askyesno(
+                        "Precio bajo costo",
+                        f"$ {precio:,.2f} queda por debajo del costo "
+                        f"($ {costo:,.2f}).\n\n¿Guardar igual?", parent=d):
+                    return
+            try:
+                actualizar_producto(
+                    p["id"], desc, p.get("codigo"), p.get("categoria_id"),
+                    precio, costo, p.get("margen_pct"),
+                    p.get("vendido_por_peso") or 0, p.get("imagen_url"),
+                    p.get("marca"))
+            except Exception as exc:
+                messagebox.showerror("Corregir", str(exc), parent=d)
+                return
+            d.destroy()
+            # Se relee para mostrar el nombre y el precio ya corregidos
+            self._producto_actual = get_producto_completo(p["id"])
+            stock = get_stock_producto(p["id"])
+            self.lbl_info.config(
+                text=(f"✓ {desc}  |  Stock actual: {_fmt_cant(stock)} u.  |  "
+                      f"Precio: $ {self._producto_actual['precio_base']:,.2f}"),
+                fg=C.exito)
+            toast(self, "Producto corregido")
+
+        # Enter desde el precio guarda; desde la descripción pasa al precio
+        e_p.bind("<Return>", guardar)
+        e_d.bind("<Return>", lambda ev: (e_p.focus_set(),
+                                          e_p.select_range(0, "end"), "break")[-1])
+        d.bind("<Escape>", lambda ev: d.destroy())
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", pady=14)
+        btn(pie, "Guardar", variante="exito", comando=guardar).pack(
+            side="left", padx=4)
+        btn(pie, "Cancelar  (Esc)", variante="neutro",
+            comando=d.destroy).pack(side="left", padx=4)
+
+        e_d.focus_set()
+        e_d.icursor("end")
+
     def _toggle_precio(self, mostrar):
         if mostrar:
-            self.frame_precio.grid(row=6, column=0, columnspan=2,
+            self.frame_precio.grid(row=7, column=0, columnspan=2,
                                    sticky="ew", in_=self.card_form)
         else:
             self.frame_precio.grid_remove()
@@ -738,11 +933,14 @@ class IngresoUI(ttk.Frame):
         self.entry_cantidad.delete(0, "end")
         self.entry_cantidad.insert(0, "1")
         self.entry_costo._mostrar_placeholder()
+        self.entry_total_linea.delete(0, "end")
+        self.entry_total_linea._mostrar_placeholder()
         self.entry_vence._mostrar_placeholder()
         self.entry_notas.delete(0, "end")
         self.entry_precio.delete(0, "end")
         self.entry_precio.insert(0, "0.00")
         self.lbl_info.config(text="", fg=C.texto_suave)
+        self.btn_editar_nombre.pack_forget()
         self._toggle_precio(False)
 
     def _refrescar_lotes(self):

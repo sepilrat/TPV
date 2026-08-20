@@ -2,6 +2,7 @@
 productos_ui.py — Gestión de productos y categorías TPV v2.0
 """
 
+import logging
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
@@ -137,6 +138,8 @@ class ProductosUI(ttk.Frame):
         # sobre la LISTA (lo que dejo el filtro), no sobre un producto.
         btn(bar, "☑  Seleccionar todo", variante="neutro",
             comando=self._seleccionar_todo_prod).pack(side="left", padx=4)
+        btn(bar, "🔢  Códigos propios", variante="neutro",
+            comando=self._codigos_propios).pack(side="left", padx=4)
         # Aviso visible cuando hay fotos que dependen de internet: antes
         # el problema solo aparecia en el log, que nadie mira.
         self.lbl_fotos_url = lbl(bar, "", variante="suave")
@@ -173,10 +176,15 @@ class ProductosUI(ttk.Frame):
             comando=self._presentaciones).pack(side="left", padx=6)
         btn(ac, "Redondear precios", variante="neutro",
             comando=self._redondear_precios).pack(side="left", padx=6)
-        btn(ac, "🏷  Etiquetas de góndola", variante="exito",
-            comando=self._imprimir_etiquetas).pack(side="left", padx=6)
         btn(ac, "📌  Marcar para revisar", variante="neutro",
             comando=self._marcar_revisar).pack(side="left", padx=6)
+        btn(ac, "⧉  Duplicar", variante="neutro",
+            comando=self._duplicar).pack(side="left", padx=6)
+        # Todo lo que termina en papel, junto: eran botones sueltos
+        # repartidos entre dos filas y la fila se salia de la pantalla.
+        self.btn_imprimir = btn(ac, "🖨  Imprimir…", variante="exito",
+                                comando=self._menu_imprimir)
+        self.btn_imprimir.pack(side="right")
         lbl(ac, "Doble click para editar", variante="suave").pack(side="right", padx=(12, 0))
 
         ac2 = tk.Frame(parent, bg=C.bg)
@@ -516,6 +524,122 @@ class ProductosUI(ttk.Frame):
             self.tree_prod.focus(hijos[0])
         return "break"
 
+    def _menu_imprimir(self, event=None):
+        """Todo lo que sale en papel, en un solo lugar."""
+        m = tk.Menu(self, tearoff=0, font=F.normal,
+                    bg=C.superficie, fg=C.texto,
+                    activebackground=C.acento, activeforeground=C.texto)
+        m.add_command(label="🏷   Etiquetas de góndola   (con código de barras)",
+                      command=self._imprimir_etiquetas)
+        m.add_command(label="📋   Lista para exhibidora   (sin fotos, letra grande)",
+                      command=self._lista_compacta)
+        m.add_separator()
+        m.add_command(label="📄   Lista de precios   (con fotos y promos)",
+                      command=self._lista_precios)
+        m.add_command(label="📰   Folleto de ofertas",
+                      command=self._folleto)
+        m.add_command(label="🖼   Placas para redes",
+                      command=self._placas)
+
+        # Debajo del botón, no donde esté el mouse: así siempre aparece
+        # en el mismo lugar.
+        b = self.btn_imprimir if hasattr(self, "btn_imprimir") else None
+        if b is not None:
+            m.tk_popup(b.winfo_rootx(),
+                       b.winfo_rooty() + b.winfo_height())
+        else:
+            m.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+
+    def _lista_precios(self):
+        try:
+            from lista_precios import abrir_selector_lista_precios
+            abrir_selector_lista_precios(self)
+        except Exception as exc:
+            messagebox.showerror("Lista de precios", str(exc), parent=self)
+
+    def _folleto(self):
+        try:
+            from folleto_precios import abrir_selector_folleto
+            abrir_selector_folleto(self)
+        except Exception as exc:
+            messagebox.showerror("Folleto", str(exc), parent=self)
+
+    def _placas(self):
+        try:
+            from placas import abrir_selector_placas
+            abrir_selector_placas(self)
+        except Exception as exc:
+            messagebox.showerror("Placas", str(exc), parent=self)
+
+    def _lista_compacta(self):
+        """Lista sin fotos para pegar en la heladera o la góndola."""
+        from lista_compacta import abrir_selector_lista_compacta
+        abrir_selector_lista_compacta(self)
+
+    def _codigos_propios(self):
+        """Genera codigos de barras propios para lo que no tiene.
+
+        Un producto con codigo inventado ("QCREM-FRAC") no se puede
+        escanear: la etiqueta sale sin codigo legible y en cada venta
+        hay que buscarlo por nombre. Con un EAN-13 del rango interno
+        (200-299, reservado por el estandar) se imprime y funciona como
+        cualquier producto de fabrica.
+        """
+        from repositorio import productos_sin_codigo_valido, asignar_codigo_interno
+        pendientes = productos_sin_codigo_valido()
+        if not pendientes:
+            messagebox.showinfo(
+                "Códigos propios",
+                "Todos los productos tienen un código de barras válido.",
+                parent=self)
+            return
+
+        def _motivo(cod):
+            """Por que ese codigo no sirve. Verlo evita reemplazar uno bueno."""
+            c = "".join(ch for ch in str(cod or "") if ch.isdigit())
+            if not cod:
+                return "sin código"
+            if not c:
+                return f"«{cod}» no es numérico"
+            if len(c) not in (8, 12, 13):
+                return f"«{cod}» tiene {len(c)} dígitos (no es EAN)"
+            return f"«{cod}» tiene el dígito verificador mal"
+
+        muestra = "\n".join(
+            f"  · {p['descripcion'][:34]}  —  {_motivo(p['codigo'])}"
+            for p in pendientes[:10])
+        extra = (f"\n  ...y {len(pendientes) - 10} más"
+                 if len(pendientes) > 10 else "")
+
+        if not messagebox.askyesno(
+                "Códigos propios",
+                f"{len(pendientes)} producto(s) no tienen un código que se "
+                f"pueda escanear:\n\n{muestra}{extra}\n\n"
+                "Se les va a generar un código EAN-13 propio (empieza en "
+                "200, que el estándar reserva para uso interno y nunca "
+                "choca con uno de fábrica).\n\n"
+                "Los que ya tienen un código de fábrica válido — de 13, 12 "
+                "u 8 dígitos — no aparecen acá y no se tocan.\n\n"
+                "Después imprimí sus etiquetas y quedan listos para "
+                "escanear.\n\n¿Los genero?", parent=self):
+            return
+
+        hechos = []
+        for p in pendientes:
+            try:
+                hechos.append((p["descripcion"], asignar_codigo_interno(p["id"])))
+            except Exception as exc:
+                logging.warning(f"No se pudo asignar codigo a {p['id']}: {exc}")
+
+        det = "\n".join(f"  {d[:34]}: {c}" for d, c in hechos[:10])
+        mas = f"\n  ...y {len(hechos) - 10} más" if len(hechos) > 10 else ""
+        messagebox.showinfo(
+            "Códigos propios",
+            f"{len(hechos)} código(s) generados:\n\n{det}{mas}\n\n"
+            "Imprimí las etiquetas desde «🏷 Etiquetas de góndola» para "
+            "poder escanearlos.", parent=self)
+        self._refrescar()
+
     def _chequear_fotos_url(self):
         """Cuenta las fotos que apuntan a internet y lo muestra."""
         try:
@@ -623,6 +747,99 @@ class ProductosUI(ttk.Frame):
         imagenes._URLS_FALLIDAS.clear()
         self._refrescar()
 
+    def _duplicar(self):
+        """Copia un producto para dar de alta otra variedad o tamaño.
+
+        Cargar la sexta variedad de la misma marca obliga a repetir a
+        mano categoría, marca, precio, costo y margen. Casi siempre lo
+        único que cambia es una palabra del nombre.
+        """
+        from repositorio import duplicar_producto
+        pid = self._prod_sel
+        if not pid:
+            messagebox.showinfo("Duplicar", "Elegí un producto de la lista.",
+                                parent=self)
+            return
+        orig = get_producto_completo(pid)
+        if not orig:
+            return
+
+        d = tk.Toplevel(self)
+        d.title("Duplicar producto")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        _centrar(d, 480, 330)
+
+        lbl(d, "Duplicar producto", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+        lbl(d, f"Copia de: {orig['descripcion'][:40]}", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18)
+
+        info = tk.Frame(d, bg=C.acento, padx=14, pady=10)
+        info.pack(fill="x", padx=18, pady=(12, 8))
+        tk.Label(info, bg=C.acento, fg=C.texto, font=F.pequeña, anchor="w",
+                 justify="left",
+                 text=(f"Se copian: categoría, marca, precio "
+                       f"($ {orig.get('precio_base') or 0:,.2f}), costo "
+                       f"($ {orig.get('costo_ultimo') or 0:,.2f}) y margen.\n"
+                       f"El stock arranca en cero y el código se genera "
+                       f"solo si lo dejás vacío.")).pack(anchor="w")
+
+        lbl(d, "Nombre del producto nuevo", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(6, 2))
+        v_desc = tk.StringVar(value=orig["descripcion"])
+        e = tk.Entry(d, textvariable=v_desc, font=F.normal, bg=C.bg,
+                     fg=C.texto, relief="solid", bd=1)
+        e.pack(fill="x", padx=18, ipady=5)
+
+        lbl(d, "Código de barras (vacío = se genera uno propio)",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=18,
+                                                     pady=(10, 2))
+        v_cod = tk.StringVar()
+        tk.Entry(d, textvariable=v_cod, font=F.normal, bg=C.bg, fg=C.texto,
+                 relief="solid", bd=1).pack(fill="x", padx=18, ipady=5)
+
+        def guardar(_ev=None):
+            desc = v_desc.get().strip()
+            if not desc:
+                messagebox.showwarning("Duplicar", "Poné un nombre.", parent=d)
+                return
+            if desc == orig["descripcion"]:
+                messagebox.showwarning(
+                    "Duplicar", "El nombre es igual al original.\n\n"
+                    "Cambiá la variedad o el tamaño para distinguirlos.",
+                    parent=d)
+                return
+            try:
+                nuevo = duplicar_producto(pid, desc, v_cod.get().strip())
+            except Exception as exc:
+                messagebox.showerror("Duplicar", str(exc), parent=d)
+                return
+            d.destroy()
+            self._refrescar_productos()
+            self._prod_sel = nuevo
+            try:
+                self.tree_prod.selection_set(str(nuevo))
+                self.tree_prod.see(str(nuevo))
+            except Exception:
+                pass
+            toast(self, "Producto duplicado — cargale el stock desde Stock")
+
+        e.bind("<Return>", guardar)
+        d.bind("<Escape>", lambda ev: d.destroy())
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", pady=14)
+        btn(pie, "Duplicar  (Enter)", variante="exito",
+            comando=guardar).pack(side="left", padx=4)
+        btn(pie, "Cancelar", variante="neutro",
+            comando=d.destroy).pack(side="left", padx=4)
+
+        e.focus_set()
+        # El cursor al final: lo que se cambia suele ser la ultima palabra
+        # (la variedad o el tamaño), no el principio del nombre.
+        e.icursor("end")
+        e.xview_moveto(1)
+
     def _marcar_revisar(self):
         """Manda los productos seleccionados a la cola de revision.
 
@@ -718,7 +935,9 @@ class ProductosUI(ttk.Frame):
 
         d = tk.Toplevel(self)
         d.title("Editar producto")
-        _centrar(d, 520, 990)
+        # Acotado a la pantalla: con 990 px fijos el boton Guardar
+        # quedaba abajo del borde en cualquier notebook.
+        _centrar(d, 520, min(990, d.winfo_screenheight() - 90))
         d.resizable(True, True)
         d.configure(bg=C.superficie)
         d.grab_set()
@@ -1117,6 +1336,26 @@ class ProductosUI(ttk.Frame):
                     return
                 precio = round(costo * (1 + margen_calculo / 100), 2)
 
+            # Vender bajo costo puede ser deliberado (liquidar algo por
+            # vencer), pero por descuido es plata que se pierde en cada
+            # venta sin que nada lo marque.
+            if costo and precio < costo:
+                if not messagebox.askyesno(
+                        "Precio por debajo del costo",
+                        f"El precio ($ {precio:,.2f}) queda por debajo del "
+                        f"costo ($ {costo:,.2f}).\n\n"
+                        f"Perdés $ {costo - precio:,.2f} en cada unidad que "
+                        f"vendas.\n\n¿Guardar igual?", parent=d):
+                    entries["Precio de venta"].focus_set()
+                    entries["Precio de venta"].select_range(0, "end")
+                    return
+
+            # El costo vive en DOS lugares: acá y en cada lote. La
+            # rentabilidad lee el lote, así que corregir sólo el producto
+            # deja el informe mostrando la ganancia vieja.
+            costo_previo = float(prod.get("costo_ultimo") or 0)
+            hay_que_alinear = costo and abs(costo - costo_previo) > 0.01
+
             cat_id = self._cat_map.get(combo.get())
 
             # Si el producto tenía una foto guardada localmente y ahora
@@ -1144,12 +1383,61 @@ class ProductosUI(ttk.Frame):
             import catalogo_web
             catalogo_web.sincronizar_stock_en_segundo_plano()
             d.destroy()
+
+            # Si cambió el costo, los lotes que quedan en stock siguen
+            # con el viejo y la rentabilidad los sigue usando.
+            if hay_que_alinear:
+                from repositorio import lotes_descuadrados, alinear_lotes_con_producto
+                pendientes = [x for x in lotes_descuadrados(solo_con_stock=True)
+                              if x["producto_id"] == pid]
+                if pendientes:
+                    unidades = sum(x["cantidad_restante"] for x in pendientes)
+                    if messagebox.askyesno(
+                            "Costo de los lotes en stock",
+                            f"Cambiaste el costo a $ {costo:,.2f}, pero "
+                            f"{len(pendientes)} lote(s) con stock "
+                            f"({unidades:g} unidad(es)) siguen cargados con "
+                            f"$ {pendientes[0]['costo_unitario']:,.2f}.\n\n"
+                            "La rentabilidad se calcula con el costo del "
+                            "lote, así que si no se corrigen, el informe va "
+                            "a seguir mostrando la ganancia vieja.\n\n"
+                            "¿Les pongo el costo nuevo?\n\n"
+                            "(Los lotes ya agotados no se tocan: esas "
+                            "compras ya pasaron.)", parent=self):
+                        n = alinear_lotes_con_producto(pid)
+                        toast(self, f"{n} lote(s) alineados al costo nuevo")
+                        self._refrescar_productos()
+                        return
             toast(self, "✅  Producto actualizado")
             self._refrescar_productos()
 
-        btn(d, "💾  Guardar cambios", variante="exito", comando=guardar).grid(
-            row=2, column=0, sticky="ew", padx=20, pady=20)
-        entries["Descripción"].focus_set()
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.grid(row=2, column=0, sticky="ew", padx=20, pady=(10, 16))
+        pie.columnconfigure(0, weight=1)
+        btn(pie, "💾  Guardar cambios  (Enter)", variante="exito",
+            comando=guardar).grid(row=0, column=0, sticky="ew")
+        lbl(pie, "Esc cancela", variante="suave", bg=C.superficie).grid(
+            row=1, column=0, pady=(6, 0))
+
+        # Enter guarda, salvo en los campos de texto libre: ahi se escribe
+        # y un Enter de mas guardaria lo que hubiera quedado tipeado.
+        _texto_libre = [entries["Descripción"], entries["Marca"]]
+
+        def _enter(_ev=None):
+            if d.focus_get() in _texto_libre:
+                e_precio.focus_set()
+                e_precio.select_range(0, "end")
+                return "break"
+            return guardar()
+
+        d.bind("<Return>", _enter)
+        d.bind("<KP_Enter>", _enter)
+        d.bind("<Escape>", lambda ev: d.destroy())
+
+        # El foco NO va en la descripcion: arrancaba con el texto
+        # seleccionado y cualquier tecla lo reemplazaba entero.
+        e_precio.focus_set()
+        e_precio.select_range(0, "end")
 
     def _toggle_activo(self):
         pid = self._prod_sel

@@ -16,6 +16,7 @@ METODOS_PAGO = [
     ("Efectivo",         "efectivo"),
     ("Tarjeta",          "tarjeta"),
     ("Mixto Ef+Tarj",    "mixto"),
+    ("Parte y fía",      "mixto_cta"),
     ("QR",               "qr"),
     ("Cuenta Corriente", "cuenta_corriente"),
 ]
@@ -73,14 +74,96 @@ class VentasUI(ttk.Frame):
         self.metodo        = tk.StringVar(value="efectivo")
         self._cliente_cta = None   # dict con datos del cliente fiado
         self._build()
+        self._atajos()
+        self._chequear_recargo()
         self.after(100, self.foco_scanner)
+
+    def _chequear_recargo(self):
+        """Cartel cuando rige un recargo por horario.
+
+        El cajero tiene que saber que los precios que ve son los de la
+        franja, no los de lista: si no, ante un reclamo no sabe que
+        contestar.
+        """
+        try:
+            from repositorio import recargo_vigente
+            r = recargo_vigente()
+        except Exception:
+            r = None
+        if r:
+            self.lbl_recargo.config(
+                text=(f"  ⏰  Rige «{r['nombre']}»: +{r['porcentaje']:g}% "
+                      f"sobre los precios de lista  "))
+            self.lbl_recargo.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        else:
+            self.lbl_recargo.grid_forget()
+        # Se vuelve a mirar cada 5 minutos: la franja arranca sola
+        self.after(300000, self._chequear_recargo)
+
+    def _atajos(self):
+        """Teclas de función para la caja.
+
+        En el mostrador con cola atrás, soltar el teclado para buscar el
+        mouse cuesta segundos en cada venta. Las F van al toplevel para
+        que anden con el foco en cualquier campo, incluido el scanner.
+        """
+        # F12 (cobrar) ya estaba enganchado desde antes en _build: no se
+        # duplica acá para no llamar dos veces a _cobrar.
+        raiz = self.winfo_toplevel()
+        for tecla, fn in (
+                ("<F1>",     self._ayuda_atajos),
+                ("<F2>",     lambda e: self.foco_scanner()),
+                ("<F3>",     self._atajo_cantidad),
+                ("<F4>",     lambda e: self._leer_balanza()),
+                ("<F6>",     lambda e: self._nueva_venta()),
+                ("<Delete>", self._atajo_quitar)):
+            raiz.bind(tecla, fn, add="+")
+
+    def _atajo_cantidad(self, event=None):
+        """Pone el foco para tipear la cantidad del proximo escaneo."""
+        self.entry_scan.delete(0, "end")
+        self.entry_scan.focus_set()
+        toast(self, "Escribí la cantidad y después escaneá el producto")
+        return "break"
+
+    def _atajo_quitar(self, event=None):
+        """Supr saca del carrito el item seleccionado.
+
+        Si se esta escribiendo en un campo con texto, Supr borra letras
+        y no toca el carrito. El scanner es la excepcion: ahi el foco
+        vive siempre, y si esta vacio Supr tiene que sacar del carrito.
+        """
+        foco = self.focus_get()
+        if isinstance(foco, (tk.Entry, ttk.Entry)):
+            en_scanner = foco is getattr(self, "entry_scan", None)
+            if not en_scanner or foco.get().strip():
+                return None      # hay texto para borrar: se respeta
+        if not self.tree.selection():
+            toast(self, "Elegí primero un ítem del carrito", error=True)
+            return "break"
+        self._quitar()
+        return "break"
+
+    def _ayuda_atajos(self, event=None):
+        messagebox.showinfo(
+            "Atajos de teclado",
+            "F12   Cobrar\n"
+            "F2    Volver al lector de código\n"
+            "F3    Escribir una cantidad antes de escanear\n"
+            "F4    Leer la balanza\n"
+            "F6    Venta nueva (vacía el carrito)\n"
+            "Supr  Sacar del carrito el ítem seleccionado\n\n"
+            "F1    Esta ayuda\n\n"
+            "También podés escribir la cantidad y un punto antes de "
+            "escanear: 3. o 0,500*", parent=self)
+        return "break"
 
     # ── Construcción adaptable ────────────────────────────────────────────────
 
     def _build(self):
         header_seccion(
             self, "Venta",
-            "Escanea, o busca por nombre/codigo — cantidad con . o * antes (ej: 3. o 0,500*)  —  F12 cobrar"
+            "Escanea, o busca por nombre/codigo — cantidad con . o * antes (ej: 3. o 0,500*)  —  F12 cobrar  ·  F1 atajos"
         ).pack(fill="x", padx=12, pady=(8, 4))
 
         self._cont = tk.Frame(self, bg=C.bg)
@@ -115,6 +198,13 @@ class VentasUI(ttk.Frame):
                pady=(0 if row > 0 else 12, 6 if row == 0 else 12))
         p.columnconfigure(0, weight=1)
         p.rowconfigure(1, weight=1)
+
+        # Aviso de recargo por horario. Se crea siempre y se muestra solo
+        # cuando rige: el cajero tiene que saber que los precios que ve
+        # no son los de lista.
+        self.lbl_recargo = tk.Label(
+            p, text="", bg=C.advertencia, fg=C.blanco,
+            font=("Segoe UI", 10, "bold"), pady=5)
 
         # Scanner
         scan = card(p)
@@ -494,6 +584,19 @@ class VentasUI(ttk.Frame):
                            font=F.pequeña, anchor="w")
         lbl_bal.pack(fill="x", padx=18, pady=(3, 0))
 
+        # Muchas balanzas de mostrador ya muestran el importe: tipear el
+        # peso obliga a rehacer la cuenta al reves. Se puede cargar
+        # cualquiera de los dos y el otro se completa solo.
+        f_imp = tk.Frame(d, bg=C.superficie)
+        f_imp.pack(fill="x", padx=18, pady=(10, 0))
+        lbl(f_imp, "…o el importe  $", variante="suave",
+            bg=C.superficie).pack(side="left")
+        v_importe = tk.StringVar()
+        e_imp = tk.Entry(f_imp, textvariable=v_importe, font=F.subtitulo,
+                         justify="center", width=12, bg=C.bg, fg=C.texto,
+                         relief="solid", bd=1)
+        e_imp.pack(side="left", padx=6, ipady=3)
+
         def _pesar():
             try:
                 import balanza
@@ -510,30 +613,79 @@ class VentasUI(ttk.Frame):
         btn(f_in, "Pesar", variante="primario", comando=_pesar).pack(
             side="left", padx=(8, 0))
 
-        # El subtotal en vivo: es lo que el cajero le canta al cliente
-        lbl_sub = tk.Label(d, text="", bg=C.acento, fg=C.texto, font=F.total,
-                           pady=10)
-        lbl_sub.pack(fill="x", padx=18, pady=(10, 0))
+        # El subtotal en vivo: es lo que el cajero le canta al cliente.
+        # Va en DOS labels: el importe grande y el mensaje chico. Con
+        # todo a 28pt, un texto como "Poné el peso o usá la balanza" se
+        # salia de la ventana.
+        caja_sub = tk.Frame(d, bg=C.acento)
+        caja_sub.pack(fill="x", padx=18, pady=(10, 0))
+        lbl_sub = tk.Label(caja_sub, text="", bg=C.acento, fg=C.texto,
+                           font=F.total, pady=(6))
+        lbl_sub.pack(fill="x")
+        lbl_msg = tk.Label(caja_sub, text="", bg=C.acento, fg=C.texto_suave,
+                           font=F.normal, wraplength=380, pady=4)
+        lbl_msg.pack(fill="x")
+
+        def _pintar(importe="", mensaje="", error=False):
+            fondo = C.err_flash if error else C.acento
+            caja_sub.config(bg=fondo)
+            lbl_sub.config(text=importe, bg=fondo,
+                           fg=C.peligro if error else C.texto)
+            lbl_msg.config(text=mensaje, bg=fondo,
+                           fg=C.peligro if error else C.texto_suave)
 
         def _calcular(*_a):
             txt = (v_peso.get() or "").strip().replace(",", ".")
             try:
                 kg = float(txt)
             except ValueError:
-                lbl_sub.config(text="Poné el peso o usá la balanza")
+                _pintar("—", "Poné el peso o usá la balanza")
                 return
             if kg <= 0:
-                lbl_sub.config(text="El peso tiene que ser mayor a cero",
-                               bg=C.acento)
+                _pintar("—", "El peso tiene que ser mayor a cero")
                 return
             if stock_disp and kg > stock_disp + 0.001:
-                lbl_sub.config(text=f"Solo hay {stock_disp:g} kg",
-                               bg=C.err_flash, fg=C.peligro)
+                _pintar(f"{kg:.3f} kg", f"Solo hay {stock_disp:g} kg",
+                        error=True)
                 return
-            lbl_sub.config(text=f"{kg:.3f} kg   =   $ {kg * precio_kg:,.2f}",
-                           bg=C.acento, fg=C.texto)
+            _pintar(f"$ {kg * precio_kg:,.2f}", f"{kg:.3f} kg")
 
-        v_peso.trace_add("write", _calcular)
+        # Cada campo completa al otro. El flag evita el rebote infinito
+        # de "peso escribe importe, importe escribe peso".
+        _recalc = [False]
+
+        def _desde_peso(*_a):
+            if _recalc[0]:
+                return
+            _calcular()
+            try:
+                kg = float((v_peso.get() or "").strip().replace(",", "."))
+            except ValueError:
+                return
+            if kg > 0 and precio_kg:
+                _recalc[0] = True
+                v_importe.set(f"{kg * precio_kg:.2f}")
+                _recalc[0] = False
+
+        def _desde_importe(*_a):
+            if _recalc[0]:
+                return
+            txt = (v_importe.get() or "").strip().replace(",", ".")
+            if not txt:
+                return
+            try:
+                imp = float(txt)
+            except ValueError:
+                return
+            if imp > 0 and precio_kg:
+                _recalc[0] = True
+                # 3 decimales: es la precision de una balanza de gramos
+                v_peso.set(f"{imp / precio_kg:.3f}")
+                _recalc[0] = False
+                _calcular()
+
+        v_peso.trace_add("write", _desde_peso)
+        v_importe.trace_add("write", _desde_importe)
         _calcular()
 
         resultado = [None]
@@ -555,6 +707,7 @@ class VentasUI(ttk.Frame):
             d.destroy()
 
         e.bind("<Return>", aceptar)
+        e_imp.bind("<Return>", aceptar)
         d.bind("<Escape>", lambda ev: d.destroy())
 
         pie = tk.Frame(d, bg=C.superficie)
@@ -844,6 +997,8 @@ class VentasUI(ttk.Frame):
 
         total  = sum(i["subtotal"] for i in self.carrito) * (1 - desc_pct / 100)
         metodo = self.metodo.get()
+        # Reparto del pago entre medios. None = todo al metodo elegido.
+        desglose = None
 
         # Efectivo / Tarjeta / QR → confirmar directo
         if metodo in ("efectivo", "tarjeta", "qr"):
@@ -872,6 +1027,17 @@ class VentasUI(ttk.Frame):
                 return self.foco_scanner()
             metodo_db  = "mixto"
             cliente_id = None
+            desglose = {"efectivo": resultado.get("efectivo", 0),
+                        "tarjeta": resultado.get("tarjeta", 0)}
+
+        # Paga una parte ahora y el resto queda fiado
+        elif metodo == "mixto_cta":
+            r = self._dialogo_parte_y_fia(total)
+            if not r:
+                return self.foco_scanner()
+            metodo_db  = "cuenta_corriente"
+            cliente_id = r["cliente"]["id"]
+            desglose = {r["medio"]: r["paga"], "cta_cte": r["fia"]}
 
         # Cuenta Corriente → popup solo con DNI
         elif metodo == "cuenta_corriente":
@@ -889,7 +1055,8 @@ class VentasUI(ttk.Frame):
         try:
             vid = registrar_venta(
                 self.app.sesion_id, self.carrito,
-                metodo_db, desc_pct, cliente_id=cliente_id)
+                metodo_db, desc_pct, cliente_id=cliente_id,
+                desglose=desglose)
         except Exception as exc:
             messagebox.showerror("No se pudo cobrar",
                                  self._detalle_error_venta(exc), parent=self)
@@ -897,11 +1064,18 @@ class VentasUI(ttk.Frame):
             return
 
         if vid:
-            if metodo_db == "cuenta_corriente" and cliente_id:
+            # Lo que queda fiado va a la cuenta del cliente. En un pago
+            # repartido eso NO es el total: es solo la parte no cubierta.
+            deuda = (desglose or {}).get("cta_cte") if desglose else None
+            if deuda is None and metodo_db == "cuenta_corriente":
+                deuda = total
+            if deuda and cliente_id:
                 from repositorio import actualizar_saldo_cliente
                 actualizar_saldo_cliente(
-                    cliente_id, total, venta_id=vid,
-                    concepto=f"Venta #{vid}")
+                    cliente_id, deuda, venta_id=vid,
+                    concepto=f"Venta #{vid}"
+                            + (f" (pagó $ {total - deuda:,.2f})"
+                               if deuda < total else ""))
             # Sincro liviana de stock hacia la página de pedidos, en
             # segundo plano — no toca fotos, y si falla (sin internet,
             # sin URL configurada, etc.) no debe afectar la venta que
@@ -1200,6 +1374,119 @@ class VentasUI(ttk.Frame):
 
         self.wait_window(d)
         return result[0]
+
+    def _dialogo_parte_y_fia(self, total: float) -> dict | None:
+        """Paga una parte ahora y el resto queda en su cuenta.
+
+        Es lo que pasa cuando el cliente no le alcanza: deja lo que tiene
+        y se lleva la mercaderia. Antes habia que elegir entre cobrarle
+        todo o fiarle todo, y la diferencia se anotaba en un papel.
+
+        Devuelve {"cliente", "medio", "paga", "fia"} o None.
+        """
+        cliente = self._dialogo_cuenta_corriente(total)
+        if not cliente:
+            return None
+
+        d = tk.Toplevel(self)
+        d.title("Paga una parte")
+        d.configure(bg=C.superficie)
+        d.transient(self.winfo_toplevel())
+        d.grab_set()
+        _centrar_dialogo(d, 460, 380)
+
+        lbl(d, cliente.get("nombre", "")[:36], variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(16, 2))
+        saldo = float(cliente.get("saldo_actual") or 0)
+        lbl(d, f"Total de la compra: $ {total:,.2f}"
+               + (f"   ·   ya debe $ {saldo:,.2f}" if saldo else ""),
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=20)
+
+        lbl(d, "¿Con qué paga la parte de ahora?", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(14, 2))
+        v_medio = tk.StringVar(value="efectivo")
+        f_m = tk.Frame(d, bg=C.superficie)
+        f_m.pack(fill="x", padx=20)
+        for val, txt in (("efectivo", "Efectivo"), ("tarjeta", "Tarjeta"),
+                         ("qr", "QR")):
+            tk.Radiobutton(f_m, text=txt, variable=v_medio, value=val,
+                           bg=C.superficie, fg=C.texto, font=F.normal,
+                           selectcolor=C.superficie,
+                           activebackground=C.superficie).pack(side="left",
+                                                                padx=(0, 12))
+
+        lbl(d, "¿Cuánto paga ahora?", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(14, 2))
+        v_paga = tk.StringVar()
+        e = tk.Entry(d, textvariable=v_paga, font=F.total, justify="center",
+                     bg=C.bg, fg=C.texto, relief="solid", bd=1)
+        e.pack(fill="x", padx=20, ipady=6)
+        e.focus_set()
+
+        caja = tk.Label(d, text="", bg=C.acento, fg=C.texto, font=F.subtitulo,
+                        pady=10)
+        caja.pack(fill="x", padx=20, pady=(12, 0))
+
+        def _calc(*_a):
+            try:
+                paga = float((v_paga.get() or "0").replace(",", "."))
+            except ValueError:
+                caja.config(text="Poné cuánto entrega", bg=C.acento,
+                            fg=C.texto)
+                return
+            if paga < 0:
+                caja.config(text="No puede ser negativo", bg=C.err_flash,
+                            fg=C.peligro)
+                return
+            if paga > total + 0.01:
+                caja.config(text=f"Es más que el total ($ {total:,.2f})",
+                            bg=C.err_flash, fg=C.peligro)
+                return
+            fia = total - paga
+            caja.config(text=f"Paga $ {paga:,.2f}   ·   queda debiendo "
+                             f"$ {fia:,.2f}", bg=C.acento, fg=C.texto)
+
+        v_paga.trace_add("write", _calc)
+        _calc()
+
+        res = [None]
+
+        def aceptar(_ev=None):
+            try:
+                paga = float((v_paga.get() or "").replace(",", "."))
+            except ValueError:
+                messagebox.showwarning("Pago", "Escribí cuánto paga.",
+                                       parent=d)
+                return
+            if paga < 0 or paga > total + 0.01:
+                messagebox.showwarning(
+                    "Pago", f"El monto tiene que estar entre $ 0 y "
+                            f"$ {total:,.2f}.", parent=d)
+                return
+            fia = round(total - paga, 2)
+            tope = float(cliente.get("tope_credito") or 0)
+            if tope and saldo + fia > tope:
+                if not messagebox.askyesno(
+                        "Supera el tope",
+                        f"Con esta compra queda debiendo "
+                        f"$ {saldo + fia:,.2f} y su tope es $ {tope:,.2f}."
+                        f"\n\n¿Autorizás igual?", parent=d):
+                    return
+            res[0] = {"cliente": cliente, "medio": v_medio.get(),
+                      "paga": round(paga, 2), "fia": fia}
+            d.destroy()
+
+        e.bind("<Return>", aceptar)
+        d.bind("<Escape>", lambda ev: d.destroy())
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", pady=16)
+        btn(pie, "Confirmar  (Enter)", variante="exito",
+            comando=aceptar).pack(side="left", padx=4)
+        btn(pie, "Cancelar", variante="neutro",
+            comando=d.destroy).pack(side="left", padx=4)
+
+        self.wait_window(d)
+        return res[0]
 
     def _dialogo_cuenta_corriente(self, total: float) -> dict | None:
         """

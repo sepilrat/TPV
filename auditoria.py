@@ -20,6 +20,7 @@ Uso tipico:
 
 from __future__ import annotations
 
+import logging
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -378,25 +379,45 @@ def regla_escala_invertida(productos, cfg):
 # R5 - Variantes del mismo producto con precios distintos
 # --------------------------------------------------------------------------
 
+# Con muchos productos de una misma marca, comparar todos contra todos
+# se dispara: 1200 productos de la misma marca son 720.000 pares y la
+# pantalla tarda un minuto en abrir. Arriba de este tope se saltea el
+# grupo — un grupo tan grande casi siempre es marca mal cargada, no
+# variantes reales del mismo producto.
+MAX_POR_MARCA = 150
+
+
 def regla_variantes_dispares(productos, cfg):
     por_marca = {}
     for p in productos:
         if _marca(p) and p.get("precio_venta"):
             por_marca.setdefault(_marca(p), []).append(p)
 
+    # Se agrupa ADEMAS por contenido: dos productos con distinto tamaño
+    # nunca son variantes entre si, y comparar todo contra todo para
+    # despues descartarlos es lo que hacia lento el calculo.
+    grupos = {}
+    for marca, items in por_marca.items():
+        if len(items) > MAX_POR_MARCA:
+            logging.warning(
+                f"Auditoria: la marca '{marca}' tiene {len(items)} productos. "
+                f"Se saltea la busqueda de variantes (suele ser marca mal "
+                f"cargada, no variantes reales).")
+            continue
+        for p in items:
+            cant, base = contenido_de(p)
+            clave = (marca, base, round(cant, 3) if cant else None)
+            grupos.setdefault(clave, []).append(p)
+    por_marca = {k: v for k, v in grupos.items() if len(v) > 1}
+
     out, vistos = [], set()
     sim_min = float(cfg["similitud_variantes"])
     dif_min = float(cfg["variantes_dif_pct"])
-    for marca, items in por_marca.items():
+    for _clave, items in por_marca.items():
         for i, a in enumerate(items):
-            cant_a, base_a = contenido_de(a)
             for b in items[i + 1:]:
-                cant_b, base_b = contenido_de(b)
-                # mismo contenido (o ambos sin parsear) y descripciones parecidas
-                if base_a != base_b:
-                    continue
-                if cant_a and cant_b and abs(cant_a - cant_b) > 0.01:
-                    continue
+                # El contenido ya coincide: agrupar por (marca, base,
+                # cantidad) lo garantiza antes de entrar al bucle.
                 if _similitud(a["descripcion"], b["descripcion"]) < sim_min:
                     continue
                 pa, pb = float(a["precio_venta"]), float(b["precio_venta"])

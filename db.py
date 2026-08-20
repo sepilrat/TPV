@@ -179,6 +179,61 @@ def inicializar_db():
     """)
 
     # ─────────────────────────────────────────
+    # RECARGOS POR FRANJA HORARIA
+    # Ajuste de precio segun dia y hora. dias: string con los numeros de
+    # dia separados por coma (0=domingo, como strftime %w).
+    # hora_desde > hora_hasta significa que la franja cruza la medianoche
+    # (ej: 18:00 a 08:00).
+    # categoria_id NULL = se aplica a todo el catalogo.
+    # ─────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS recargos_horarios (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre       TEXT NOT NULL,
+            porcentaje   REAL NOT NULL,
+            dias         TEXT NOT NULL DEFAULT '0,1,2,3,4,5,6',
+            hora_desde   INTEGER NOT NULL DEFAULT 0,
+            hora_hasta   INTEGER NOT NULL DEFAULT 24,
+            categoria_id INTEGER REFERENCES categorias(id) ON DELETE CASCADE,
+            activo       INTEGER NOT NULL DEFAULT 1,
+            creado_en    TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
+    # ─────────────────────────────────────────
+    # RECARGOS POR HORARIO
+    # El local cierra y pasa a atender por ventanilla: cada cliente lleva
+    # mas tiempo y no se puede reponer mientras se atiende. El precio
+    # nocturno cubre eso. Se guarda como regla, no como precio: si se
+    # tocaran los precios reales, al volver al horario normal habria que
+    # deshacerlo y cualquier corte de luz dejaria el catalogo mal.
+    # ─────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS recargos_horario (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre       TEXT NOT NULL,
+            porcentaje   REAL NOT NULL,
+            dias         TEXT NOT NULL,      -- '0,1,2,3,4,5,6' (0=lunes)
+            hora_desde   INTEGER NOT NULL,   -- 18  => 18:00
+            hora_hasta   INTEGER NOT NULL,   -- 8   => 08:00 (cruza medianoche)
+            alcance      TEXT NOT NULL DEFAULT 'todo',  -- todo|categorias|productos
+            activo       INTEGER NOT NULL DEFAULT 1,
+            creado_en    TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS recargo_alcance (
+            recargo_id   INTEGER NOT NULL REFERENCES recargos_horario(id) ON DELETE CASCADE,
+            categoria_id INTEGER REFERENCES categorias(id) ON DELETE CASCADE,
+            producto_id  INTEGER REFERENCES productos(id) ON DELETE CASCADE
+        )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS ix_recargo_alcance
+            ON recargo_alcance(recargo_id)
+    """)
+
+    # ─────────────────────────────────────────
     # COLA DE REVISION
     # Estado de la revision de catalogo: por donde va uno recorriendo los
     # productos. Los que no tienen fila figuran como "sin revisar".
@@ -459,6 +514,41 @@ def inicializar_db():
 
     c.execute("CREATE INDEX IF NOT EXISTS idx_clientes_dni ON clientes(dni)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_cliente ON movimientos_cuenta(cliente_id)")
+
+    # Desglose de pagos mixtos. Sin esto, una venta pagada mitad en
+    # efectivo y mitad en otra cosa imputaba TODO a efectivo y el arqueo
+    # daba un sobrante que nadie podia explicar.
+    for _col, _tipo in (("monto_efectivo", "REAL DEFAULT 0"),
+                        ("monto_tarjeta",  "REAL DEFAULT 0"),
+                        ("monto_qr",       "REAL DEFAULT 0"),
+                        ("monto_cta_cte",  "REAL DEFAULT 0")):
+        try:
+            c.execute(f"ALTER TABLE ventas ADD COLUMN {_col} {_tipo}")
+        except Exception:
+            pass          # ya existe
+
+    # Ventas anteriores al desglose: se completan desde metodo_pago. Sin
+    # esto los informes por medio de pago daban todo en cero para el
+    # historico, que es justamente donde estan casi todas las ventas.
+    try:
+        c.execute("""
+            UPDATE ventas
+               SET monto_efectivo = CASE WHEN metodo_pago IN ('efectivo','mixto')
+                                         THEN total ELSE 0 END,
+                   monto_tarjeta  = CASE WHEN metodo_pago = 'tarjeta'
+                                         THEN total ELSE 0 END,
+                   monto_qr       = CASE WHEN metodo_pago = 'qr'
+                                         THEN total ELSE 0 END,
+                   monto_cta_cte  = CASE WHEN metodo_pago = 'cuenta_corriente'
+                                         THEN total ELSE 0 END
+             WHERE COALESCE(monto_efectivo,0) = 0
+               AND COALESCE(monto_tarjeta,0)  = 0
+               AND COALESCE(monto_qr,0)       = 0
+               AND COALESCE(monto_cta_cte,0)  = 0
+               AND COALESCE(total,0) > 0
+        """)
+    except Exception as _e:
+        logging.debug(f"No se pudo completar el desglose historico: {_e}")
 
     # Indices sobre las tablas que crecen con cada venta. Sin estos,
     # buscar los movimientos de un cliente o los de una sesion obliga a

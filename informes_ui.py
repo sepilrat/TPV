@@ -5,11 +5,11 @@ informes_ui.py — Dashboard e informes TPV v2.0
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
-from styles import C, F, btn, lbl, card, tabla, header_seccion, scrollable
+from styles import (C, F, btn, lbl, card, tabla, toast,
+                    header_seccion, scrollable)
 from repositorio import (get_ventas_periodo, get_ventas_por_dia,
                          get_ventas_por_metodo, get_top_productos,
-                         get_margen_por_categoria, get_stock_critico,
-                         get_vencimientos_proximos, get_rentabilidad_productos,
+                         get_margen_por_categoria, get_vencimientos_proximos, get_rentabilidad_productos,
                          get_rentabilidad_lotes, get_resumen_stock_por_categoria)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -33,10 +33,11 @@ COLS_TOP = [
 ]
 
 COLS_STOCK = [
-    ("desc",   "Producto",   260, "w"),
-    ("codigo", "Codigo",      90, "w"),
-    ("stock",  "Stock",       60, "e"),
-    ("precio", "Precio",      80, "e"),
+    ("desc",   "Producto",   220, "w"),
+    ("stock",  "Stock",       65, "e"),
+    ("dia",    "Venta/día",   80, "e"),
+    ("dura",   "Dura",        85, "e"),
+    ("comprar","Comprar",     80, "e"),
 ]
 
 COLS_VENCE = [
@@ -127,6 +128,8 @@ class InformesUI(ttk.Frame):
             ("  Stock  ",       self._build_stock),
             ("  Rentabilidad ", self._build_rentabilidad),
             ("  Cuando vendo ", self._build_cuando),
+            ("  Se venden juntos ", self._build_juntos),
+            ("  Cobranzas ", self._build_cobranzas),
         ]
         for nombre, builder in tabs:
             f = ttk.Frame(nb)
@@ -249,7 +252,7 @@ class InformesUI(ttk.Frame):
         f_sc = tk.Frame(der, bg=C.bg)
         f_sc.columnconfigure(0, weight=1)
         f_sc.rowconfigure(1, weight=1)
-        lbl(f_sc, "Stock critico", variante="subtitulo",
+        lbl(f_sc, "Se está por acabar", variante="subtitulo",
             fg=C.peligro).grid(row=0, column=0, sticky="w", pady=(0,4))
         frame_sc, self.tree_dash_critico = tabla(f_sc, COLS_STOCK, altura=6)
         frame_sc.grid(row=1, column=0, sticky="nsew")
@@ -348,22 +351,43 @@ class InformesUI(ttk.Frame):
         parent.columnconfigure(1, weight=1)
         parent.rowconfigure(1, weight=1)
 
-        lbl(parent, "Stock critico (< 5 u.)", variante="subtitulo",
+        # Antes era "< 5 unidades" para todo el catálogo: 5 de algo que
+        # sale 20 por día es una urgencia, y 5 de algo que sale uno por
+        # mes es sobrestock. Ahora mide cuántos DÍAS dura.
+        lbl(parent, "Se está por acabar (por velocidad de venta)",
+            variante="subtitulo",
             fg=C.peligro).grid(row=0, column=0, sticky="w", pady=(0,4))
+        self.lbl_stock_modo = lbl(parent, "", variante="suave")
+        self.lbl_stock_modo.grid(row=3, column=0, sticky="w", pady=(4, 0))
         lbl(parent, "Vencimientos proximos (30 dias)", variante="subtitulo",
             fg=C.advertencia).grid(row=0, column=1, sticky="w", pady=(0,4), padx=(8,0))
 
         frame_sc, self.tree_stock_critico = tabla(parent, COLS_STOCK)
         frame_sc.grid(row=1, column=0, sticky="nsew", padx=(0,8))
+        # Silenciar de a uno con 64 productos en la lista es media hora:
+        # se marcan varios con Ctrl o Shift, o todos con Ctrl+A.
+        self.tree_stock_critico.configure(selectmode="extended")
+        self.tree_stock_critico.bind("<Control-a>", self._sel_todo_stock)
+        self.tree_stock_critico.bind("<Control-A>", self._sel_todo_stock)
         self.tree_stock_critico.tag_configure("critico", foreground=C.peligro)
+        self.tree_stock_critico.tag_configure("sindatos",
+                                              foreground=C.texto_suave)
 
         frame_vv, self.tree_stock_vence = tabla(parent, COLS_VENCE)
         frame_vv.grid(row=1, column=1, sticky="nsew")
         self.tree_stock_vence.tag_configure("urgente", foreground=C.peligro)
 
-        btn(parent, "Actualizar", variante="neutro",
-            comando=self._refrescar_stock).grid(row=2, column=0, columnspan=2,
-                                                  sticky="w", pady=(8,0))
+        # Hay productos que siempre estan "bajos" porque se reponen a
+        # diario: sin poder silenciarlos, el aviso se vuelve ruido y se
+        # deja de mirar.
+        f_acc = tk.Frame(parent, bg=C.bg)
+        f_acc.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        btn(f_acc, "Actualizar", variante="neutro",
+            comando=self._refrescar_stock).pack(side="left")
+        btn(f_acc, "☑ Seleccionar todo", variante="neutro",
+            comando=self._sel_todo_stock).pack(side="left", padx=6)
+        btn(f_acc, "🔕  No avisar de estos", variante="neutro",
+            comando=self._silenciar_stock).pack(side="left", padx=6)
         btn(parent, "📧 Enviar informe por email ahora", variante="primario",
             comando=self._enviar_informe_stock).grid(
             row=2, column=1, sticky="e", pady=(8,0))
@@ -395,6 +419,9 @@ class InformesUI(ttk.Frame):
             ("margen_prom",    "Margen promedio"),
             ("mejor_prod",     "Producto mas rentable"),
             ("peor_prod",      "Menor margen"),
+            # La ganancia es de lo VENDIDO. Lo fiado todavia no entro al
+            # cajon, y sin este dato uno cree que tiene plata que no tiene.
+            ("cobrado",        "De eso, cobrado"),
         ]:
             c = card(self.frame_kpis_rent)
             c.pack(side="left", fill="both", expand=True, padx=(0, 8))
@@ -418,6 +445,11 @@ class InformesUI(ttk.Frame):
         f_prod.rowconfigure(0, weight=1)
         frame_p, self.tree_rent_prod = tabla(f_prod, COLS_RENT_PROD)
         frame_p.grid(row=0, column=0, sticky="nsew")
+        # Doble clic: de que lotes salio lo vendido. Es la respuesta a
+        # "corregi el costo y el informe sigue mostrando el viejo": por
+        # FIFO la venta pudo salir de un lote anterior.
+        self.tree_rent_prod.bind("<Double-1>",
+                                 lambda e: self._ver_lotes_vendidos())
         self.tree_rent_prod.tag_configure("perdida", foreground=C.peligro)
         self.tree_rent_prod.tag_configure("bajo",    foreground=C.advertencia)
 
@@ -454,10 +486,97 @@ class InformesUI(ttk.Frame):
                                 self.r_desde.get(), self.r_hasta.get()),
             "Cuando vendo": lambda: self._refrescar_cuando(
                                 self.c_desde.get(), self.c_hasta.get()),
+            "Se venden juntos": lambda: self._refrescar_juntos(
+                                self.j_desde.get(), self.j_hasta.get()),
+            "Cobranzas": lambda: self._refrescar_cobranzas(
+                                self.cb_desde.get(), self.cb_hasta.get()),
         }
         fn = metodos.get(tab)
         if fn:
             self.after(50, fn)
+
+    def _actualizar_cobrado(self, desde, hasta):
+        """Cuánto de lo facturado entró de verdad."""
+        from repositorio import ganancia_cobrada
+        try:
+            r = ganancia_cobrada(desde, hasta)
+        except Exception:
+            return
+        w = self.kpis_rent.get("cobrado")
+        if w is None:
+            return
+        if r["fiado"]:
+            w.config(text=f"$ {r['cobrado']:,.2f}", fg=C.advertencia)
+        else:
+            w.config(text=f"$ {r['cobrado']:,.2f}", fg=C.exito)
+        # El detalle va en el subtítulo de la tarjeta, si existe
+        sub = getattr(self, "lbl_cobrado_det", None)
+        if sub is not None:
+            if r["fiado"]:
+                sub.config(text=(f"quedan $ {r['fiado']:,.2f} fiados de este "
+                                 f"período · deuda total "
+                                 f"$ {r['por_cobrar_total']:,.2f}"))
+            else:
+                sub.config(text="todo cobrado en el período")
+
+    def _ver_lotes_vendidos(self):
+        """Muestra de qué lotes salió lo vendido de ese producto."""
+        from repositorio import lotes_de_producto_vendidos, get_producto_completo
+        sel = self.tree_rent_prod.selection()
+        if not sel:
+            return
+        try:
+            pid = int(sel[0])
+        except ValueError:
+            return
+        prod = get_producto_completo(pid)
+        lotes = lotes_de_producto_vendidos(pid, self.r_desde.get(),
+                                           self.r_hasta.get())
+        if not lotes:
+            return
+
+        d = tk.Toplevel(self)
+        d.title("De qué lotes salió")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        w, h = 560, 340
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//2)}")
+
+        lbl(d, (prod or {}).get("descripcion", "")[:44], variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+        lbl(d, "El costo del informe sale de estos lotes, no del costo "
+               "actual del producto.", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18)
+
+        cols = [("lote", "Lote", 80, "e"), ("ing", "Ingresó", 110, "w"),
+                ("un", "Unidades", 90, "e"), ("costo", "Costo u.", 100, "e"),
+                ("tot", "Costo total", 110, "e")]
+        frame_t, tv = tabla(d, cols, altura=8)
+        frame_t.pack(fill="both", expand=True, padx=18, pady=(10, 6))
+        costo_act = float((prod or {}).get("costo_ultimo") or 0)
+        tv.tag_configure("viejo", foreground=C.advertencia)
+        for l in lotes:
+            distinto = costo_act and abs(l["costo_unitario"] - costo_act) > 0.01
+            tv.insert("", "end", tags=("viejo",) if distinto else (), values=(
+                f"#{l['lote_id']}", (l["fecha_ingreso"] or "")[:10],
+                f"{l['unidades']:g}", f"$ {l['costo_unitario']:,.2f}",
+                f"$ {l['costo_total']:,.2f}"))
+
+        distintos = [l for l in lotes
+                     if costo_act and abs(l["costo_unitario"] - costo_act) > 0.01]
+        if distintos:
+            tk.Label(d, bg=C.acento, fg=C.texto, font=F.pequeña, wraplength=500,
+                     justify="left", padx=14, pady=10, anchor="w",
+                     text=(f"El producto hoy cuesta $ {costo_act:,.2f}, pero "
+                           f"{len(distintos)} de estos lotes tienen otro costo. "
+                           f"Si corregiste el costo hace poco, corregí también "
+                           f"esos lotes desde Stock → Ver historial completo.")
+                     ).pack(fill="x", padx=18)
+
+        btn(d, "Cerrar", variante="neutro",
+            comando=d.destroy).pack(side="bottom", pady=12)
+        d.bind("<Escape>", lambda ev: d.destroy())
 
     def _refrescar_rentabilidad(self, desde=None, hasta=None):
         from datetime import datetime
@@ -484,7 +603,8 @@ class InformesUI(ttk.Frame):
             mv = p.get("margen_venta_pct") or 0
             brecha = mr - mt if mt else 0
             tag = "perdida" if gan < 0 else ("bajo" if mr < 10 else "")
-            self.tree_rent_prod.insert("", "end", values=(
+            self.tree_rent_prod.insert("", "end", iid=str(p["producto_id"]),
+                                       values=(
                 p["descripcion"],
                 p["categoria"] or "—",
                 _fmt_cant(p['unidades']),
@@ -502,6 +622,7 @@ class InformesUI(ttk.Frame):
         mejor = prods[0]["descripcion"][:20] if prods else "—"
         peor  = min(prods, key=lambda x: x["margen_real_pct"] or 0)["descripcion"][:20] if prods else "—"
         self.kpis_rent["ganancia_total"].config(text=f"$ {total_ganancia:,.2f}")
+        self._actualizar_cobrado(desde, hasta)
         self.kpis_rent["margen_prom"].config(text=f"{margen_prom:.1f}%")
         self.kpis_rent["mejor_prod"].config(text=mejor)
         self.kpis_rent["peor_prod"].config(text=peor)
@@ -576,14 +697,40 @@ class InformesUI(ttk.Frame):
                 f"$ {p['total_vendido']:,.2f}",
             ))
 
-        # Stock critico
+        # Se está por acabar. Mismo criterio que la solapa Stock: por
+        # velocidad de venta, no por un umbral fijo para todo el catálogo.
+        from repositorio import get_reposicion
         for r in self.tree_dash_critico.get_children():
             self.tree_dash_critico.delete(r)
-        for s in get_stock_critico():
+        try:
+            _todos = get_reposicion(30, 14, solo_faltantes=False)
+        except Exception:
+            _todos = []
+        try:
+            from config import cfg
+            _umbral = float(cfg().get("stock_alerta_umbral", 5) or 5)
+        except Exception:
+            _umbral = 5
+        # Mismo criterio que la solapa Stock: lo que se acaba segun el
+        # ritmo de venta, mas lo que esta bajo aunque no haya historial.
+        urgentes = [x for x in _todos
+                    if x["urgencia"] in ("sin stock", "urgente")]
+        _ya = {x["id"] for x in urgentes}
+        urgentes += sorted(
+            (x for x in _todos if x["id"] not in _ya
+             and x["urgencia"] == "sin ventas" and 0 < x["stock"] <= _umbral),
+            key=lambda x: x["stock"])
+        for f in urgentes[:12]:
+            if f["urgencia"] == "sin stock":
+                dura = "SIN STOCK"
+            elif f["dias_stock"] is None:
+                dura = "sin datos"
+            else:
+                dura = f"{f['dias_stock']:.1f} d"
             self.tree_dash_critico.insert("", "end", values=(
-                s["descripcion"], s["codigo"],
-                _fmt_cant(s['stock']),
-                f"$ {s['precio_base']:,.2f}",
+                f["descripcion"][:38], f"{f['stock']:g}",
+                f"{f['por_dia']:.2f}", dura,
+                f"{f['sugerido']:g}" if f["sugerido"] else "—",
             ), tags=("critico",))
 
         # Vencimientos
@@ -650,15 +797,111 @@ class InformesUI(ttk.Frame):
                 f"$ {p['total_vendido']:,.2f}",
             ))
 
+    def _sel_todo_stock(self, event=None):
+        """Selecciona todo lo que se ve en la lista de stock crítico."""
+        hijos = self.tree_stock_critico.get_children()
+        self.tree_stock_critico.selection_set(hijos)
+        if hijos:
+            self.tree_stock_critico.focus(hijos[0])
+        return "break"
+
+    def _silenciar_stock(self):
+        """Saca de la alerta los productos elegidos."""
+        from repositorio import toggle_ignorar_alerta
+        sel = self.tree_stock_critico.selection()
+        if not sel:
+            messagebox.showinfo(
+                "Alerta de stock",
+                "Elegí uno o varios productos.\n\n"
+                "Con Ctrl o Shift marcás varios, y con Ctrl+A todos.",
+                parent=self)
+            return
+
+        nombres = [self.tree_stock_critico.item(i)["values"][0] for i in sel]
+        muestra = "\n".join(f"  · {n}" for n in nombres[:10])
+        extra = f"\n  ...y {len(nombres) - 10} más" if len(nombres) > 10 else ""
+
+        if not messagebox.askyesno(
+                "No avisar más",
+                f"{len(sel)} producto(s) dejan de aparecer en las alertas de "
+                f"stock bajo, acá y en el aviso diario por mail:\n\n"
+                f"{muestra}{extra}\n\n"
+                "El stock se sigue contando igual: solo se deja de avisar.\n\n"
+                "Para reactivarlos: Productos → Catálogo → "
+                "«Alerta stock ON/OFF».\n\n¿Los silencio?", parent=self):
+            return
+
+        hechos = 0
+        for iid in sel:
+            try:
+                toggle_ignorar_alerta(int(iid), 1)
+                hechos += 1
+            except Exception:
+                pass
+        toast(self, f"{hechos} producto(s) fuera de la alerta")
+        self._refrescar_stock()
+
     def _refrescar_stock(self):
+        from repositorio import get_reposicion
         for r in self.tree_stock_critico.get_children():
             self.tree_stock_critico.delete(r)
-        for s in get_stock_critico():
-            self.tree_stock_critico.insert("", "end", values=(
-                s["descripcion"], s["codigo"],
-                _fmt_cant(s['stock']),
-                f"$ {s['precio_base']:,.2f}",
-            ), tags=("critico",))
+        try:
+            todos = get_reposicion(30, 14, solo_faltantes=False)
+        except Exception:
+            todos = []
+        try:
+            from config import cfg
+            umbral = float(cfg().get("stock_alerta_umbral", 5) or 5)
+        except Exception:
+            umbral = 5
+
+        # Se muestran DOS cosas a la vez, porque responden a preguntas
+        # distintas: los que se van a acabar segun lo que se vende, y los
+        # que estan bajos aunque todavia no haya historial. En un negocio
+        # nuevo casi todo cae en el segundo grupo, y esperar 30 dias de
+        # datos para avisar no sirve de nada.
+        con_velocidad = [x for x in todos
+                         if x["urgencia"] in ("sin stock", "urgente", "reponer")]
+        ids_ya = {x["id"] for x in con_velocidad}
+        sin_datos = [x for x in todos
+                     if x["id"] not in ids_ya
+                     and x["urgencia"] == "sin ventas"
+                     and 0 < x["stock"] <= umbral]
+        sin_datos.sort(key=lambda x: x["stock"])
+        faltantes = con_velocidad + sin_datos
+
+        if sin_datos and con_velocidad:
+            self.lbl_stock_modo.config(
+                text=(f"Los primeros {len(con_velocidad)} salen del ritmo de "
+                      f"venta. Los otros {len(sin_datos)} todavía no tienen "
+                      f"ventas registradas: se muestran por tener "
+                      f"{umbral:g} unidades o menos."))
+        elif sin_datos:
+            self.lbl_stock_modo.config(
+                text=(f"Todavía no hay ventas suficientes para medir el "
+                      f"ritmo: se muestran los que tienen {umbral:g} "
+                      f"unidades o menos."))
+        else:
+            self.lbl_stock_modo.config(text="")
+
+        for f in faltantes:
+            if f["urgencia"] == "sin stock":
+                dura = "SIN STOCK"
+            elif f["dias_stock"] is None:
+                # Sin ventas no se puede estimar: se dice, no se inventa
+                dura = "sin datos"
+            else:
+                dura = f"{f['dias_stock']:.1f} d"
+            self.tree_stock_critico.insert(
+                "", "end", iid=str(f["id"]),
+                # Gris los que no tienen historial: estan en la lista por
+                # el umbral, no porque el sistema sepa que se acaban.
+                tags=("critico",) if f["urgencia"] in ("sin stock", "urgente")
+                     else ("sindatos",) if f["dias_stock"] is None
+                     else (),
+                values=(f["descripcion"][:38], f"{f['stock']:g}",
+                        f"{f['por_dia']:.2f}", dura,
+                        f"{f['sugerido']:g}" if f["sugerido"] else "—"))
 
         for r in self.tree_stock_vence.get_children():
             self.tree_stock_vence.delete(r)
@@ -685,6 +928,10 @@ def _build_cuando(self, parent):
     desde siempre, sin que nadie la mirara.
     """
     parent.columnconfigure(0, weight=1)
+    # Solo la fila de los paneles se estira: la barra y la comparación
+    # tienen alto natural y no deben crecer.
+    parent.rowconfigure(0, weight=0)
+    parent.rowconfigure(1, weight=0)
     parent.rowconfigure(2, weight=1)
 
     bar, self.c_desde, self.c_hasta = self._filtro_fechas(
@@ -697,34 +944,40 @@ def _build_cuando(self, parent):
     self.c_hasta.delete(0, "end"); self.c_hasta.insert(0, h0)
 
     # ── Comparación vs período anterior ──────────────────────────────
+    # En una fila de cajitas y no en una grilla de 5 filas: ocupaba tanto
+    # alto que empujaba los paneles de abajo fuera de la pantalla.
     card_cmp = card(parent)
-    card_cmp.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-    self.lbl_cmp_titulo = lbl(card_cmp, "", variante="subtitulo",
+    card_cmp.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+    self.lbl_cmp_titulo = lbl(card_cmp, "", variante="suave",
                               bg=C.superficie)
-    self.lbl_cmp_titulo.pack(anchor="w", padx=16, pady=(12, 6))
+    self.lbl_cmp_titulo.pack(anchor="w", padx=14, pady=(8, 4))
 
+    fila = tk.Frame(card_cmp, bg=C.superficie)
+    fila.pack(fill="x", padx=14, pady=(0, 8))
     self._cmp_filas = {}
-    grilla = tk.Frame(card_cmp, bg=C.superficie)
-    grilla.pack(fill="x", padx=16, pady=(0, 14))
-    for i, etq in enumerate(("", "Este período", "Anterior", "Variación")):
-        tk.Label(grilla, text=etq, bg=C.superficie, fg=C.texto_suave,
-                 font=F.pequeña, anchor="w" if i == 0 else "e",
-                 width=18 if i == 0 else 15).grid(row=0, column=i, sticky="ew",
-                                                  padx=4, pady=(0, 4))
-    for fila, (clave, etq) in enumerate((
+    for i, (clave, etq) in enumerate((
             ("facturado", "Facturado"), ("tickets", "Tickets"),
-            ("unidades", "Unidades"), ("ticket_prom", "Ticket promedio")),
-            start=1):
-        tk.Label(grilla, text=etq, bg=C.superficie, fg=C.texto,
-                 font=F.normal, anchor="w").grid(row=fila, column=0,
-                                                 sticky="w", padx=4, pady=2)
-        celdas = []
-        for col in (1, 2, 3):
-            l = tk.Label(grilla, text="—", bg=C.superficie, fg=C.texto,
-                         font=F.normal if col < 3 else F.subtitulo, anchor="e")
-            l.grid(row=fila, column=col, sticky="e", padx=4, pady=2)
-            celdas.append(l)
-        self._cmp_filas[clave] = celdas
+            ("unidades", "Unidades"), ("ticket_prom", "Ticket promedio"))):
+        fila.columnconfigure(i, weight=1)
+        caja = tk.Frame(fila, bg=C.superficie)
+        caja.grid(row=0, column=i, sticky="ew", padx=(0, 10))
+        tk.Label(caja, text=etq, bg=C.superficie, fg=C.texto_suave,
+                 font=F.pequeña, anchor="w").pack(anchor="w")
+        l_act = tk.Label(caja, text="—", bg=C.superficie, fg=C.texto,
+                         font=F.subtitulo, anchor="w")
+        l_act.pack(anchor="w")
+        l_var = tk.Label(caja, text="", bg=C.superficie, font=F.pequeña,
+                         anchor="w")
+        l_var.pack(anchor="w")
+        l_ant = tk.Label(caja, text="", bg=C.superficie, fg=C.texto_suave,
+                         font=F.pequeña, anchor="w")
+        l_ant.pack(anchor="w")
+        self._cmp_filas[clave] = (l_act, l_ant, l_var)
+
+    # Aprovechar el aire de la tarjeta de comparación con datos que no
+    # están en ningún otro informe.
+    self.lbl_cmp_extra = lbl(card_cmp, "", variante="suave", bg=C.superficie)
+    self.lbl_cmp_extra.pack(anchor="w", padx=14, pady=(0, 10))
 
     # ── Por hora y por día ───────────────────────────────────────────
     cont = tk.Frame(parent, bg=C.bg)
@@ -740,9 +993,20 @@ def _build_cuando(self, parent):
     lbl(izq, "Las horas sin ventas también se muestran: los huecos "
              "son información.", variante="suave",
         bg=C.superficie).pack(anchor="w", padx=16)
-    self.txt_horas = tk.Text(izq, font=F.mono, bg=C.superficie, fg=C.texto,
-                             relief="flat", height=16, wrap="none")
-    self.txt_horas.pack(fill="both", expand=True, padx=16, pady=(8, 14))
+    # Con alto fijo de 16 lineas las ultimas horas quedaban cortadas y
+    # no habia forma de verlas: ahora se estira y ademas tiene scroll.
+    cont_h = tk.Frame(izq, bg=C.superficie)
+    cont_h.pack(fill="both", expand=True, padx=16, pady=(8, 14))
+    # height es el MINIMO que pide el widget: aunque el contenedor no
+    # llegue a estirarlo, las 14 lineas (las horas con venta de un
+    # autoservicio) se ven sin scrollear.
+    self.txt_horas = tk.Text(cont_h, font=F.mono, bg=C.superficie,
+                             fg=C.texto, relief="flat", height=14, wrap="none")
+    sb_h = ttk.Scrollbar(cont_h, orient="vertical",
+                         command=self.txt_horas.yview)
+    self.txt_horas.configure(yscrollcommand=sb_h.set)
+    self.txt_horas.pack(side="left", fill="both", expand=True)
+    sb_h.pack(side="right", fill="y")
 
     der = card(cont)
     der.grid(row=0, column=1, sticky="nsew")
@@ -752,7 +1016,7 @@ def _build_cuando(self, parent):
              "4 martes haría parecer que el lunes vende más.",
         variante="suave", bg=C.superficie).pack(anchor="w", padx=16)
     self.txt_dias = tk.Text(der, font=F.mono, bg=C.superficie, fg=C.texto,
-                            relief="flat", height=16, wrap="none")
+                            relief="flat", height=8, wrap="none")   # 7 días
     self.txt_dias.pack(fill="both", expand=True, padx=16, pady=(8, 14))
 
 
@@ -770,23 +1034,37 @@ def _refrescar_cuando(self, desde, hasta):
 
     a, b = cmp_["anterior"], cmp_["actual"]
     self.lbl_cmp_titulo.config(
-        text=(f"{b['desde']} a {b['hasta']} ({cmp_['dias']} días)   "
-              f"contra   {a['desde']} a {a['hasta']}"))
+        text=(f"{b['desde']} a {b['hasta']} ({cmp_['dias']} días) "
+              f"contra {a['desde']} a {a['hasta']}"))
 
     def _fmt(clave, valor):
         if clave in ("facturado", "ticket_prom"):
             return f"$ {valor:,.2f}"
         return f"{valor:g}"
 
-    for clave, celdas in self._cmp_filas.items():
-        celdas[0].config(text=_fmt(clave, cmp_["actual"][clave]))
-        celdas[1].config(text=_fmt(clave, cmp_["anterior"][clave]))
+    for clave, (l_act, l_ant, l_var) in self._cmp_filas.items():
+        l_act.config(text=_fmt(clave, cmp_["actual"][clave]))
         var = cmp_["var"][clave]
         if var is None:
-            celdas[2].config(text="—", fg=C.texto_suave)
+            l_var.config(text="sin período anterior", fg=C.texto_suave)
+            l_ant.config(text="")
         else:
-            celdas[2].config(text=f"{var:+.1f}%",
-                             fg=C.exito if var >= 0 else C.peligro)
+            l_var.config(text=f"{var:+.1f}%",
+                         fg=C.exito if var >= 0 else C.peligro)
+            l_ant.config(text=f"antes {_fmt(clave, cmp_['anterior'][clave])}")
+
+    # Lo que no se ve en ningún otro lado: cuánto se vende por día
+    # abierto y cuántas unidades entran en cada ticket.
+    jornadas = sum(d["dias_contados"] for d in dias)
+    por_jornada = (b["facturado"] / jornadas) if jornadas else 0
+    unid_ticket = (b["unidades"] / b["tickets"]) if b["tickets"] else 0
+    pico = max(horas, key=lambda x: x["facturado"]) if horas else None
+    extra = (f"Promedio por jornada: $ {por_jornada:,.2f}   ·   "
+             f"{unid_ticket:.1f} unidades por ticket   ·   "
+             f"{jornadas} jornada(s) con ventas")
+    if pico and pico["facturado"]:
+        extra += f"   ·   hora pico: {pico['h']:02d}:00"
+    self.lbl_cmp_extra.config(text=extra)
 
     # Barras de texto: se leen igual que un gráfico y no dependen de
     # ninguna librería de dibujo.
@@ -820,3 +1098,218 @@ def _refrescar_cuando(self, desde, hasta):
 
 InformesUI._build_cuando = _build_cuando
 InformesUI._refrescar_cuando = _refrescar_cuando
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Tab "Se venden juntos" — análisis de canasta
+# ══════════════════════════════════════════════════════════════════════════
+
+COLS_JUNTOS = [
+    ("a",      "Producto",          230, "w"),
+    ("b",      "Se lleva con",      230, "w"),
+    ("juntos", "Veces juntos",      100, "e"),
+    ("pct_a",  "De los que llevan A", 150, "e"),
+    ("pct_b",  "De los que llevan B", 150, "e"),
+]
+
+
+def _build_juntos(self, parent):
+    """Qué productos aparecen en el mismo ticket.
+
+    Sirve para armar combos que ya se venden solos, ubicar la góndola,
+    y saber qué venta cruzada se pierde cuando falta uno de los dos.
+    """
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(3, weight=1)
+
+    bar, self.j_desde, self.j_hasta = self._filtro_fechas(
+        parent, self._refrescar_juntos)
+    bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    d0, h0 = self._rango_por_defecto()
+    self.j_desde.delete(0, "end"); self.j_desde.insert(0, d0)
+    self.j_hasta.delete(0, "end"); self.j_hasta.insert(0, h0)
+
+    self.lbl_j_aviso = lbl(parent, "", variante="suave")
+    self.lbl_j_aviso.grid(row=1, column=0, sticky="w", pady=(0, 6))
+
+    lbl(parent, "«De los que llevan A» es cuántas veces, sobre el total de "
+                "tickets con ese producto, también se llevó el otro. Las dos "
+                "direcciones no son lo mismo.",
+        variante="suave").grid(row=2, column=0, sticky="w", pady=(0, 6))
+
+    frame_t, self.tree_juntos = tabla(parent, COLS_JUNTOS)
+    frame_t.grid(row=3, column=0, sticky="nsew")
+    self.tree_juntos.tag_configure("fuerte", background=C.ok_flash)
+
+    self.lbl_j_pie = lbl(parent, "", variante="suave")
+    self.lbl_j_pie.grid(row=4, column=0, sticky="w", pady=(6, 0))
+
+
+def _refrescar_juntos(self, desde, hasta):
+    from repositorio import productos_que_se_venden_juntos
+    try:
+        r = productos_que_se_venden_juntos(desde, hasta)
+    except Exception as exc:
+        self.lbl_j_aviso.config(text=f"No se pudo calcular: {exc}")
+        return
+
+    self.tree_juntos.delete(*self.tree_juntos.get_children())
+    for p in r["pares"]:
+        # Se resalta cuando la relación es fuerte en alguna dirección:
+        # esos son los pares que sirven para un combo o para la góndola.
+        fuerte = max(p["pct_a"], p["pct_b"]) >= 50
+        self.tree_juntos.insert(
+            "", "end", tags=("fuerte",) if fuerte else (), values=(
+                p["a"][:40], p["b"][:40], p["juntos"],
+                f"{p['pct_a']:.0f}%", f"{p['pct_b']:.0f}%"))
+
+    if not r["canastas"]:
+        self.lbl_j_aviso.config(
+            text="No hay tickets con más de un producto en este período.",
+            foreground=C.texto_suave)
+    elif not r["confiable"]:
+        # Con pocos tickets los porcentajes son casualidad, no patrón
+        self.lbl_j_aviso.config(
+            text=(f"⚠ Solo {r['canastas']} tickets con 2 o más productos. "
+                  f"Con menos de 100 los porcentajes son ruido: tomalo como "
+                  f"orientativo y volvé a mirarlo con más historial."),
+            foreground=C.peligro)
+    else:
+        self.lbl_j_aviso.config(
+            text=f"{r['canastas']} tickets con 2 o más productos.",
+            foreground=C.texto_suave)
+
+    n = len(r["pares"])
+    fuertes = sum(1 for p in r["pares"] if max(p["pct_a"], p["pct_b"]) >= 50)
+    self.lbl_j_pie.config(
+        text=(f"{n} par(es) que se repiten   ·   {fuertes} con relación "
+              f"fuerte (más del 50%) — esos son los que sirven para un "
+              f"combo o para acercarlos en la góndola"))
+
+
+InformesUI._build_juntos = _build_juntos
+InformesUI._refrescar_juntos = _refrescar_juntos
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Tab "Cobranzas" — vendido, cobrado por método y pendiente
+# ══════════════════════════════════════════════════════════════════════════
+
+def _build_cobranzas(self, parent):
+    """Tres preguntas que se confunden todo el tiempo.
+
+    Cuánto vendí (entre o no la plata), cuánto entró por cada medio, y
+    cuánto me deben todavía.
+    """
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(0, weight=0)
+    parent.rowconfigure(1, weight=1)
+
+    bar, self.cb_desde, self.cb_hasta = self._filtro_fechas(
+        parent, self._refrescar_cobranzas)
+    bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    d0, h0 = self._rango_por_defecto()
+    self.cb_desde.delete(0, "end"); self.cb_desde.insert(0, d0)
+    self.cb_hasta.delete(0, "end"); self.cb_hasta.insert(0, h0)
+
+    cont = tk.Frame(parent, bg=C.bg)
+    cont.grid(row=1, column=0, sticky="nsew")
+    for i in range(3):
+        cont.columnconfigure(i, weight=1)
+    cont.rowconfigure(0, weight=1)
+
+    self._cb_lbl = {}
+
+    def _panel(col, titulo, filas, color_total=None):
+        card_ = card(cont)
+        card_.grid(row=0, column=col, sticky="nsew", padx=(0, 8) if col < 2 else 0)
+        lbl(card_, titulo, variante="subtitulo",
+            bg=C.superficie).pack(anchor="w", padx=16, pady=(14, 8))
+        for clave, etq, destacar in filas:
+            f = tk.Frame(card_, bg=C.superficie)
+            f.pack(fill="x", padx=16, pady=(0, 6 if destacar else 2))
+            tk.Label(f, text=etq, bg=C.superficie,
+                     fg=C.texto if destacar else C.texto_suave,
+                     font=F.normal if destacar else F.pequeña,
+                     anchor="w").pack(side="left")
+            v = tk.Label(f, text="—", bg=C.superficie,
+                         fg=color_total if destacar else C.texto,
+                         font=F.subtitulo if destacar else F.normal,
+                         anchor="e")
+            v.pack(side="right")
+            self._cb_lbl[clave] = v
+            if destacar:
+                ttk.Separator(card_, orient="horizontal").pack(
+                    fill="x", padx=16, pady=(2, 8))
+        return card_
+
+    _panel(0, "Vendido", [
+        ("tickets",   "Tickets",              False),
+        ("costo",     "Costo de lo vendido",  False),
+        ("ganancia",  "Ganancia",             False),
+        ("facturado", "TOTAL FACTURADO",      True)],
+        color_total=C.texto)
+
+    _panel(1, "Cobrado", [
+        ("efectivo",       "Efectivo",              False),
+        ("tarjeta",        "Tarjeta",               False),
+        ("qr",             "QR",                    False),
+        ("cobros_cta_cte", "Pagos de cta. corriente", False),
+        ("cobrado",        "TOTAL COBRADO",         True)],
+        color_total=C.exito)
+
+    _panel(2, "Pendiente de cobrar", [
+        ("fiado",       "Fiado en este período",  False),
+        ("clientes",    "Clientes que deben",     False),
+        ("deuda_total", "DEUDA TOTAL",            True)],
+        color_total=C.peligro)
+
+    self.lbl_cb_pie = lbl(parent, "", variante="suave")
+    self.lbl_cb_pie.grid(row=2, column=0, sticky="w", pady=(10, 0))
+
+
+def _refrescar_cobranzas(self, desde, hasta):
+    from repositorio import resumen_cobranzas
+    try:
+        r = resumen_cobranzas(desde, hasta)
+    except Exception as exc:
+        self.lbl_cb_pie.config(text=f"No se pudo calcular: {exc}")
+        return
+
+    def _set(clave, valor, plata=True):
+        w = self._cb_lbl.get(clave)
+        if w is not None:
+            w.config(text=f"$ {valor:,.2f}" if plata else f"{valor:g}")
+
+    for k in ("facturado", "costo", "ganancia", "efectivo", "tarjeta", "qr",
+              "cobros_cta_cte", "cobrado", "fiado", "deuda_total"):
+        _set(k, r[k])
+    _set("tickets", r["tickets"], plata=False)
+    _set("clientes", r["clientes_con_deuda"], plata=False)
+
+    # El porcentaje cobrado es el número que resume todo: dice cuánto de
+    # lo que vendiste realmente entró.
+    # Si las partes no suman el total, los números por método están
+    # incompletos: mostrarlos sin avisar sería peor que no mostrarlos.
+    if abs(r.get("descuadre", 0)) > 1:
+        self.lbl_cb_pie.config(
+            text=(f"⚠  Los métodos de pago suman $ {r['suma_medios']:,.2f} "
+                  f"pero se facturaron $ {r['facturado']:,.2f}. Faltan "
+                  f"$ {r['descuadre']:,.2f} sin identificar — son ventas "
+                  f"anteriores a que el sistema guardara el detalle. "
+                  f"Reiniciá el TPV para completarlas."),
+            foreground=C.peligro)
+        return
+
+    txt = (f"Cobraste el {r['pct_cobrado']:.0f}% de lo facturado en el "
+           f"período.")
+    if r["fiado"]:
+        txt += (f"   Quedaron $ {r['fiado']:,.2f} fiados, que se suman a la "
+                f"deuda acumulada.")
+    if r["devoluciones"]:
+        txt += f"   Devoluciones del período: $ {r['devoluciones']:,.2f}."
+    self.lbl_cb_pie.config(text=txt, foreground=C.texto_suave)
+
+
+InformesUI._build_cobranzas = _build_cobranzas
+InformesUI._refrescar_cobranzas = _refrescar_cobranzas

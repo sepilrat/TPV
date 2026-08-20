@@ -79,6 +79,9 @@ def dialogo_historial_lotes(parent):
         tv.column(c_, width=w_, anchor=a_)
     tv.tag_configure("agotado", foreground=C.texto_suave)
     tv.tag_configure("ajuste", background=C.acento)
+    # Costo del lote != costo del producto: la rentabilidad usa el del
+    # lote, asi que el descuadre hace que el informe mienta.
+    tv.tag_configure("costo_raro", background=C.err_flash)
 
     sb = ttk.Scrollbar(cont, orient="vertical", command=tv.yview)
     tv.configure(yscrollcommand=sb.set)
@@ -114,6 +117,12 @@ def dialogo_historial_lotes(parent):
                 tags.append("ajuste")
             elif (l["cantidad_restante"] or 0) <= 0:
                 tags.append("agotado")
+            # El costo del lote no coincide con el del producto: la
+            # rentabilidad usa el del lote y el informe queda mintiendo.
+            _cu = float(l.get("costo_unitario") or 0)
+            _cp = float(l.get("costo_ultimo") or 0)
+            if _cu and _cp and abs(_cu - _cp) > 0.01:
+                tags.append("costo_raro")
             tv.insert("", "end", iid=str(i), tags=tuple(tags), values=(
                 (l["fecha_ingreso"] or "")[:10],
                 l["descripcion"][:40],
@@ -184,11 +193,14 @@ def dialogo_historial_lotes(parent):
     v_stock.trace_add("write", _buscar)
 
     pie = tk.Frame(d, bg=C.superficie)
-    pie.pack(fill="x", pady=(8, 14))
+    pie.pack(side="bottom", fill="x", pady=(8, 14))
     btn(pie, "Ultimos 30 dias", variante="neutro",
         comando=lambda: v_desde.set(
             (datetime.date.today() - datetime.timedelta(days=30)).isoformat())
         ).pack(side="left", padx=(20, 6))
+    btn(pie, "💲 Corregir costo", variante="primario",
+        comando=lambda: corregir_costo_dialogo(d, tv, filas, _buscar)).pack(
+        side="left", padx=6)
     btn(pie, "Ver todo", variante="neutro",
         comando=lambda: (v_desde.set(""), v_hasta.set(""), v_texto.set(""),
                          v_prov.set("Todos"))).pack(side="left")
@@ -274,6 +286,12 @@ def dialogo_lotes_producto(parent, producto_id: int):
                     estado = "fecha ilegible"
             else:
                 estado = "sin vencimiento"
+            # Costo igual al precio de venta: casi siempre es que se
+            # cargo el precio en el campo del costo.
+            _pv = float(l.get("precio_base") or 0)
+            _cu = float(l.get("costo_unitario") or 0)
+            if _pv and _cu and abs(_pv - _cu) < 0.01:
+                tag = "costo_raro"
             tv.insert("", "end", iid=str(i), tags=(tag,) if tag else (), values=(
                 (l["fecha_ingreso"] or "")[:10],
                 f"{l['cantidad']:g}", f"{l['cantidad_restante']:g}",
@@ -330,13 +348,128 @@ def dialogo_lotes_producto(parent, producto_id: int):
         btn(fb, "Guardar", variante="exito", comando=guardar).pack(side="left", padx=4)
         btn(fb, "Cancelar", variante="neutro", comando=top.destroy).pack(side="left", padx=4)
 
+    # Los lotes con costo == precio de venta se resaltan: casi siempre
+    # es que se cargo el precio en el campo del costo.
+    tv.tag_configure("costo_raro", background=C.err_flash)
+
     tv.bind("<Double-1>", _editar)
 
+    _corregir_costo = lambda ev=None: corregir_costo_dialogo(d, tv, filas, _cargar)
+
     pie = tk.Frame(d, bg=C.superficie)
-    pie.pack(fill="x", pady=(0, 14))
+    pie.pack(side="bottom", fill="x", pady=(0, 14))
     btn(pie, "Corregir vencimiento", variante="exito",
         comando=_editar).pack(side="left", padx=(20, 6))
+    btn(pie, "💲 Corregir costo", variante="primario",
+        comando=_corregir_costo).pack(side="left", padx=6)
     btn(pie, "Cerrar", variante="neutro", comando=d.destroy).pack(side="right", padx=20)
 
     _cargar()
     parent.wait_window(d)
+
+
+def corregir_costo_dialogo(d, tv, filas, al_terminar=None):
+    """Corrige el costo de un lote mal cargado.
+
+    Poner el precio de venta en el campo "costo unitario" al ingresar
+    stock es facil de hacer y dificil de ver: el producto sigue
+    mostrando su costo correcto, pero la rentabilidad de todo lo
+    vendido de ese lote sale en cero.
+    """
+    from repositorio import corregir_costo_lote
+    from fiado_ui import pedir_autorizacion
+    sel = tv.selection()
+    if not sel:
+        messagebox.showinfo("Costo", "Elegí un lote de la lista.", parent=d)
+        return
+    lote = filas[int(sel[0])]
+    actual = float(lote.get("costo_unitario") or 0)
+    precio = float(lote.get("precio_base") or 0)
+
+    top = tk.Toplevel(d)
+    top.title("Corregir costo del lote")
+    top.configure(bg=C.superficie)
+    top.grab_set()
+    top.geometry("470x340")
+
+    lbl(top, lote.get("descripcion", "")[:44], variante="titulo",
+        bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+    lbl(top, f"Lote del {(lote.get('fecha_ingreso') or '')[:10]}   ·   "
+             f"{lote.get('cantidad', 0):g} unidad(es)",
+        variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
+
+    info = tk.Frame(top, bg=C.acento, padx=14, pady=10)
+    info.pack(fill="x", padx=18, pady=(12, 8))
+    tk.Label(info, text=f"Costo cargado: $ {actual:,.2f}", bg=C.acento,
+             fg=C.texto, font=F.normal, anchor="w").pack(anchor="w")
+    tk.Label(info, text=f"Precio de venta: $ {precio:,.2f}", bg=C.acento,
+             fg=C.texto, font=F.normal, anchor="w").pack(anchor="w")
+    if precio and abs(actual - precio) < 0.01:
+        tk.Label(info, text="⚠  El costo es igual al precio de venta: "
+                            "casi seguro se cargó el precio por error.",
+                 bg=C.acento, fg=C.peligro, font=F.pequeña, anchor="w",
+                 wraplength=400, justify="left").pack(anchor="w",
+                                                      pady=(6, 0))
+
+    lbl(top, "Costo real por unidad", variante="suave",
+        bg=C.superficie).pack(anchor="w", padx=18, pady=(6, 2))
+    v_costo = tk.StringVar(value=f"{actual:.2f}")
+    e = tk.Entry(top, textvariable=v_costo, font=F.total, justify="center",
+                 bg=C.bg, fg=C.texto, relief="solid", bd=1)
+    e.pack(fill="x", padx=18, ipady=6)
+    e.focus_set()
+    e.select_range(0, "end")
+
+    lbl_m = tk.Label(top, text="", bg=C.superficie, fg=C.texto_suave,
+                     font=F.pequeña, anchor="w")
+    lbl_m.pack(fill="x", padx=18, pady=(6, 0))
+
+    def _margen(*_a):
+        try:
+            c = float(v_costo.get().replace(",", "."))
+        except ValueError:
+            lbl_m.config(text="")
+            return
+        if c > 0 and precio:
+            lbl_m.config(text=f"Margen con ese costo: "
+                              f"{(precio - c) / c * 100:.1f}%",
+                         fg=C.peligro if precio < c else C.texto_suave)
+    v_costo.trace_add("write", _margen)
+    _margen()
+
+    def guardar(_e=None):
+        try:
+            nuevo = float(v_costo.get().replace(",", "."))
+        except ValueError:
+            messagebox.showwarning("Costo", "No es un número.", parent=top)
+            return
+        resp = pedir_autorizacion(
+            top, "Corregir el costo cambia la ganancia ya informada.")
+        if not resp:
+            return
+        try:
+            r = corregir_costo_lote(lote["id"], nuevo, resp)
+        except Exception as exc:
+            messagebox.showerror("Costo", str(exc), parent=top)
+            return
+        top.destroy()
+        msg = (f"Costo corregido: $ {r['costo_viejo']:,.2f} → "
+               f"$ {r['costo_nuevo']:,.2f}")
+        if r["unidades_vendidas"]:
+            msg += (f"\n\nSe recalculó la ganancia de "
+                    f"{r['unidades_vendidas']:g} unidad(es) ya vendidas: "
+                    f"{'+' if r['ganancia_corregida'] >= 0 else ''}"
+                    f"$ {r['ganancia_corregida']:,.2f}")
+        if r["toco_costo_ultimo"]:
+            msg += "\n\nTambién se actualizó el costo del producto."
+        messagebox.showinfo("Listo", msg, parent=d)
+        al_terminar() if al_terminar else None
+
+    e.bind("<Return>", guardar)
+    top.bind("<Escape>", lambda ev: top.destroy())
+    fb = tk.Frame(top, bg=C.superficie)
+    fb.pack(side="bottom", pady=14)
+    btn(fb, "Guardar  (Enter)", variante="exito",
+        comando=guardar).pack(side="left", padx=4)
+    btn(fb, "Cancelar", variante="neutro",
+        comando=top.destroy).pack(side="left", padx=4)
