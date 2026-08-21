@@ -243,6 +243,7 @@ def actualizar_producto(pid, descripcion, codigo, categoria_id,
     # redondeado y mitad con decimales.
     precio_base = redondear_precio(precio_base)
     with get_connection() as conn:
+        _anotar_cambio_precio(conn, pid, precio_base)
         conn.execute("""
             UPDATE productos
             SET descripcion=?, codigo=?, categoria_id=?, precio_base=?,
@@ -1537,6 +1538,7 @@ def eliminar_promocion(pid):
 def actualizar_precio(pid, nuevo_precio):
     nuevo_precio = redondear_precio(nuevo_precio)
     with get_connection() as conn:
+        _anotar_cambio_precio(conn, pid, nuevo_precio)
         conn.execute("""
             UPDATE productos SET precio_base=?,
             modificado_en=datetime('now','localtime') WHERE id=?
@@ -1826,6 +1828,19 @@ def productos_bajo_costo(ids=None) -> list:
         """, params).fetchall()]
 
 
+def _anotar_cambios_masivos(conn, ids, motivo):
+    """Anota el cambio de cada producto de una operacion masiva."""
+    for pid in ids:
+        try:
+            nuevo = conn.execute(
+                "SELECT precio_base FROM productos WHERE id = ?",
+                (pid,)).fetchone()
+            if nuevo:
+                _anotar_cambio_precio(conn, pid, nuevo["precio_base"], motivo)
+        except Exception:
+            pass
+
+
 def _redondear_ids(conn, ids):
     """Aplica el redondeo configurado a los productos indicados."""
     paso = 0
@@ -1850,6 +1865,11 @@ def _redondear_ids(conn, ids):
 
 def aplicar_aumento_bulk(ids: list, pct: float):
     with get_connection() as conn:
+        # El precio viejo se guarda ANTES del UPDATE: despues
+        # ya se perdio y el historial quedaria sin el origen.
+        _previos = {r["id"]: r["precio_base"] for r in conn.execute(
+            "SELECT id, precio_base FROM productos WHERE id IN (%s)"
+            % ",".join("?" * len(ids)), ids)}
         conn.execute(f"""
             UPDATE productos SET
                 precio_base = ROUND(precio_base * (1 + ? / 100.0), 2),
@@ -1857,6 +1877,17 @@ def aplicar_aumento_bulk(ids: list, pct: float):
             WHERE id IN ({','.join('?'*len(ids))})
         """, [pct] + ids)
         _redondear_ids(conn, ids)
+        # Historial: se compara contra el precio previo ya guardado
+        for _pid, _viejo in _previos.items():
+            _nuevo = conn.execute(
+                "SELECT precio_base FROM productos WHERE id = ?",
+                (_pid,)).fetchone()
+            if _nuevo and abs((_nuevo["precio_base"] or 0) - (_viejo or 0)) >= 0.005:
+                conn.execute("""
+                    INSERT INTO historial_precios
+                        (producto_id, precio_viejo, precio_nuevo, motivo)
+                    VALUES (?,?,?,?)
+                """, (_pid, _viejo, _nuevo["precio_base"], "Cambio masivo"))
         conn.commit()
 
 
@@ -1869,6 +1900,11 @@ def aplicar_margen_nuevo_bulk(ids: list, margen_pct: float):
     sí para todos los seleccionados.
     """
     with get_connection() as conn:
+        # El precio viejo se guarda ANTES del UPDATE: despues
+        # ya se perdio y el historial quedaria sin el origen.
+        _previos = {r["id"]: r["precio_base"] for r in conn.execute(
+            "SELECT id, precio_base FROM productos WHERE id IN (%s)"
+            % ",".join("?" * len(ids)), ids)}
         conn.execute(f"""
             UPDATE productos SET
                 margen_pct = ?,
@@ -1879,6 +1915,17 @@ def aplicar_margen_nuevo_bulk(ids: list, margen_pct: float):
             WHERE id IN ({','.join('?'*len(ids))})
         """, [margen_pct, margen_pct] + ids)
         _redondear_ids(conn, ids)
+        # Historial: se compara contra el precio previo ya guardado
+        for _pid, _viejo in _previos.items():
+            _nuevo = conn.execute(
+                "SELECT precio_base FROM productos WHERE id = ?",
+                (_pid,)).fetchone()
+            if _nuevo and abs((_nuevo["precio_base"] or 0) - (_viejo or 0)) >= 0.005:
+                conn.execute("""
+                    INSERT INTO historial_precios
+                        (producto_id, precio_viejo, precio_nuevo, motivo)
+                    VALUES (?,?,?,?)
+                """, (_pid, _viejo, _nuevo["precio_base"], "Cambio masivo"))
         conn.commit()
 
 
@@ -1889,6 +1936,11 @@ def aplicar_margen_bulk(ids: list):
     su categoría si no (igual criterio que calcular_precio_por_margen).
     """
     with get_connection() as conn:
+        # El precio viejo se guarda ANTES del UPDATE: despues
+        # ya se perdio y el historial quedaria sin el origen.
+        _previos = {r["id"]: r["precio_base"] for r in conn.execute(
+            "SELECT id, precio_base FROM productos WHERE id IN (%s)"
+            % ",".join("?" * len(ids)), ids)}
         conn.execute(f"""
             UPDATE productos SET
                 precio_base = ROUND(costo_ultimo * (1 + COALESCE(
@@ -1901,6 +1953,17 @@ def aplicar_margen_bulk(ids: list):
             WHERE id IN ({','.join('?'*len(ids))}) AND costo_ultimo > 0
         """, ids)
         _redondear_ids(conn, ids)
+        # Historial: se compara contra el precio previo ya guardado
+        for _pid, _viejo in _previos.items():
+            _nuevo = conn.execute(
+                "SELECT precio_base FROM productos WHERE id = ?",
+                (_pid,)).fetchone()
+            if _nuevo and abs((_nuevo["precio_base"] or 0) - (_viejo or 0)) >= 0.005:
+                conn.execute("""
+                    INSERT INTO historial_precios
+                        (producto_id, precio_viejo, precio_nuevo, motivo)
+                    VALUES (?,?,?,?)
+                """, (_pid, _viejo, _nuevo["precio_base"], "Cambio masivo"))
         conn.commit()
 
 
@@ -3382,10 +3445,349 @@ def quitar_de_revision(producto_ids):
         conn.commit()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LISTAS GUARDADAS — selecciones que se reusan
+# ─────────────────────────────────────────────────────────────────────────────
+
+def guardar_lista(nombre, producto_ids, titulo="", por_categoria=True) -> int:
+    """Crea o pisa una lista con ese nombre.
+
+    Se guardan los IDS, no los precios: al volver a imprimirla toma los
+    precios de hoy. Guardar los precios obligaria a actualizarlos a mano
+    y la lista quedaria mintiendo.
+    """
+    nombre = nombre.strip()
+    if not nombre:
+        raise ValueError("La lista necesita un nombre.")
+    with get_connection() as conn:
+        fila = conn.execute("SELECT id FROM listas_guardadas WHERE nombre = ?",
+                            (nombre,)).fetchone()
+        if fila:
+            lid = fila["id"]
+            conn.execute("""UPDATE listas_guardadas
+                            SET titulo = ?, por_categoria = ?
+                            WHERE id = ?""",
+                         (titulo or None, int(bool(por_categoria)), lid))
+            conn.execute("DELETE FROM lista_items WHERE lista_id = ?", (lid,))
+        else:
+            cur = conn.execute("""
+                INSERT INTO listas_guardadas (nombre, titulo, por_categoria)
+                VALUES (?,?,?)
+            """, (nombre, titulo or None, int(bool(por_categoria))))
+            lid = cur.lastrowid
+        for pid in producto_ids:
+            conn.execute("INSERT OR IGNORE INTO lista_items (lista_id, "
+                         "producto_id) VALUES (?,?)", (lid, int(pid)))
+        conn.commit()
+    return lid
+
+
+def agregar_linea_manual(lista_id, texto, precio_texto, categoria="") -> int:
+    """Una linea escrita a mano dentro de una lista guardada.
+
+    El precio va como TEXTO, no como numero: la gracia es poder escribir
+    "$ 2.000 x 100g" o "2x1", que no son un importe.
+    """
+    with get_connection() as conn:
+        cur = conn.execute("""
+            INSERT INTO lista_manual (lista_id, texto, precio_texto, categoria)
+            VALUES (?,?,?,?)
+        """, (lista_id, texto.strip(), precio_texto.strip(),
+              (categoria or "").strip() or None))
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_lineas_manuales(lista_id) -> list:
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT * FROM lista_manual WHERE lista_id = ?
+            ORDER BY categoria IS NULL, categoria, orden, id
+        """, (lista_id,)).fetchall()]
+
+
+def borrar_linea_manual(linea_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM lista_manual WHERE id = ?", (linea_id,))
+        conn.commit()
+
+
+def get_listas_guardadas() -> list:
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT l.*,
+                   (SELECT COUNT(*) FROM lista_items i
+                     WHERE i.lista_id = l.id) as items
+            FROM listas_guardadas l
+            ORDER BY l.usado_en IS NULL, l.usado_en DESC, l.nombre
+        """).fetchall()]
+
+
+def get_lista(lista_id) -> dict | None:
+    """La lista con sus productos, ya con los precios de HOY."""
+    with get_connection() as conn:
+        cab = conn.execute("SELECT * FROM listas_guardadas WHERE id = ?",
+                           (lista_id,)).fetchone()
+        if not cab:
+            return None
+        cab = dict(cab)
+        cab["productos"] = [dict(r) for r in conn.execute("""
+            SELECT p.*, c.nombre as categoria,
+                   COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
+                              WHERE l.producto_id = p.id), 0) as stock
+            FROM lista_items i
+            JOIN productos p ON p.id = i.producto_id
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            WHERE i.lista_id = ? AND COALESCE(p.activo, 1) = 1
+            ORDER BY c.nombre, p.descripcion
+        """, (lista_id,)).fetchall()]
+        cab["manuales"] = [dict(r) for r in conn.execute("""
+            SELECT * FROM lista_manual WHERE lista_id = ?
+            ORDER BY categoria IS NULL, categoria, orden, id
+        """, (lista_id,)).fetchall()]
+    return cab
+
+
+def marcar_lista_usada(lista_id):
+    with get_connection() as conn:
+        conn.execute("""UPDATE listas_guardadas
+                        SET usado_en = datetime('now','localtime')
+                        WHERE id = ?""", (lista_id,))
+        conn.commit()
+
+
+def borrar_lista(lista_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM listas_guardadas WHERE id = ?", (lista_id,))
+        conn.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LISTA DE COMPRAS — lo que hay que comprar y no sale de la reposicion
+# ─────────────────────────────────────────────────────────────────────────────
+
+def agregar_a_comprar(texto, cantidad="", proveedor="", nota="") -> dict:
+    """Anota un pedido. Si ya estaba, suma una marca en vez de duplicar.
+
+    Lo que importa de un producto que no se vende todavia es cuantas
+    personas lo pidieron: tres pedidos distintos justifican traerlo, uno
+    solo puede ser un capricho. Con lineas repetidas eso no se ve.
+    """
+    texto = texto.strip()
+    with get_connection() as conn:
+        # Se busca sin distinguir mayusculas ni acentos de mas
+        ya = conn.execute("""
+            SELECT id, pedidos FROM lista_compras
+            WHERE comprado = 0 AND LOWER(TRIM(texto)) = LOWER(TRIM(?))
+        """, (texto,)).fetchone()
+        if ya:
+            n = (ya["pedidos"] or 1) + 1
+            conn.execute("""
+                UPDATE lista_compras
+                   SET pedidos = ?,
+                       ultimo_pedido = datetime('now','localtime'),
+                       nota = COALESCE(NULLIF(?, ''), nota),
+                       proveedor = COALESCE(proveedor, NULLIF(?, ''))
+                 WHERE id = ?
+            """, (n, (nota or "").strip(), (proveedor or "").strip(), ya["id"]))
+            conn.commit()
+            return {"id": ya["id"], "pedidos": n, "repetido": True}
+
+        cur = conn.execute("""
+            INSERT INTO lista_compras
+                (texto, cantidad, proveedor, nota, pedidos, ultimo_pedido)
+            VALUES (?,?,?,?,1,datetime('now','localtime'))
+        """, (texto, (cantidad or "").strip() or None,
+              (proveedor or "").strip() or None, (nota or "").strip() or None))
+        conn.commit()
+        return {"id": cur.lastrowid, "pedidos": 1, "repetido": False}
+
+
+def get_lista_compras(incluir_comprados=False) -> list:
+    """Los pedidos, primero los más pedidos: son los que más urgen."""
+    cond = "" if incluir_comprados else "WHERE comprado = 0"
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute(f"""
+            SELECT *, COALESCE(pedidos, 1) as veces
+            FROM lista_compras {cond}
+            ORDER BY comprado, COALESCE(pedidos,1) DESC, creado_en
+        """).fetchall()]
+
+
+def marcar_comprado(ids, comprado=True):
+    ids = [ids] if isinstance(ids, int) else list(ids)
+    if not ids:
+        return
+    marcas = ",".join("?" * len(ids))
+    with get_connection() as conn:
+        conn.execute(f"""
+            UPDATE lista_compras
+               SET comprado = ?,
+                   comprado_en = CASE WHEN ? = 1
+                                      THEN datetime('now','localtime')
+                                      ELSE NULL END
+             WHERE id IN ({marcas})
+        """, [int(bool(comprado)), int(bool(comprado))] + ids)
+        conn.commit()
+
+
+def borrar_de_compras(ids):
+    ids = [ids] if isinstance(ids, int) else list(ids)
+    if not ids:
+        return
+    with get_connection() as conn:
+        conn.execute("DELETE FROM lista_compras WHERE id IN (%s)"
+                     % ",".join("?" * len(ids)), ids)
+        conn.commit()
+
+
+def limpiar_comprados() -> int:
+    """Saca de la lista lo ya comprado. Devuelve cuantos se borraron."""
+    with get_connection() as conn:
+        n = conn.execute("DELETE FROM lista_compras WHERE comprado = 1").rowcount
+        conn.commit()
+        return n
+
+
+def _anotar_cambio_precio(conn, producto_id, precio_nuevo, motivo=""):
+    """Deja constancia del cambio si el precio realmente cambio.
+
+    Se llama con la conexion abierta de quien esta escribiendo, para que
+    entre en la misma transaccion: si la actualizacion falla, el
+    historial no queda mintiendo.
+    """
+    try:
+        viejo = conn.execute(
+            "SELECT precio_base FROM productos WHERE id = ?",
+            (producto_id,)).fetchone()
+        viejo = float(viejo["precio_base"] or 0) if viejo else 0.0
+        if abs(float(precio_nuevo) - viejo) < 0.005:
+            return                      # no cambio: no se anota
+        conn.execute("""
+            INSERT INTO historial_precios
+                (producto_id, precio_viejo, precio_nuevo, motivo)
+            VALUES (?,?,?,?)
+        """, (producto_id, viejo, float(precio_nuevo), motivo or None))
+    except Exception as e:
+        logging.debug(f"No se pudo anotar el cambio de precio: {e}")
+
+
+def marcar_etiquetas_impresas(producto_ids):
+    """Deja constancia de que se imprimio la etiqueta de esos productos."""
+    ids = list(producto_ids)
+    if not ids:
+        return
+    with get_connection() as conn:
+        conn.execute("""
+            UPDATE productos
+               SET etiqueta_impresa = datetime('now','localtime')
+             WHERE id IN (%s)
+        """ % ",".join("?" * len(ids)), ids)
+        conn.commit()
+
+
+def etiquetas_pendientes(desde=None, hasta=None, incluir_nuevos=True,
+                         incluir_cambios=True) -> list:
+    """Qué etiquetas de góndola hay que imprimir.
+
+    Junta las dos razones por las que una etiqueta queda desactualizada:
+    el producto es nuevo y nunca tuvo, o le cambió el precio. Son la
+    misma tarea — imprimir y salir a pegar — y separarlas obliga a
+    recorrer la góndola dos veces.
+    """
+    salida = []
+
+    if incluir_cambios:
+        for c in precios_cambiados(desde, hasta):
+            c["motivo_etiqueta"] = "cambió de precio"
+            c["es_nuevo"] = False
+            salida.append(c)
+
+    if incluir_nuevos:
+        # "Nuevo" = nunca se le imprimio la etiqueta. La fecha de alta se
+        # usa solo como filtro de periodo, pero un producto cargado hace
+        # meses que nunca se etiqueto sigue estando pendiente.
+        cond = ["COALESCE(p.activo, 1) = 1", "p.etiqueta_impresa IS NULL"]
+        params = []
+        if desde:
+            cond.append("date(p.creado_en) >= date(?)"); params.append(desde)
+        if hasta:
+            cond.append("date(p.creado_en) <= date(?)"); params.append(hasta)
+        with get_connection() as conn:
+            nuevos = [dict(r) for r in conn.execute(f"""
+                SELECT p.id as producto_id, p.descripcion, p.codigo,
+                       p.precio_base, p.categoria_id, p.creado_en as fecha,
+                       c.nombre as categoria
+                FROM productos p
+                LEFT JOIN categorias c ON c.id = p.categoria_id
+                WHERE {" AND ".join(cond)}
+                ORDER BY p.creado_en DESC
+            """, params).fetchall()]
+        # Un producto nuevo que ademas cambio de precio aparece una vez:
+        # la etiqueta es una sola.
+        ya = {x["producto_id"] for x in salida}
+        for n in nuevos:
+            if n["producto_id"] in ya:
+                continue
+            n["precio_viejo"] = None
+            n["precio_nuevo"] = n["precio_base"]
+            n["variacion_pct"] = None
+            n["motivo_etiqueta"] = "producto nuevo"
+            n["es_nuevo"] = True
+            salida.append(n)
+
+    salida.sort(key=lambda x: (x.get("fecha") or ""), reverse=True)
+    return salida
+
+
+def precios_cambiados(desde=None, hasta=None, solo_ultimo=True) -> list:
+    """Productos que cambiaron de precio en el periodo.
+
+    Es la lista de etiquetas a reimprimir: si el precio de gondola no
+    coincide con el de la caja, el cliente lo nota antes que uno.
+
+    solo_ultimo: un producto que cambio tres veces aparece una sola vez,
+    con el precio final. Para reimprimir importa el actual, no cada paso.
+    """
+    cond, params = ["1=1"], []
+    if desde:
+        cond.append("date(h.fecha) >= date(?)"); params.append(desde)
+    if hasta:
+        cond.append("date(h.fecha) <= date(?)"); params.append(hasta)
+
+    with get_connection() as conn:
+        filas = [dict(r) for r in conn.execute(f"""
+            SELECT h.id, h.producto_id, h.precio_viejo, h.precio_nuevo,
+                   h.motivo, h.fecha,
+                   p.descripcion, p.codigo, p.precio_base, p.categoria_id,
+                   c.nombre as categoria,
+                   COALESCE(p.activo, 1) as activo
+            FROM historial_precios h
+            JOIN productos p ON p.id = h.producto_id
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            WHERE {" AND ".join(cond)}
+            ORDER BY h.fecha DESC, h.id DESC
+        """, params).fetchall()]
+
+    if not solo_ultimo:
+        return filas
+    vistos, out = set(), []
+    for f in filas:
+        if f["producto_id"] in vistos:
+            continue
+        vistos.add(f["producto_id"])
+        f["variacion_pct"] = (
+            (f["precio_nuevo"] - f["precio_viejo"]) / f["precio_viejo"] * 100
+            if f["precio_viejo"] else None)
+        out.append(f)
+    return out
+
+
 def set_precio_base(producto_id: int, precio: float):
     """Cambia solo el precio de venta. No toca costo ni margen."""
     precio = redondear_precio(precio)
     with get_connection() as conn:
+        _anotar_cambio_precio(conn, producto_id, precio)
         conn.execute("""UPDATE productos SET precio_base = ?,
                         modificado_en = datetime('now','localtime')
                         WHERE id = ?""", (float(precio), int(producto_id)))

@@ -234,6 +234,100 @@ def inicializar_db():
     """)
 
     # ─────────────────────────────────────────
+    # LISTAS GUARDADAS
+    # La lista de la heladera de bebidas es siempre la misma: lo que
+    # cambia son los precios. Rehacer la seleccion cada vez que hay que
+    # reimprimir es el trabajo que se quiere evitar.
+    # ─────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS listas_guardadas (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre       TEXT NOT NULL UNIQUE,
+            titulo       TEXT,
+            por_categoria INTEGER NOT NULL DEFAULT 1,
+            creado_en    TEXT DEFAULT (datetime('now','localtime')),
+            usado_en     TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS lista_items (
+            lista_id     INTEGER NOT NULL REFERENCES listas_guardadas(id) ON DELETE CASCADE,
+            producto_id  INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+            PRIMARY KEY (lista_id, producto_id)
+        )
+    """)
+    # Lineas escritas a mano: el queso vale $20.000 el kilo en el sistema
+    # pero en la gondola conviene "$2.000 x 100g". No es un producto
+    # distinto ni corresponde tocarle el precio real.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS lista_manual (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            lista_id     INTEGER NOT NULL REFERENCES listas_guardadas(id) ON DELETE CASCADE,
+            texto        TEXT NOT NULL,
+            precio_texto TEXT NOT NULL,
+            categoria    TEXT,
+            orden        INTEGER DEFAULT 0
+        )
+    """)
+
+    # Cuando se imprimio la etiqueta de cada producto. Es el dato que
+    # de verdad contesta "¿a cual le falta etiqueta?": la fecha de alta
+    # solo dice cuando se cargo en el sistema, y un producto puede estar
+    # cargado hace meses y recien ahora ir a la gondola.
+    try:
+        c.execute("ALTER TABLE productos ADD COLUMN etiqueta_impresa TEXT")
+    except Exception:
+        pass
+
+    # ─────────────────────────────────────────
+    # HISTORIAL DE PRECIOS
+    # productos.modificado_en se pisa con cualquier cambio y no dice QUE
+    # cambio. Para saber que etiquetas reimprimir hace falta el registro
+    # de cada cambio de precio con su fecha.
+    # ─────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS historial_precios (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            producto_id  INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+            precio_viejo REAL,
+            precio_nuevo REAL NOT NULL,
+            motivo       TEXT,
+            fecha        TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS ix_hist_precios_fecha
+            ON historial_precios(fecha)
+    """)
+
+    # ─────────────────────────────────────────
+    # LISTA DE COMPRAS
+    # Lo que hay que comprar y no sale de la reposicion automatica:
+    # bolsas, rollos de ticket, lo que pidio un cliente.
+    # ─────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS lista_compras (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            texto        TEXT NOT NULL,
+            cantidad     TEXT,
+            proveedor    TEXT,
+            nota         TEXT,
+            comprado     INTEGER NOT NULL DEFAULT 0,
+            creado_en    TEXT DEFAULT (datetime('now','localtime')),
+            comprado_en  TEXT
+        )
+    """)
+    # Cuantas veces lo pidieron y cuando. Un producto que piden tres
+    # clientes distintos es una decision de compra; uno solo puede ser un
+    # capricho. Sin llevar la cuenta, las dos cosas se ven igual.
+    for _col, _tipo in (("pedidos", "INTEGER DEFAULT 1"),
+                        ("ultimo_pedido", "TEXT")):
+        try:
+            c.execute(f"ALTER TABLE lista_compras ADD COLUMN {_col} {_tipo}")
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────
     # COLA DE REVISION
     # Estado de la revision de catalogo: por donde va uno recorriendo los
     # productos. Los que no tienen fila figuran como "sin revisar".

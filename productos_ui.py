@@ -533,6 +533,8 @@ class ProductosUI(ttk.Frame):
                       command=self._imprimir_etiquetas)
         m.add_command(label="📋   Lista para exhibidora   (sin fotos, letra grande)",
                       command=self._lista_compacta)
+        m.add_command(label="🆕   Etiquetas pendientes   (nuevos y cambios de precio)",
+                      command=self._etiquetas_pendientes)
         m.add_separator()
         m.add_command(label="📄   Lista de precios   (con fotos y promos)",
                       command=self._lista_precios)
@@ -570,6 +572,11 @@ class ProductosUI(ttk.Frame):
             abrir_selector_placas(self)
         except Exception as exc:
             messagebox.showerror("Placas", str(exc), parent=self)
+
+    def _etiquetas_pendientes(self):
+        """Productos nuevos y con precio cambiado, para imprimir su etiqueta."""
+        from etiquetas_pendientes_ui import abrir_etiquetas_pendientes
+        abrir_etiquetas_pendientes(self)
 
     def _lista_compacta(self):
         """Lista sin fotos para pegar en la heladera o la góndola."""
@@ -750,11 +757,13 @@ class ProductosUI(ttk.Frame):
     def _duplicar(self):
         """Copia un producto para dar de alta otra variedad o tamaño.
 
-        Cargar la sexta variedad de la misma marca obliga a repetir a
-        mano categoría, marca, precio, costo y margen. Casi siempre lo
-        único que cambia es una palabra del nombre.
+        Todo viene precargado del original: cargando diez variedades
+        seguidas, lo único que cambia es el nombre y la cantidad. Al
+        guardar registra el ingreso de stock, así el producto queda
+        listo para vender sin pasar por otra pantalla.
         """
-        from repositorio import duplicar_producto
+        from repositorio import (duplicar_producto, registrar_lote,
+                                 get_categorias, get_proveedores)
         pid = self._prod_sel
         if not pid:
             messagebox.showinfo("Duplicar", "Elegí un producto de la lista.",
@@ -768,38 +777,94 @@ class ProductosUI(ttk.Frame):
         d.title("Duplicar producto")
         d.configure(bg=C.superficie)
         d.grab_set()
-        _centrar(d, 480, 330)
+        _centrar(d, 520, min(620, d.winfo_screenheight() - 90))
 
         lbl(d, "Duplicar producto", variante="titulo",
             bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
-        lbl(d, f"Copia de: {orig['descripcion'][:40]}", variante="suave",
+        lbl(d, f"Copia de: {orig['descripcion'][:42]}", variante="suave",
             bg=C.superficie).pack(anchor="w", padx=18)
 
-        info = tk.Frame(d, bg=C.acento, padx=14, pady=10)
-        info.pack(fill="x", padx=18, pady=(12, 8))
-        tk.Label(info, bg=C.acento, fg=C.texto, font=F.pequeña, anchor="w",
-                 justify="left",
-                 text=(f"Se copian: categoría, marca, precio "
-                       f"($ {orig.get('precio_base') or 0:,.2f}), costo "
-                       f"($ {orig.get('costo_ultimo') or 0:,.2f}) y margen.\n"
-                       f"El stock arranca en cero y el código se genera "
-                       f"solo si lo dejás vacío.")).pack(anchor="w")
+        # El pie primero y anclado abajo, para que el cuerpo no lo empuje
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x", pady=14)
 
-        lbl(d, "Nombre del producto nuevo", variante="suave",
-            bg=C.superficie).pack(anchor="w", padx=18, pady=(6, 2))
-        v_desc = tk.StringVar(value=orig["descripcion"])
-        e = tk.Entry(d, textvariable=v_desc, font=F.normal, bg=C.bg,
-                     fg=C.texto, relief="solid", bd=1)
-        e.pack(fill="x", padx=18, ipady=5)
+        cuerpo = tk.Frame(d, bg=C.superficie)
+        cuerpo.pack(fill="both", expand=True, padx=18, pady=(10, 0))
 
-        lbl(d, "Código de barras (vacío = se genera uno propio)",
-            variante="suave", bg=C.superficie).pack(anchor="w", padx=18,
-                                                     pady=(10, 2))
-        v_cod = tk.StringVar()
-        tk.Entry(d, textvariable=v_cod, font=F.normal, bg=C.bg, fg=C.texto,
-                 relief="solid", bd=1).pack(fill="x", padx=18, ipady=5)
+        def _campo(etq, valor, ancho=None):
+            lbl(cuerpo, etq, variante="suave", bg=C.superficie).pack(
+                anchor="w", pady=(8, 2))
+            v = tk.StringVar(value="" if valor is None else str(valor))
+            e = tk.Entry(cuerpo, textvariable=v, font=F.normal, bg=C.bg,
+                         fg=C.texto, relief="solid", bd=1)
+            e.pack(fill="x", ipady=4)
+            return v, e
 
-        def guardar(_ev=None):
+        v_desc, e_desc = _campo("Nombre del producto nuevo",
+                                orig["descripcion"])
+        v_cod, _ = _campo("Código de barras (vacío = se genera uno propio)", "")
+
+        # Categoría y marca copiadas, editables
+        lbl(cuerpo, "Categoría", variante="suave", bg=C.superficie).pack(
+            anchor="w", pady=(8, 2))
+        cats = get_categorias()
+        v_cat = tk.StringVar(value=next(
+            (c["nombre"] for c in cats if c["id"] == orig.get("categoria_id")),
+            cats[0]["nombre"] if cats else ""))
+        ttk.Combobox(cuerpo, textvariable=v_cat, state="readonly",
+                     values=[c["nombre"] for c in cats]).pack(fill="x")
+
+        v_marca, _ = _campo("Marca", orig.get("marca") or "")
+
+        # Costo y precio en una fila
+        f3 = tk.Frame(cuerpo, bg=C.superficie)
+        f3.pack(fill="x", pady=(8, 0))
+        f3.columnconfigure(0, weight=1)
+        f3.columnconfigure(1, weight=1)
+        vals = {}
+        for i, (etq, clave, val) in enumerate((
+                ("Costo", "costo", orig.get("costo_ultimo") or 0),
+                ("Precio de venta", "precio", orig.get("precio_base") or 0))):
+            tk.Label(f3, text=etq, bg=C.superficie, fg=C.texto_suave,
+                     font=F.pequeña, anchor="w").grid(row=0, column=i,
+                                                      sticky="w")
+            v = tk.StringVar(value=f"{float(val):.2f}")
+            tk.Entry(f3, textvariable=v, font=F.normal, justify="center",
+                     bg=C.bg, fg=C.texto, relief="solid", bd=1).grid(
+                row=1, column=i, sticky="ew", padx=(0, 8), ipady=4)
+            vals[clave] = v
+
+        # Stock inicial: es lo que se viene a cargar
+        por_peso = bool(orig.get("vendido_por_peso"))
+        f4 = tk.Frame(cuerpo, bg=C.acento, padx=12, pady=10)
+        f4.pack(fill="x", pady=(12, 0))
+        tk.Label(f4, text=("¿Cuántos kg entraron?" if por_peso
+                           else "¿Cuántas unidades entraron?"),
+                 bg=C.acento, fg=C.texto, font=F.normal,
+                 anchor="w").pack(anchor="w")
+        v_cant = tk.StringVar(value="")
+        e_cant = tk.Entry(f4, textvariable=v_cant, font=F.subtitulo,
+                          justify="center", bg=C.bg, fg=C.texto,
+                          relief="solid", bd=1)
+        e_cant.pack(fill="x", ipady=5, pady=(4, 0))
+        tk.Label(f4, text="Vacío = se crea sin stock", bg=C.acento,
+                 fg=C.texto_suave, font=F.pequeña,
+                 anchor="w").pack(anchor="w", pady=(4, 0))
+
+        # Proveedor, copiado del último ingreso del original
+        lbl(cuerpo, "Proveedor", variante="suave", bg=C.superficie).pack(
+            anchor="w", pady=(8, 2))
+        try:
+            provs = [{"id": None, "nombre": "—"}] + list(get_proveedores())
+        except Exception:
+            provs = [{"id": None, "nombre": "—"}]
+        v_prov = tk.StringVar(value="—")
+        ttk.Combobox(cuerpo, textvariable=v_prov, state="readonly",
+                     values=[p["nombre"] for p in provs]).pack(fill="x")
+
+        v_vence, _ = _campo("Vencimiento (DD/MM/AAAA, opcional)", "")
+
+        def guardar(_ev=None, seguir=False):
             desc = v_desc.get().strip()
             if not desc:
                 messagebox.showwarning("Duplicar", "Poné un nombre.", parent=d)
@@ -811,10 +876,71 @@ class ProductosUI(ttk.Frame):
                     parent=d)
                 return
             try:
+                costo = float(vals["costo"].get().replace(",", "."))
+                precio = float(vals["precio"].get().replace(",", "."))
+            except ValueError:
+                messagebox.showwarning("Duplicar", "El costo o el precio no "
+                                                   "son números.", parent=d)
+                return
+            cant = 0.0
+            txt = v_cant.get().strip().replace(",", ".")
+            if txt:
+                try:
+                    cant = float(txt)
+                except ValueError:
+                    messagebox.showwarning("Duplicar", "La cantidad no es un "
+                                                       "número.", parent=d)
+                    return
+                if cant < 0:
+                    messagebox.showwarning("Duplicar", "La cantidad no puede "
+                                                       "ser negativa.", parent=d)
+                    return
+
+            try:
                 nuevo = duplicar_producto(pid, desc, v_cod.get().strip())
             except Exception as exc:
                 messagebox.showerror("Duplicar", str(exc), parent=d)
                 return
+
+            # Categoría, marca, costo y precio pueden haberse editado
+            cat_id = next((c["id"] for c in cats if c["nombre"] == v_cat.get()),
+                          orig.get("categoria_id"))
+            try:
+                actualizar_producto(
+                    nuevo, desc, None, cat_id, precio, costo,
+                    orig.get("margen_pct"),
+                    int(bool(orig.get("vendido_por_peso"))),
+                    None, v_marca.get().strip())
+            except Exception:
+                pass
+
+            # El ingreso de stock, con el mismo costo
+            if cant > 0:
+                prov_id = next((p["id"] for p in provs
+                                if p["nombre"] == v_prov.get()), None)
+                vence = v_vence.get().strip() or None
+                if vence:
+                    # Se acepta DD/MM/AAAA, que es como lo escribe uno,
+                    # y se guarda como AAAA-MM-DD, que es lo que entiende
+                    # la base.
+                    from datetime import datetime as _dt
+                    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y"):
+                        try:
+                            vence = _dt.strptime(vence, fmt).strftime("%Y-%m-%d")
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        vence = None
+                try:
+                    registrar_lote(nuevo, prov_id, cant, costo, vence,
+                                   "Alta por duplicado")
+                except Exception as exc:
+                    messagebox.showwarning(
+                        "Duplicar",
+                        f"El producto se creó, pero no se pudo cargar el "
+                        f"stock:\n{exc}", parent=d)
+
             d.destroy()
             self._refrescar_productos()
             self._prod_sel = nuevo
@@ -823,22 +949,28 @@ class ProductosUI(ttk.Frame):
                 self.tree_prod.see(str(nuevo))
             except Exception:
                 pass
-            toast(self, "Producto duplicado — cargale el stock desde Stock")
+            unidad = "kg" if por_peso else "u."
+            toast(self, (f"«{desc[:26]}» creado con {cant:g} {unidad}"
+                         if cant else f"«{desc[:26]}» creado sin stock"))
+            if seguir:
+                # Otra variedad del MISMO original: se vuelve a abrir con
+                # todo cargado, que es el caso de dar de alta diez seguidas.
+                self._prod_sel = pid
+                self.after(80, self._duplicar)
 
-        e.bind("<Return>", guardar)
+        d.bind("<Return>", guardar)
         d.bind("<Escape>", lambda ev: d.destroy())
-        pie = tk.Frame(d, bg=C.superficie)
-        pie.pack(side="bottom", pady=14)
-        btn(pie, "Duplicar  (Enter)", variante="exito",
-            comando=guardar).pack(side="left", padx=4)
+        btn(pie, "Guardar  (Enter)", variante="exito",
+            comando=guardar).pack(side="left", padx=(18, 6))
+        btn(pie, "Guardar y otra variedad", variante="primario",
+            comando=lambda: guardar(seguir=True)).pack(side="left", padx=6)
         btn(pie, "Cancelar", variante="neutro",
-            comando=d.destroy).pack(side="left", padx=4)
+            comando=d.destroy).pack(side="left")
 
-        e.focus_set()
-        # El cursor al final: lo que se cambia suele ser la ultima palabra
-        # (la variedad o el tamaño), no el principio del nombre.
-        e.icursor("end")
-        e.xview_moveto(1)
+        e_desc.focus_set()
+        # El cursor al final: lo que cambia suele ser la última palabra
+        e_desc.icursor("end")
+        e_desc.xview_moveto(1)
 
     def _marcar_revisar(self):
         """Manda los productos seleccionados a la cola de revision.

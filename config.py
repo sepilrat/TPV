@@ -76,6 +76,10 @@ DEFAULTS = {
     "aviso_diario_al_cerrar_caja":  False,
     # Para cuantos dias de venta se quiere tener stock en el mail diario
     "aviso_diario_dias_cobertura":  14,
+    # Envio a una hora fija, con el TPV abierto. Es lo que uno espera de
+    # un "cierre del dia": el resumen llega solo, no cuando se abre la app.
+    "aviso_diario_a_las":           True,
+    "aviso_diario_hora":            21,
     "_aviso_diario_ultimo_envio":   "",
 
     # Aviso de vencimientos por email al abrir el TPV

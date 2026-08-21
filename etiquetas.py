@@ -221,7 +221,14 @@ def _dibujar_etiqueta(cv, prod, x, y, ancho, alto):
     fn_sec    = c.get("etiqueta_font_secundario", 11)
     fn_codigo = c.get("etiqueta_font_codigo",     12)
 
-    precios = _get_precios_producto(prod["id"], prod["precio_base"])
+    # Texto de precio escrito a mano: el queso vale $20.000 el kilo pero
+    # en la gondola conviene "$ 2.000 los 100g". No es otro producto ni
+    # corresponde tocarle el precio real.
+    if prod.get("_precio_texto"):
+        precios = [{"precio": None, "cantidad": 1, "label": "",
+                    "texto": prod["_precio_texto"]}]
+    else:
+        precios = _get_precios_producto(prod["id"], prod["precio_base"])
     # precios[0] = más barato (promo principal), último = precio unitario
 
     # ── Alturas de zonas ─────────────────────────────────────────────────────
@@ -255,7 +262,9 @@ def _dibujar_etiqueta(cv, prod, x, y, ancho, alto):
     cv.rect(x, y_cuerpo, ancho, cuerpo_h, fill=1, stroke=0)
 
     mejor = precios[0]
-    precio_str = f"{sym} {mejor['precio']:,.2f} c/u"
+    # Texto a mano si lo hay: se imprime tal cual, sin formatear
+    precio_str = (mejor.get("texto")
+                  or f"{sym} {mejor['precio']:,.2f} c/u")
 
     # Label promo (solo si hay promo — cantidad > 1)
     if mejor["cantidad"] > 1:
@@ -463,6 +472,22 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
                    bg=C.bg, fg=C.texto, font=F.normal, selectcolor=C.bg,
                    activebackground=C.bg).pack(side="left", padx=(14, 0))
 
+    # Filtro por lo que necesita etiqueta nueva: productos recién dados
+    # de alta o con el precio cambiado. Es la razón habitual por la que
+    # uno abre esta pantalla.
+    lbl(bar, "Mostrar:").pack(side="left", padx=(14, 4))
+    var_pend = tk.StringVar(value="Todos")
+    combo_pend = ttk.Combobox(
+        bar, textvariable=var_pend, width=22, state="readonly",
+        values=("Todos", "Nuevos y con precio nuevo", "Solo nuevos",
+                "Solo precio cambiado", "Nunca etiquetados"))
+    combo_pend.pack(side="left")
+    lbl(bar, "en los últimos").pack(side="left", padx=(8, 4))
+    var_dias = tk.StringVar(value="7")
+    ttk.Combobox(bar, textvariable=var_dias, width=5, state="readonly",
+                 values=("1", "3", "7", "15", "30")).pack(side="left")
+    lbl(bar, "días").pack(side="left", padx=(4, 0))
+
     # Tabla
     COLS = [
         ("sel",    "",            30,  "center"),
@@ -505,7 +530,37 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
         for r in tree.get_children():
             tree.delete(r)
         cat_id = _cats[[c["nombre"] for c in _cats].index(var_cat.get())]["id"]
+
+        # IDs que necesitan etiqueta nueva, si se pidió ese filtro
+        ids_pend = None
+        modo = var_pend.get()
+        if modo != "Todos":
+            from datetime import date, timedelta
+            from repositorio import etiquetas_pendientes
+            desde = (date.today()
+                     - timedelta(days=int(var_dias.get() or 7))).isoformat()
+            try:
+                if modo == "Nunca etiquetados":
+                    # Sin filtro de fecha: lo que importa es que nunca se
+                    # imprimio, no cuando se cargo.
+                    from repositorio import get_connection as _gc
+                    with _gc() as _c:
+                        ids_pend = {r[0] for r in _c.execute(
+                            "SELECT id FROM productos "
+                            "WHERE COALESCE(activo,1)=1 "
+                            "AND etiqueta_impresa IS NULL")}
+                else:
+                    pend = etiquetas_pendientes(
+                        desde, date.today().isoformat(),
+                        incluir_nuevos=modo != "Solo precio cambiado",
+                        incluir_cambios=modo != "Solo nuevos")
+                    ids_pend = {x["producto_id"] for x in pend}
+            except Exception:
+                ids_pend = set()
+
         for p in get_productos(filtro=filtro, categoria_id=cat_id):
+            if ids_pend is not None and p["id"] not in ids_pend:
+                continue
             if var_con_stock.get() and (p.get("stock") or 0) <= 0:
                 continue
             todos_prods[p["codigo"]] = p
@@ -539,6 +594,8 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
         _actualizar_lbl()
 
     combo_cat.bind("<<ComboboxSelected>>", _recargar)
+    combo_pend.bind("<<ComboboxSelected>>", _recargar)
+    var_dias.trace_add("write", _recargar)
     var_con_stock.trace_add("write", _recargar)
 
     entry_buscar.bind("<KeyRelease>",
@@ -590,7 +647,88 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
                 nombres_genericos.pop(iid, None)
                 tree.set(iid, "desc", todos_prods[iid]["descripcion"])
 
+    # Ediciones a mano: {producto_id: {"texto":…, "precio_texto":…}}
+    ediciones = {}
+
+    def _editar_etiqueta(event=None):
+        """Cambia el texto y el precio de UNA etiqueta, sin tocar el
+        producto: el queso sigue valiendo $20.000 el kilo en la caja,
+        pero el cartel dice «$ 2.000 los 100g»."""
+        sel = tree.selection() or ([tree.identify_row(event.y)] if event else [])
+        iid = sel[0] if sel else None
+        if not iid:
+            return
+        # El iid del árbol es el CODIGO del producto, no su id
+        prod = todos_prods.get(iid)
+        if not prod:
+            return
+        ed = ediciones.get(iid, {})
+
+        top = tk.Toplevel(d)
+        top.title("Editar etiqueta")
+        top.configure(bg=C.superficie)
+        top.grab_set()
+        top.geometry("470x330")
+
+        lbl(top, "Editar esta etiqueta", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+        lbl(top, f"Producto: {prod['descripcion'][:40]}   ·   "
+                 f"$ {prod.get('precio_base') or 0:,.2f}",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
+        lbl(top, "Cambia solo lo que se imprime. El precio del producto no "
+                 "se toca.", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(6, 0))
+
+        lbl(top, "Texto de la etiqueta", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(12, 2))
+        v_txt = tk.StringVar(value=ed.get("texto") or prod["descripcion"])
+        e_txt = tk.Entry(top, textvariable=v_txt, font=F.normal, bg=C.bg,
+                         fg=C.texto, relief="solid", bd=1)
+        e_txt.pack(fill="x", padx=18, ipady=5)
+
+        lbl(top, "Precio a imprimir (ej: «$ 2.000 los 100g»)",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=18,
+                                                     pady=(10, 2))
+        v_pre = tk.StringVar(value=ed.get("precio_texto") or "")
+        tk.Entry(top, textvariable=v_pre, font=F.subtitulo, justify="center",
+                 bg=C.bg, fg=C.texto, relief="solid", bd=1).pack(
+            fill="x", padx=18, ipady=5)
+        lbl(top, "Vacío = el precio normal del producto", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(4, 0))
+
+        def ok(_ev=None):
+            cambios = {}
+            if v_txt.get().strip() and v_txt.get().strip() != prod["descripcion"]:
+                cambios["texto"] = v_txt.get().strip()
+            if v_pre.get().strip():
+                cambios["precio_texto"] = v_pre.get().strip()
+            if cambios:
+                ediciones[iid] = cambios
+                # Se marca sola: si uno la editó, la quiere imprimir
+                cantidades.setdefault(prod["codigo"], 1)
+            else:
+                ediciones.pop(iid, None)
+            top.destroy()
+            cargar(entry_buscar.get().strip())
+
+        e_txt.bind("<Return>", ok)
+        top.bind("<Escape>", lambda ev: top.destroy())
+        fb = tk.Frame(top, bg=C.superficie)
+        fb.pack(side="bottom", pady=14)
+        btn(fb, "Guardar  (Enter)", variante="exito", comando=ok).pack(
+            side="left", padx=4)
+        btn(fb, "Quitar cambios", variante="neutro",
+            comando=lambda: (ediciones.pop(iid, None), top.destroy(),
+                             cargar(entry_buscar.get().strip()))).pack(
+            side="left", padx=4)
+        btn(fb, "Cancelar", variante="neutro",
+            comando=top.destroy).pack(side="left", padx=4)
+        e_txt.focus_set()
+        e_txt.icursor("end")
+
     tree.bind("<ButtonRelease-1>", _on_click)
+    tree.bind("<Double-1>", _editar_etiqueta)
+    tree.tag_configure("editada", background=C.ok_flash)
 
     # Barra inferior
     bot = tk.Frame(d, bg=C.bg)
@@ -679,11 +817,25 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
         for cod, cant in cantidades.items():
             p = todos_prods.get(cod)
             if p:
-                if cod in nombres_genericos:
+                ed = ediciones.get(cod, {})
+                if cod in nombres_genericos or ed:
                     p = dict(p)  # copia — no tocar el producto real en memoria
-                    p["nombre_generico"] = nombres_genericos[cod]
+                    if cod in nombres_genericos:
+                        p["nombre_generico"] = nombres_genericos[cod]
+                    if ed.get("texto"):
+                        p["nombre_generico"] = ed["texto"]
+                    if ed.get("precio_texto"):
+                        p["_precio_texto"] = ed["precio_texto"]
                 for _ in range(cant):
                     prods_exp.append(p)
+
+        # Queda registrado que ya tienen etiqueta: asi el filtro "nunca
+        # etiquetados" sirve de verdad la proxima vez.
+        try:
+            from repositorio import marcar_etiquetas_impresas
+            marcar_etiquetas_impresas({p["id"] for p in prods_exp})
+        except Exception as _e:
+            logging.debug(f"No se pudo marcar las etiquetas impresas: {_e}")
 
         ruta = generar_pdf_etiquetas(prods_exp)
         if ruta:

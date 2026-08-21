@@ -107,6 +107,8 @@ SECCIONES = [
         ("aviso_diario_al_abrir_app",   "Mandarlo al abrir el sistema",         "bool"),
         ("aviso_diario_al_abrir_caja",  "Mandarlo al abrir la caja",            "bool"),
         ("aviso_diario_al_cerrar_caja", "Mandarlo al cerrar la caja",           "bool"),
+        ("aviso_diario_a_las",   "Mandarlo todos los días a una hora fija", "bool"),
+        ("aviso_diario_hora",    "¿A qué hora? (0 a 23)",                   "int"),
         ("aviso_diario_dias_cobertura", "Reponer para cuántos días de venta",   "int"),
     ]),
     ("Vencimientos", [

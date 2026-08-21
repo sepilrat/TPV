@@ -535,13 +535,26 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         cob = 14
     reponer = get_reposicion(30, cob, solo_faltantes=True)
     criticos = [r for r in reponer if r["urgencia"] in ("sin stock", "urgente")]
-    if not vtos and not reponer:
+
+    # Lo facturado del dia: es el dato que uno quiere ver al cerrar, y
+    # hasta ahora habia que abrir el TPV para saberlo.
+    try:
+        from repositorio import resumen_cobranzas
+        from datetime import date as _date
+        _hoy = _date.today().isoformat()
+        dia = resumen_cobranzas(_hoy, _hoy)
+    except Exception as _e:
+        logging.warning(f"No se pudo calcular lo facturado del dia: {_e}")
+        dia = None
+    if not vtos and not reponer and not (dia and dia.get("tickets")):
         if not forzar:
             from config import set as cfg_set
             cfg_set("_aviso_diario_ultimo_envio", hoy)
         return False, "Nada para avisar: sin vencimientos ni stock critico."
 
     partes = []
+    if dia and dia.get("facturado"):
+        partes.append(f"$ {dia['facturado']:,.0f} facturado")
     if criticos:
         partes.append(f"{len(criticos)} urgente(s) para reponer")
     elif reponer:
@@ -581,6 +594,29 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
                         f"<td>{v['fecha_vencimiento']}</td>"
                         f"<td style='color:{color};font-weight:bold'>{cuando}</td></tr>")
         html.append("</table>")
+
+    # El resumen del dia va PRIMERO: es lo que uno abre a mirar.
+    if dia and dia.get("tickets"):
+        html.append(
+            f"<h3>Hoy</h3>"
+            f"<table border='0' cellpadding='6' cellspacing='0' "
+            f"style='border-collapse:collapse;font-size:14px'>"
+            f"<tr><td>Facturado</td><td align='right'><b>"
+            f"$ {dia['facturado']:,.2f}</b></td>"
+            f"<td style='padding-left:18px'>{dia['tickets']} ticket(s)</td></tr>"
+            f"<tr><td>Cobrado</td><td align='right'>"
+            f"$ {dia['cobrado']:,.2f}</td><td style='padding-left:18px'>"
+            f"efectivo $ {dia['efectivo']:,.2f} · tarjeta "
+            f"$ {dia['tarjeta']:,.2f} · QR $ {dia['qr']:,.2f}</td></tr>")
+        if dia.get("fiado"):
+            html.append(
+                f"<tr><td>Quedó fiado</td><td align='right' "
+                f"style='color:#B23B2E'>$ {dia['fiado']:,.2f}</td>"
+                f"<td style='padding-left:18px'>deuda total "
+                f"$ {dia['deuda_total']:,.2f}</td></tr>")
+        html.append(
+            f"<tr><td>Ganancia</td><td align='right'>"
+            f"$ {dia['ganancia']:,.2f}</td><td></td></tr></table>")
 
     if reponer:
         total_inv = sum(r["costo_reposicion"] for r in reponer)

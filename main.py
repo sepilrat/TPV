@@ -9,6 +9,7 @@ Estructura de tabs:
 
 import os
 import logging
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 from styles import C, aplicar_tema, lbl, btn
@@ -37,6 +38,7 @@ class AppTPV(tk.Tk):
         aplicar_tema()
         hacer_backup("inicio")
         self._aviso_diario("apertura del sistema", "aviso_diario_al_abrir_app")
+        self._programar_aviso_por_hora()
 
         self.sesion_id = self._verificar_sesion()
         self._construir_header()
@@ -89,6 +91,33 @@ class AppTPV(tk.Tk):
         return result[0]
 
     # ── Header ────────────────────────────────────────────────────────────────
+
+    def _programar_aviso_por_hora(self):
+        """Manda el resumen a una hora fija, con el TPV abierto.
+
+        Es lo que uno espera de un "cierre del dia": llega solo a las 21,
+        no cuando a alguien se le ocurre abrir la app. Se revisa cada 5
+        minutos; la guarda de una vez por dia evita repetirlo.
+        """
+        try:
+            from config import cfg
+            c = cfg()
+            activo = c.get("aviso_diario_activo", False)
+            por_hora = c.get("aviso_diario_a_las", False)
+            hora = int(c.get("aviso_diario_hora", 21) or 21)
+        except Exception:
+            activo, por_hora, hora = False, False, 21
+
+        if activo and por_hora:
+            ahora = datetime.now()
+            # Se dispara en la hora indicada. La guarda de "una vez por
+            # dia" que ya tiene el aviso evita que se repita cada 5 min.
+            if ahora.hour == hora:
+                self._aviso_diario(f"resumen de las {hora:02d}:00",
+                                   "aviso_diario_a_las")
+        # Se reprograma siempre: si se activa la opcion sin reiniciar,
+        # igual empieza a funcionar.
+        self.after(300000, self._programar_aviso_por_hora)
 
     def _aviso_diario(self, motivo, clave_config):
         """Aviso diario por email (stock critico + vencimientos).
@@ -225,6 +254,7 @@ class AppTPV(tk.Tk):
         from auditoria_ui import AuditoriaUI, OfertasUI
         from revision_ui import RevisionUI
         from reposicion_ui import ReposicionUI
+        from compras_ui import ComprasUI
         from recargos_ui import RecargosUI
 
         nb2 = ttk.Notebook(parent, style="Productos.TNotebook")
@@ -235,6 +265,7 @@ class AppTPV(tk.Tk):
             ("  Precios   ",  PreciosUI),
             ("  Stock     ",  IngresoUI),
             ("  Reposicion",  ReposicionUI),
+            ("  Comprar  ",   ComprasUI),
             ("  Recargos  ",  RecargosUI),
             ("  A revisar ",  RevisionUI),
             ("  Auditoria ",  AuditoriaUI),
