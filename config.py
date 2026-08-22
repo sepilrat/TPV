@@ -71,8 +71,12 @@ DEFAULTS = {
     # Windows que hay que crear a mano.
     "aviso_diario_activo":          False,
     "aviso_diario_destinatario":    "",
-    "aviso_diario_al_abrir_app":    True,
-    "aviso_diario_al_abrir_caja":   True,
+    # Habia cuatro disparadores para una sola cosa, y la guarda de "uno
+    # por dia" hacia que el primero se comiera a los demas: si a las
+    # 12:23 salia por abrir la app, el de las 21 nunca llegaba.
+    # Ahora la hora fija es el modo normal, y los otros quedan apagados.
+    "aviso_diario_al_abrir_app":    False,
+    "aviso_diario_al_abrir_caja":   False,
     "aviso_diario_al_cerrar_caja":  False,
     # Para cuantos dias de venta se quiere tener stock en el mail diario
     "aviso_diario_dias_cobertura":  14,

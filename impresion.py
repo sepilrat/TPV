@@ -16,6 +16,19 @@ from db import get_connection
 # GENERACIÓN DEL TICKET EN TEXTO
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _destinatarios(txt) -> list:
+    """Separa una lista de mails escrita con comas, punto y coma o espacios.
+
+    Devuelve solo los que tienen pinta de mail: un vacio en el medio hace
+    que el servidor rechace TODO el envio con un error que no dice cual.
+    """
+    import re as _re
+    if not txt:
+        return []
+    partes = [x.strip() for x in _re.split(r"[,;\s]+", str(txt)) if x.strip()]
+    return [x for x in partes if "@" in x and "." in x.split("@")[-1]]
+
+
 def _linea(char="─", ancho=None):
     return char * (ancho or cfg()["impresora_ancho"])
 
@@ -433,7 +446,11 @@ def enviar_email(venta_id: int, destinatario: str) -> tuple[bool, str]:
     try:
         msg = MIMEMultipart()
         msg["From"]    = f"{c['email_remitente']} <{c['email_usuario']}>"
-        msg["To"]      = destinatario
+        _dest = _destinatarios(destinatario)
+        if not _dest:
+            return False, ("No hay destinatario valido configurado. "
+                           "Revisa Config → email.")
+        msg["To"]      = ", ".join(_dest)
         msg["Subject"] = f"Ticket #{venta_id} - {c['negocio_nombre']}"
         msg.attach(MIMEText(texto, "plain", "utf-8"))
 
@@ -522,7 +539,12 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         return False, "Falta el email destinatario."
 
     hoy = date.today().isoformat()
-    if not forzar and c.get("_aviso_diario_ultimo_envio") == hoy:
+    # La guarda es por DISPARADOR, no global: si no, el primero que sale
+    # en el dia deja sin efecto a los demas. El resumen de las 21 tiene
+    # que llegar aunque a la mañana haya salido uno al abrir la caja.
+    _clave_envio = f"_aviso_diario_ultimo_envio_{motivo[:24]}" if motivo \
+                   else "_aviso_diario_ultimo_envio"
+    if not forzar and c.get(_clave_envio) == hoy:
         return False, f"El aviso de hoy ya se mando ({motivo or 'sin motivo'})."
 
     vtos = get_vencimientos_proximos()
@@ -549,7 +571,7 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     if not vtos and not reponer and not (dia and dia.get("tickets")):
         if not forzar:
             from config import set as cfg_set
-            cfg_set("_aviso_diario_ultimo_envio", hoy)
+            cfg_set(_clave_envio, hoy)
         return False, "Nada para avisar: sin vencimientos ni stock critico."
 
     partes = []
@@ -657,7 +679,11 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"[{c.get('negocio_nombre', 'TPV')}] {resumen}"
     msg["From"] = f"{c.get('email_remitente', 'TPV')} <{c['email_usuario']}>"
-    msg["To"] = destinatario
+    _dest = _destinatarios(destinatario)
+    if not _dest:
+        return False, ("No hay destinatario valido configurado. "
+                       "Revisa Config → email.")
+    msg["To"] = ", ".join(_dest)
     msg.attach(MIMEText("".join(html), "html", "utf-8"))
 
     try:
@@ -757,7 +783,11 @@ def enviar_alerta_vencimientos(destinatario: str = None,
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"[{c.get('negocio_nombre', 'TPV')}] {resumen}"
     msg["From"] = f"{c.get('email_remitente', 'TPV')} <{c['email_usuario']}>"
-    msg["To"] = destinatario
+    _dest = _destinatarios(destinatario)
+    if not _dest:
+        return False, ("No hay destinatario valido configurado. "
+                       "Revisa Config → email.")
+    msg["To"] = ", ".join(_dest)
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     try:
@@ -790,7 +820,12 @@ def enviar_informe_stock(destinatario: str = None) -> tuple[bool, str]:
     if not c["email_activo"]:
         return False, "Email no configurado en Config → Email (SMTP)."
 
-    destinatario = destinatario or c.get("informe_stock_email_destinatario")
+    # Si el informe no tiene su propio destinatario, usa el del aviso
+    # diario: tener que cargar el mismo mail en dos lugares es la razon
+    # por la que uno queda vacio y el envio falla sin explicacion.
+    destinatario = (destinatario
+                    or c.get("informe_stock_email_destinatario")
+                    or c.get("aviso_diario_destinatario"))
     if not destinatario:
         return False, "Falta el email destinatario (Config → Informe de stock)."
 
@@ -804,7 +839,11 @@ def enviar_informe_stock(destinatario: str = None) -> tuple[bool, str]:
     try:
         msg = MIMEMultipart("alternative")
         msg["From"]    = f"{c['email_remitente']} <{c['email_usuario']}>"
-        msg["To"]      = destinatario
+        _dest = _destinatarios(destinatario)
+        if not _dest:
+            return False, ("No hay destinatario valido configurado. "
+                           "Revisa Config → email.")
+        msg["To"]      = ", ".join(_dest)
         msg["Subject"] = f"Informe de stock — {c['negocio_nombre']} — {datetime.now().strftime('%d/%m')}"
         msg.attach(MIMEText(
             generar_html_informe_stock(productos, umbral), "html", "utf-8"))

@@ -198,8 +198,8 @@ def dialogo_historial_lotes(parent):
         comando=lambda: v_desde.set(
             (datetime.date.today() - datetime.timedelta(days=30)).isoformat())
         ).pack(side="left", padx=(20, 6))
-    btn(pie, "💲 Corregir costo", variante="primario",
-        comando=lambda: corregir_costo_dialogo(d, tv, filas, _buscar)).pack(
+    btn(pie, "✏️  Editar lote", variante="exito",
+        comando=lambda: editar_lote_dialogo(d, tv, filas, _buscar)).pack(
         side="left", padx=6)
     btn(pie, "Ver todo", variante="neutro",
         comando=lambda: (v_desde.set(""), v_hasta.set(""), v_texto.set(""),
@@ -354,14 +354,14 @@ def dialogo_lotes_producto(parent, producto_id: int):
 
     tv.bind("<Double-1>", _editar)
 
-    _corregir_costo = lambda ev=None: corregir_costo_dialogo(d, tv, filas, _cargar)
 
     pie = tk.Frame(d, bg=C.superficie)
     pie.pack(side="bottom", fill="x", pady=(0, 14))
-    btn(pie, "Corregir vencimiento", variante="exito",
-        comando=_editar).pack(side="left", padx=(20, 6))
-    btn(pie, "💲 Corregir costo", variante="primario",
-        comando=_corregir_costo).pack(side="left", padx=6)
+    # Un solo lugar para todo el lote: antes habia una pantalla para el
+    # vencimiento y otra para el costo, y la cantidad no se podia tocar.
+    btn(pie, "✏️  Editar lote", variante="exito",
+        comando=lambda: editar_lote_dialogo(d, tv, filas, _cargar)).pack(
+        side="left", padx=(20, 6))
     btn(pie, "Cerrar", variante="neutro", comando=d.destroy).pack(side="right", padx=20)
 
     _cargar()
@@ -473,3 +473,171 @@ def corregir_costo_dialogo(d, tv, filas, al_terminar=None):
         comando=guardar).pack(side="left", padx=4)
     btn(fb, "Cancelar", variante="neutro",
         comando=top.destroy).pack(side="left", padx=4)
+
+
+def editar_lote_dialogo(d, tv, filas, al_terminar=None):
+    """Edita todos los campos de un lote en una sola pantalla.
+
+    Antes había un diálogo para el vencimiento y otro para el costo, y la
+    cantidad no se podía corregir en ningún lado: había que ajustar el
+    stock y volver a ingresar la mercadería.
+    """
+    from repositorio import actualizar_lote, get_proveedores
+    from fiado_ui import pedir_autorizacion
+
+    sel = tv.selection()
+    if not sel:
+        messagebox.showinfo("Editar lote", "Elegí un lote de la lista.",
+                            parent=d)
+        return
+    lote = filas[int(sel[0])]
+
+    top = tk.Toplevel(d)
+    top.title("Editar lote")
+    top.configure(bg=C.superficie)
+    top.grab_set()
+    w, h = 520, min(620, top.winfo_screenheight() - 90)
+    sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+    top.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//2)}")
+
+    lbl(top, lote.get("descripcion", "")[:42], variante="titulo",
+        bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+    lbl(top, f"Lote #{lote['id']}   ·   ingresó el "
+             f"{(lote.get('fecha_ingreso') or '')[:10]}",
+        variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
+
+    # El pie primero y anclado abajo, para que el cuerpo no lo empuje
+    pie = tk.Frame(top, bg=C.superficie)
+    pie.pack(side="bottom", fill="x", pady=14)
+
+    cuerpo = tk.Frame(top, bg=C.superficie)
+    cuerpo.pack(fill="both", expand=True, padx=18, pady=(10, 0))
+
+    vendido = (float(lote.get("cantidad") or 0)
+               - float(lote.get("cantidad_restante") or 0))
+    if vendido > 0:
+        av = tk.Frame(cuerpo, bg=C.acento, padx=12, pady=8)
+        av.pack(fill="x", pady=(0, 10))
+        tk.Label(av, text=(f"Ya se vendieron {vendido:g} de este lote. "
+                           f"La cantidad no puede quedar por debajo."),
+                 bg=C.acento, fg=C.texto, font=F.pequeña, anchor="w",
+                 wraplength=460, justify="left").pack(anchor="w")
+
+    def _campo(etq, valor, ancho=None):
+        lbl(cuerpo, etq, variante="suave", bg=C.superficie).pack(
+            anchor="w", pady=(8, 2))
+        v = tk.StringVar(value="" if valor is None else str(valor))
+        e = tk.Entry(cuerpo, textvariable=v, font=F.normal, bg=C.bg,
+                     fg=C.texto, relief="solid", bd=1)
+        e.pack(fill="x", ipady=4)
+        return v, e
+
+    f_num = tk.Frame(cuerpo, bg=C.superficie)
+    f_num.pack(fill="x")
+    f_num.columnconfigure(0, weight=1)
+    f_num.columnconfigure(1, weight=1)
+    for i, (etq, val) in enumerate((
+            ("Cantidad", f"{float(lote.get('cantidad') or 0):g}"),
+            ("Costo unitario", f"{float(lote.get('costo_unitario') or 0):.2f}"))):
+        tk.Label(f_num, text=etq, bg=C.superficie, fg=C.texto_suave,
+                 font=F.pequeña, anchor="w").grid(row=0, column=i, sticky="w")
+    v_cant = tk.StringVar(value=f"{float(lote.get('cantidad') or 0):g}")
+    v_costo = tk.StringVar(value=f"{float(lote.get('costo_unitario') or 0):.2f}")
+    for i, v in enumerate((v_cant, v_costo)):
+        tk.Entry(f_num, textvariable=v, font=F.subtitulo, justify="center",
+                 bg=C.bg, fg=C.texto, relief="solid", bd=1).grid(
+            row=1, column=i, sticky="ew", padx=(0, 8), ipady=4)
+
+    lbl_tot = tk.Label(cuerpo, text="", bg=C.superficie, fg=C.texto_suave,
+                       font=F.pequeña, anchor="w")
+    lbl_tot.pack(fill="x", pady=(6, 0))
+
+    def _total(*_a):
+        try:
+            t = (float(v_cant.get().replace(",", "."))
+                 * float(v_costo.get().replace(",", ".")))
+            lbl_tot.config(text=f"Total del lote: $ {t:,.2f}")
+        except ValueError:
+            lbl_tot.config(text="")
+
+    v_cant.trace_add("write", _total)
+    v_costo.trace_add("write", _total)
+    _total()
+
+    lbl(cuerpo, "Proveedor", variante="suave", bg=C.superficie).pack(
+        anchor="w", pady=(10, 2))
+    try:
+        provs = [{"id": None, "nombre": "— sin proveedor —"}] + list(get_proveedores())
+    except Exception:
+        provs = [{"id": None, "nombre": "— sin proveedor —"}]
+    actual = lote.get("proveedor") or "— sin proveedor —"
+    v_prov = tk.StringVar(value=actual)
+    ttk.Combobox(cuerpo, textvariable=v_prov, state="readonly",
+                 values=[p["nombre"] for p in provs]).pack(fill="x")
+
+    vto = lote.get("fecha_vencimiento") or ""
+    if vto:
+        try:
+            vto = datetime.datetime.strptime(
+                vto[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+    v_vto, _ = _campo("Vencimiento (DD/MM/AAAA, vacío = sin fecha)", vto)
+    v_notas, _ = _campo("Notas", lote.get("notas") or "")
+
+    def guardar(_ev=None):
+        try:
+            cant = float(v_cant.get().replace(",", "."))
+            costo = float(v_costo.get().replace(",", "."))
+        except ValueError:
+            messagebox.showwarning("Editar lote", "La cantidad o el costo no "
+                                                  "son números.", parent=top)
+            return
+
+        fecha = v_vto.get().strip()
+        if fecha:
+            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y"):
+                try:
+                    fecha = datetime.datetime.strptime(
+                        fecha, fmt).strftime("%Y-%m-%d")
+                    break
+                except ValueError:
+                    continue
+            else:
+                messagebox.showwarning("Editar lote", "La fecha no se "
+                                                      "entiende. Usá "
+                                                      "DD/MM/AAAA.", parent=top)
+                return
+        else:
+            fecha = None
+
+        prov_id = next((p["id"] for p in provs
+                        if p["nombre"] == v_prov.get()), None)
+
+        resp = pedir_autorizacion(
+            top, "Editar un lote cambia el stock y la ganancia informada.")
+        if not resp:
+            return
+        try:
+            r = actualizar_lote(lote["id"], cantidad=cant, costo=costo,
+                                proveedor_id=prov_id, fecha_vencimiento=fecha,
+                                notas=v_notas.get().strip(), responsable=resp)
+        except Exception as exc:
+            messagebox.showerror("Editar lote", str(exc), parent=top)
+            return
+
+        top.destroy()
+        if r["cambios"]:
+            messagebox.showinfo(
+                "Listo", "Se actualizó:\n\n"
+                         + "\n".join(f"  · {c}" for c in r["cambios"]),
+                parent=d)
+        if al_terminar:
+            al_terminar()
+
+    top.bind("<Return>", guardar)
+    top.bind("<Escape>", lambda ev: top.destroy())
+    btn(pie, "Guardar  (Enter)", variante="exito",
+        comando=guardar).pack(side="left", padx=(18, 6))
+    btn(pie, "Cancelar  (Esc)", variante="neutro",
+        comando=top.destroy).pack(side="left")

@@ -1352,6 +1352,103 @@ def alinear_lotes_con_producto(producto_id: int, solo_con_stock=True) -> int:
         return cur.rowcount
 
 
+def actualizar_lote(lote_id: int, cantidad=None, costo=None,
+                    proveedor_id="sin_cambio", fecha_vencimiento="sin_cambio",
+                    notas="sin_cambio", responsable="") -> dict:
+    """Edita un lote completo en una sola operacion.
+
+    Hasta ahora habia una pantalla para el vencimiento y otra para el
+    costo, y la cantidad no se podia tocar en ningun lado: para corregir
+    un ingreso mal cargado habia que ajustar el stock y volver a
+    ingresarlo.
+
+    Devuelve un resumen de lo que cambio, para el aviso y la bitacora.
+    """
+    with get_connection() as conn:
+        lote = conn.execute("""
+            SELECT l.*, p.descripcion FROM lotes l
+            JOIN productos p ON p.id = l.producto_id
+            WHERE l.id = ?
+        """, (lote_id,)).fetchone()
+        if not lote:
+            raise ValueError("El lote no existe.")
+        lote = dict(lote)
+
+        vendido = conn.execute("""
+            SELECT COALESCE(SUM(cantidad), 0) FROM detalle_ventas_lotes
+            WHERE lote_id = ?
+        """, (lote_id,)).fetchone()[0] or 0
+
+        cambios, sets, params = [], [], []
+
+        if cantidad is not None:
+            cantidad = float(cantidad)
+            if cantidad < vendido:
+                raise ValueError(
+                    f"Ya se vendieron {vendido:g} unidades de este lote: "
+                    f"la cantidad no puede ser menor que eso.")
+            viejo = float(lote["cantidad"] or 0)
+            if abs(cantidad - viejo) > 0.0001:
+                # El restante se mueve junto con la cantidad: si no, se
+                # descuadra el stock disponible.
+                nuevo_rest = float(lote["cantidad_restante"] or 0) + (cantidad - viejo)
+                sets += ["cantidad = ?", "cantidad_restante = ?"]
+                params += [cantidad, max(0.0, nuevo_rest)]
+                cambios.append(f"cantidad {viejo:g} → {cantidad:g}")
+
+        if costo is not None:
+            costo = float(costo)
+            if costo < 0:
+                raise ValueError("El costo no puede ser negativo.")
+            viejo = float(lote["costo_unitario"] or 0)
+            if abs(costo - viejo) > 0.005:
+                sets.append("costo_unitario = ?")
+                params.append(costo)
+                cambios.append(f"costo $ {viejo:,.2f} → $ {costo:,.2f}")
+
+        if proveedor_id != "sin_cambio":
+            sets.append("proveedor_id = ?")
+            params.append(proveedor_id)
+            cambios.append("proveedor")
+
+        if fecha_vencimiento != "sin_cambio":
+            sets.append("fecha_vencimiento = ?")
+            params.append(fecha_vencimiento or None)
+            cambios.append(f"vencimiento → {fecha_vencimiento or 'sin fecha'}")
+
+        if notas != "sin_cambio":
+            sets.append("notas = ?")
+            params.append(notas or None)
+            cambios.append("notas")
+
+        if sets:
+            conn.execute(f"UPDATE lotes SET {', '.join(sets)} WHERE id = ?",
+                         params + [lote_id])
+
+            # Si se toco el costo y es el ingreso mas reciente, el costo
+            # del producto tambien: si no, el proximo precio sale mal.
+            if costo is not None:
+                ult = conn.execute("""
+                    SELECT id FROM lotes WHERE producto_id = ?
+                    ORDER BY fecha_ingreso DESC, id DESC LIMIT 1
+                """, (lote["producto_id"],)).fetchone()
+                if ult and ult["id"] == lote_id:
+                    conn.execute("""UPDATE productos SET costo_ultimo = ?,
+                                    modificado_en = datetime('now','localtime')
+                                    WHERE id = ?""",
+                                 (costo, lote["producto_id"]))
+            conn.commit()
+
+    if cambios:
+        registrar_bitacora(
+            "Edicion de lote", responsable or "sin identificar",
+            f"{lote['descripcion']}: lote #{lote_id} — " + ", ".join(cambios),
+            0, lote_id)
+
+    return {"descripcion": lote["descripcion"], "cambios": cambios,
+            "vendido": vendido}
+
+
 def actualizar_vencimiento_lote(lote_id: int, fecha) -> str | None:
     """Corrige el vencimiento de un lote ya cargado.
 

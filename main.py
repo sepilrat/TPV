@@ -113,8 +113,9 @@ class AppTPV(tk.Tk):
             # Se dispara en la hora indicada. La guarda de "una vez por
             # dia" que ya tiene el aviso evita que se repita cada 5 min.
             if ahora.hour == hora:
-                self._aviso_diario(f"resumen de las {hora:02d}:00",
-                                   "aviso_diario_a_las")
+                # El motivo NO lleva la hora: si no, cambiar el horario
+                # en el mismo dia haria que salga un segundo mail.
+                self._aviso_diario("resumen del dia", "aviso_diario_a_las")
         # Se reprograma siempre: si se activa la opcion sin reiniciar,
         # igual empieza a funcionar.
         self.after(300000, self._programar_aviso_por_hora)

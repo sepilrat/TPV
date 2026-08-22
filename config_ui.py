@@ -60,11 +60,10 @@ SECCIONES = [
     ("Stock y Alertas", [
         ("stock_alerta_umbral",   "Umbral stock critico (unidades)", "int"),
         ("permitir_venta_sin_stock", "Permitir vender sin stock registrado", "bool"),
-        ("stock_alerta_dias_vto", "Dias para alerta de vencimiento", "int"),
     ]),
     ("Informe de stock por email", [
         ("informe_stock_email_activo",        "Envio automatico activo",  "bool"),
-        ("informe_stock_email_destinatario",  "Email que lo recibe",      "text"),
+        ("informe_stock_email_destinatario",  "Email(s) — vacío usa el del aviso diario", "text"),
         ("informe_stock_email_hora",          "Hora de envio (HH:MM)",    "text"),
         ("informe_stock_email_solo_criticos", "Enviar solo stock critico (no todo el catalogo)", "bool"),
     ]),
@@ -103,12 +102,12 @@ SECCIONES = [
     ]),
     ("Aviso diario por email", [
         ("aviso_diario_activo",         "Activar el aviso diario",              "bool"),
-        ("aviso_diario_destinatario",   "Email destinatario",                   "text"),
-        ("aviso_diario_al_abrir_app",   "Mandarlo al abrir el sistema",         "bool"),
-        ("aviso_diario_al_abrir_caja",  "Mandarlo al abrir la caja",            "bool"),
-        ("aviso_diario_al_cerrar_caja", "Mandarlo al cerrar la caja",           "bool"),
-        ("aviso_diario_a_las",   "Mandarlo todos los días a una hora fija", "bool"),
-        ("aviso_diario_hora",    "¿A qué hora? (0 a 23)",                   "int"),
+        ("aviso_diario_destinatario",   "Email(s) destinatario — separar con comas", "text"),
+        ("aviso_diario_a_las",   "A una hora fija (recomendado)",          "bool"),
+        ("aviso_diario_hora",    "¿A qué hora? (0 a 23)",                  "int"),
+        ("aviso_diario_al_abrir_app",   "También al abrir el sistema",          "bool"),
+        ("aviso_diario_al_abrir_caja",  "También al abrir la caja",             "bool"),
+        ("aviso_diario_al_cerrar_caja", "También al cerrar la caja",            "bool"),
         ("aviso_diario_dias_cobertura", "Reponer para cuántos días de venta",   "int"),
     ]),
     ("Vencimientos", [
@@ -233,6 +232,8 @@ class ConfigUI(ttk.Frame):
             comando=self._imprimir_ticket_prueba).pack(side="right", padx=(0,8))
         btn(fb, "Probar balanza", variante="primario",
             comando=self._probar_balanza).pack(side="right", padx=(0,8))
+        btn(fb, "✉  Probar los emails", variante="primario",
+            comando=self._probar_emails).pack(side="left", padx=4)
         btn(fb, "Sincronizar catálogo ahora", variante="primario",
             comando=self._sincronizar_catalogo).pack(side="right", padx=(0,8))
 
@@ -385,6 +386,92 @@ class ConfigUI(ttk.Frame):
             "Esta ventana sigue conectada a la base real.\n\n"
             "Para volver a empezar de cero, borrá tpv2_prueba.db.",
             parent=self)
+
+    def _probar_emails(self):
+        """Manda cada aviso al instante, sin gastar el envío del día.
+
+        Sin esto hay que esperar a la hora programada para saber si anda,
+        y si no llega no se sabe si falló el mail o la programación.
+        """
+        d = tk.Toplevel(self)
+        d.title("Probar los emails")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        d.geometry("580x430")
+
+        tk.Label(d, text="Probar los emails", bg=C.superficie, fg=C.texto,
+                 font=F.titulo, anchor="w").pack(anchor="w", padx=18,
+                                                 pady=(16, 2))
+        tk.Label(d, text=("Se manda al instante y NO consume el envío "
+                          "programado del día."),
+                 bg=C.superficie, fg=C.texto_suave, font=F.pequeña,
+                 anchor="w").pack(anchor="w", padx=18)
+
+        salida = tk.Text(d, height=10, font=F.mono, bg=C.bg, fg=C.texto,
+                         relief="solid", bd=1, wrap="word")
+        salida.pack(fill="both", expand=True, padx=18, pady=(12, 8))
+
+        def _log(txt, ok=None):
+            marca = "" if ok is None else ("[OK]  " if ok else "[FALLA]  ")
+            salida.insert("end", f"{marca}{txt}\n")
+            salida.see("end")
+            salida.update_idletasks()
+
+        def _probar(nombre, fn):
+            _log(f"\n— {nombre} —")
+            try:
+                ok, msg = fn()
+                _log(msg or ("Enviado" if ok else "No se pudo"), ok=ok)
+            except Exception as exc:
+                _log(f"{type(exc).__name__}: {exc}", ok=False)
+
+        def _aviso():
+            from impresion import enviar_aviso_diario
+            _probar("Aviso diario (stock, vencimientos y ventas del día)",
+                    lambda: enviar_aviso_diario("PRUEBA MANUAL", forzar=True))
+
+        def _vtos():
+            from impresion import enviar_alerta_vencimientos
+            _probar("Alerta de vencimientos",
+                    lambda: enviar_alerta_vencimientos(
+                        solo_una_vez_por_dia=False))
+
+        def _stock():
+            from impresion import enviar_informe_stock
+            _probar("Informe de stock", enviar_informe_stock)
+
+        def _todos():
+            salida.delete("1.0", "end")
+            _aviso()
+            _vtos()
+            _stock()
+            _log("\nListo. Si alguno falló, revisá la configuración de "
+                 "email más arriba.")
+
+        botones = tk.Frame(d, bg=C.superficie)
+        botones.pack(fill="x", padx=18)
+        btn(botones, "Aviso diario", variante="neutro",
+            comando=_aviso).pack(side="left", padx=(0, 4))
+        btn(botones, "Vencimientos", variante="neutro",
+            comando=_vtos).pack(side="left", padx=4)
+        btn(botones, "Informe de stock", variante="neutro",
+            comando=_stock).pack(side="left", padx=4)
+        btn(botones, "▶  Probar todos", variante="exito",
+            comando=_todos).pack(side="left", padx=(12, 0))
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x", pady=12)
+        btn(pie, "Cerrar", variante="neutro",
+            comando=d.destroy).pack(side="right", padx=18)
+        d.bind("<Escape>", lambda ev: d.destroy())
+
+        from config import cfg
+        dest = cfg().get("aviso_diario_destinatario", "")
+        _log(f"Destinatario: {dest or '(sin configurar)'}")
+        if not dest:
+            _log("Cargá el destinatario en «Aviso diario por email» y "
+                 "guardá antes de probar.", ok=False)
+        _log("Elegí qué probar.")
 
     def _restaurar(self):
         if messagebox.askyesno("Restaurar",
