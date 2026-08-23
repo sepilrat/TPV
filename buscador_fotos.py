@@ -41,7 +41,17 @@ class API:
 
 def main():
     query = sys.argv[1] if len(sys.argv) > 1 else ""
-    url_busqueda = f"https://www.google.com/search?tbm=isch&q={quote(query)}"
+    # Google pide captcha apenas detecta que no es un navegador normal, y
+    # resolverlo cada vez hace inusable la busqueda. Bing y DuckDuckGo no
+    # lo piden, asi que se arranca por ahi y Google queda como ultimo
+    # recurso (se puede cambiar con el segundo argumento).
+    motor = (sys.argv[2] if len(sys.argv) > 2 else "bing").lower()
+    MOTORES = {
+        "bing": f"https://www.bing.com/images/search?q={quote(query)}&qft=+filterui:photo-photo",
+        "duckduckgo": f"https://duckduckgo.com/?q={quote(query)}&iax=images&ia=images",
+        "google": f"https://www.google.com/search?tbm=isch&q={quote(query)}",
+    }
+    url_busqueda = MOTORES.get(motor, MOTORES["bing"])
 
     api = API()
     ventana = webview.create_window(

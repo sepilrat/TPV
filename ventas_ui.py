@@ -76,6 +76,7 @@ class VentasUI(ttk.Frame):
         self._build()
         self._atajos()
         self._chequear_recargo()
+        self.after(2000, self._vigilar_foco)
         self.after(100, self.foco_scanner)
 
     def _chequear_recargo(self):
@@ -110,6 +111,19 @@ class VentasUI(ttk.Frame):
         # F12 (cobrar) ya estaba enganchado desde antes en _build: no se
         # duplica acá para no llamar dos veces a _cobrar.
         raiz = self.winfo_toplevel()
+
+        def _si_visible(fn):
+            """Las F se enganchan al toplevel, asi que llegan estando en
+            cualquier pantalla. Sin esta guarda, F4 disparaba la balanza
+            desde Stock y F2 pisaba el atajo de la pantalla que se veia.
+            """
+            def _wrap(ev=None):
+                if not self.winfo_ismapped():
+                    return None
+                fn(ev)
+                return "break"
+            return _wrap
+
         for tecla, fn in (
                 ("<F1>",     self._ayuda_atajos),
                 ("<F2>",     lambda e: self.foco_scanner()),
@@ -117,7 +131,7 @@ class VentasUI(ttk.Frame):
                 ("<F4>",     lambda e: self._leer_balanza()),
                 ("<F6>",     lambda e: self._nueva_venta()),
                 ("<Delete>", self._atajo_quitar)):
-            raiz.bind(tecla, fn, add="+")
+            raiz.bind(tecla, _si_visible(fn), add="+")
 
     def _atajo_cantidad(self, event=None):
         """Pone el foco para tipear la cantidad del proximo escaneo."""
@@ -202,6 +216,10 @@ class VentasUI(ttk.Frame):
         # Aviso de recargo por horario. Se crea siempre y se muestra solo
         # cuando rige: el cajero tiene que saber que los precios que ve
         # no son los de lista.
+        self.lbl_promo_grupo = tk.Label(
+            p, text="", bg=C.exito, fg=C.blanco,
+            font=("Segoe UI", 10, "bold"), pady=5)
+
         self.lbl_recargo = tk.Label(
             p, text="", bg=C.advertencia, fg=C.blanco,
             font=("Segoe UI", 10, "bold"), pady=5)
@@ -367,12 +385,49 @@ class VentasUI(ttk.Frame):
         self.btn_cobrar.pack(fill="x", padx=8, pady=6)
         self.btn_cobrar.bind("<Enter>", lambda e: self.btn_cobrar.config(bg=C.exito_h))
         self.btn_cobrar.bind("<Leave>", lambda e: self.btn_cobrar.config(bg=C.exito))
-        self.bind_all("<F12>", lambda e: self._cobrar())
+        # bind_all captura la tecla en TODA la app, incluso dentro de un
+        # dialogo abierto: F12 llegaba a cobrar desde cualquier pantalla.
+        self.winfo_toplevel().bind(
+            "<F12>",
+            lambda e: (self._cobrar(), "break")[1] if self.winfo_ismapped()
+            else None, add="+")
 
     # ── Scanner ───────────────────────────────────────────────────────────────
 
     def foco_scanner(self):
         self.entry_scan.focus_set()
+        # El cursor al final: si quedo texto a medias, lo que se escanee
+        # despues se pega atras y el codigo sale mal.
+        try:
+            self.entry_scan.icursor("end")
+        except Exception:
+            pass
+
+    def _vigilar_foco(self):
+        """Red de seguridad: devuelve el foco al scanner solo.
+
+        Hay veinte caminos que llaman a foco_scanner() y alcanza con que
+        uno se olvide para que el cajero escanee contra la nada. Esto lo
+        corrige aunque el camino falle.
+
+        No se toca el foco si el cajero esta escribiendo en otro campo de
+        la pantalla (cantidad, descuento) ni si hay un dialogo abierto:
+        seria peor robarle el teclado en medio de una carga.
+        """
+        try:
+            if self.winfo_ismapped():
+                foco = self.focus_get()
+                # Ningun foco, o el foco quedo en un widget que no acepta
+                # texto (un boton, la tabla): el scanner no llegaria.
+                if foco is None or not isinstance(
+                        foco, (tk.Entry, tk.Text, ttk.Combobox, ttk.Entry)):
+                    # Solo si no hay ventana modal encima
+                    if not any(isinstance(w, tk.Toplevel) and w.winfo_ismapped()
+                               for w in self.winfo_toplevel().winfo_children()):
+                        self.entry_scan.focus_set()
+        except Exception:
+            pass
+        self.after(1500, self._vigilar_foco)
 
     def _leer_balanza(self):
         """
@@ -538,10 +593,49 @@ class VentasUI(ttk.Frame):
 
         self.cant_pendiente = None
         self.lbl_cant.config(text="x1")
+        # Las promos combinables se recalculan sobre TODO el carrito: al
+        # agregar la tercera gaseosa, las dos anteriores tambien bajan.
+        self._aplicar_promos_grupo()
         self._flash()
         self._actualizar_tabla()
         self._actualizar_totales()
         self.foco_scanner()
+
+    def _aplicar_promos_grupo(self):
+        """Recalcula las promos combinables sobre todo el carrito."""
+        from repositorio import (aplicar_promos_combinables,
+                                 promo_grupo_faltante, get_precio_con_promo)
+        # Se vuelve al precio base antes de recalcular: si no, al sacar un
+        # producto del carrito los demas quedarian con el precio de promo.
+        for i in self.carrito:
+            if i.pop("_promo_grupo", None) is not None:
+                pid = i.get("producto_id")
+                if pid:
+                    precio, promo = get_precio_con_promo(pid, i["cantidad"])
+                    i["precio_unitario"] = precio
+                    i["subtotal"] = precio * i["cantidad"]
+                    i["promo_aplicada"] = promo
+        try:
+            avisos = aplicar_promos_combinables(self.carrito)
+            faltan = promo_grupo_faltante(self.carrito)
+        except Exception:
+            return
+        # "Con una mas entra la promo" es una venta que se pierde solo
+        # porque nadie lo dijo.
+        txt = "   ·   ".join(avisos)
+        if faltan:
+            f = faltan[0]
+            extra = (f"Con {f['falta']:g} más entra «{f['nombre']}»")
+            txt = f"{txt}   ·   {extra}" if txt else extra
+        if hasattr(self, "lbl_promo_grupo"):
+            self.lbl_promo_grupo.config(
+                text=f"  🏷  {txt}  " if txt else "",
+                bg=C.exito if avisos else (C.advertencia if faltan else C.bg))
+            if txt:
+                self.lbl_promo_grupo.grid(row=4, column=0, sticky="ew",
+                                          pady=(0, 6))
+            else:
+                self.lbl_promo_grupo.grid_forget()
 
     def _pedir_peso(self, prod):
         """Pide el peso de un producto que se vende por kilo.
@@ -927,6 +1021,9 @@ class VentasUI(ttk.Frame):
         sel = self.tree.selection()
         if not sel: return
         del self.carrito[self.tree.index(sel[0])]
+        # Al sacar un producto la promo puede dejar de aplicar: hay que
+        # recalcular o los que quedan siguen con el precio promocional.
+        self._aplicar_promos_grupo()
         self._actualizar_tabla()
         self._actualizar_totales()
         self.foco_scanner()

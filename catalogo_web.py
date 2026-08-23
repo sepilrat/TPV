@@ -56,6 +56,34 @@ def _imagen_para_sync(imagen_url: str) -> tuple[str, str | None]:
         return "", f"error procesando '{imagen_url}': {e}"
 
 
+def _filtrar_publicables(productos: list) -> list:
+    """Aplica los filtros de que se publica en la web.
+
+    Sin esto se sube TODO el catalogo activo: cosas sin foto, sin stock, o
+    productos internos que no tiene sentido mostrarle al cliente.
+    """
+    from config import cfg
+    c = cfg()
+    solo_con_stock = c.get("web_solo_con_stock", False)
+    solo_con_foto = c.get("web_solo_con_foto", False)
+    excluir_txt = (c.get("web_excluir_categorias") or "").strip()
+    excluir = {x.strip().lower() for x in excluir_txt.split(",") if x.strip()}
+
+    out = []
+    for p in productos:
+        # El marcado por producto manda sobre todo lo demas
+        if not p.get("publicar_web", 1):
+            continue
+        if solo_con_stock and (p.get("stock") or 0) <= 0:
+            continue
+        if solo_con_foto and not (p.get("imagen_url") or p.get("imagen_local")):
+            continue
+        if excluir and (p.get("categoria") or "").lower() in excluir:
+            continue
+        out.append(p)
+    return out
+
+
 def sincronizar(url: str = None) -> tuple[bool, str]:
     """
     Manda a la Apps Script Web App, en una sola pasada:
@@ -78,6 +106,7 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
     from repositorio import get_productos, get_proveedores_ultimo_por_producto, get_promociones_activas_por_producto
     base = [p for p in get_productos(solo_activos=True)
            if p["precio_base"] and p["precio_base"] > 0]
+    base = _filtrar_publicables(base)
     proveedores = get_proveedores_ultimo_por_producto()
     promos_por_producto = get_promociones_activas_por_producto()
 

@@ -556,6 +556,16 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     except (TypeError, ValueError):
         cob = 14
     reponer = get_reposicion(30, cob, solo_faltantes=True)
+
+    # Lo que piden los clientes y nunca se compro: no tiene stock que
+    # medir, asi que no sale por ningun otro lado. Es justo lo que uno
+    # necesita a mano antes de salir a comprar.
+    try:
+        from repositorio import get_lista_compras
+        pedidos = [x for x in get_lista_compras() if not x.get("comprado")]
+    except Exception as _e:
+        logging.warning(f"No se pudo leer la lista de compras: {_e}")
+        pedidos = []
     criticos = [r for r in reponer if r["urgencia"] in ("sin stock", "urgente")]
 
     # Lo facturado del dia: es el dato que uno quiere ver al cerrar, y
@@ -568,7 +578,8 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     except Exception as _e:
         logging.warning(f"No se pudo calcular lo facturado del dia: {_e}")
         dia = None
-    if not vtos and not reponer and not (dia and dia.get("tickets")):
+    if (not vtos and not reponer and not pedidos
+            and not (dia and dia.get("tickets"))):
         if not forzar:
             from config import set as cfg_set
             cfg_set(_clave_envio, hoy)
@@ -577,6 +588,8 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     partes = []
     if dia and dia.get("facturado"):
         partes.append(f"$ {dia['facturado']:,.0f} facturado")
+    if pedidos:
+        partes.append(f"{len(pedidos)} pedido(s) de clientes")
     if criticos:
         partes.append(f"{len(criticos)} urgente(s) para reponer")
     elif reponer:
@@ -616,6 +629,31 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
                         f"<td>{v['fecha_vencimiento']}</td>"
                         f"<td style='color:{color};font-weight:bold'>{cuando}</td></tr>")
         html.append("</table>")
+
+    if pedidos:
+        html.append(
+            "<h3>Para comprar</h3>"
+            "<p style='font-size:13px;color:#6B7280'>Pedidos de clientes y "
+            "cosas anotadas que no salen de la reposición automática.</p>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>"
+            "<tr style='background:#DBEAFE'><th align='left'>Qué</th>"
+            "<th align='left'>Cantidad</th><th align='left'>Proveedor</th>"
+            "<th align='right'>Pedidos</th></tr>")
+        for x in pedidos[:25]:
+            veces = int(x.get("veces") or x.get("pedidos") or 1)
+            # Lo que piden varios va resaltado: tres pedidos distintos
+            # justifican traerlo, uno solo puede ser un capricho.
+            estilo = " style='background:#FEF3C7'" if veces > 1 else ""
+            html.append(
+                f"<tr{estilo}><td>{x['texto']}</td>"
+                f"<td>{x.get('cantidad') or ''}</td>"
+                f"<td>{x.get('proveedor') or '—'}</td>"
+                f"<td align='right'><b>{veces}</b></td></tr>")
+        html.append("</table>")
+        if len(pedidos) > 25:
+            html.append(f"<p style='font-size:13px'>…y "
+                        f"{len(pedidos) - 25} más.</p>")
 
     # El resumen del dia va PRIMERO: es lo que uno abre a mirar.
     if dia and dia.get("tickets"):
@@ -720,8 +758,12 @@ def enviar_alerta_vencimientos(destinatario: str = None,
     if not c.get("email_activo"):
         return False, "Email no configurado en Config → Email (SMTP)."
 
-    destinatario = destinatario or c.get("vto_email_destinatario") \
-        or c.get("informe_stock_email_destinatario")
+    # Mismo destinatario que el resto de los avisos. Las claves viejas se
+    # siguen leyendo por si quedaron cargadas de antes.
+    destinatario = (destinatario
+                    or c.get("aviso_diario_destinatario")
+                    or c.get("vto_email_destinatario")
+                    or c.get("informe_stock_email_destinatario"))
     if not destinatario:
         return False, "Falta el email destinatario (Config → Vencimientos)."
 
@@ -823,9 +865,11 @@ def enviar_informe_stock(destinatario: str = None) -> tuple[bool, str]:
     # Si el informe no tiene su propio destinatario, usa el del aviso
     # diario: tener que cargar el mismo mail en dos lugares es la razon
     # por la que uno queda vacio y el envio falla sin explicacion.
+    # Un solo destinatario para todo: la clave vieja se sigue leyendo por
+    # si quedo cargada, pero el campo unico es aviso_diario_destinatario.
     destinatario = (destinatario
-                    or c.get("informe_stock_email_destinatario")
-                    or c.get("aviso_diario_destinatario"))
+                    or c.get("aviso_diario_destinatario")
+                    or c.get("informe_stock_email_destinatario"))
     if not destinatario:
         return False, "Falta el email destinatario (Config → Informe de stock)."
 

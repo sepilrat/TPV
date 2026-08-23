@@ -112,6 +112,40 @@ def inicializar_db():
     """)
 
     # ─────────────────────────────────────────
+    # PROMOS COMBINABLES
+    # Las promociones normales son por producto: "llevando 3 yerbas". Un
+    # grupo permite "3 gaseosas cualquiera": el cliente mezcla marcas y
+    # la promo igual aplica. Sin esto habria que cargar una promo por
+    # cada combinacion posible.
+    # ─────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS promo_grupos (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre          TEXT NOT NULL,
+            cantidad_minima INTEGER NOT NULL,
+            tipo            TEXT NOT NULL DEFAULT 'precio_fijo',
+                            -- precio_fijo | descuento_pct
+            valor           REAL NOT NULL,
+                            -- precio por unidad, o % de descuento
+            fecha_desde     TEXT,
+            fecha_hasta     TEXT,
+            activa          INTEGER NOT NULL DEFAULT 1,
+            creado_en       TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS promo_grupo_items (
+            grupo_id    INTEGER NOT NULL REFERENCES promo_grupos(id) ON DELETE CASCADE,
+            producto_id INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+            PRIMARY KEY (grupo_id, producto_id)
+        )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS ix_promo_grupo_items_prod
+            ON promo_grupo_items(producto_id)
+    """)
+
+    # ─────────────────────────────────────────
     # LOTES DE STOCK (ingreso con FIFO)
     # ─────────────────────────────────────────
     c.execute("""
@@ -276,6 +310,15 @@ def inicializar_db():
     # cargado hace meses y recien ahora ir a la gondola.
     try:
         c.execute("ALTER TABLE productos ADD COLUMN etiqueta_impresa TEXT")
+    except Exception:
+        pass
+
+    # Publicar o no en el catalogo web. Por defecto SI: es lo que ya venia
+    # pasando, y arrancar con todo despublicado dejaria la pagina vacia
+    # sin que nadie entienda por que.
+    try:
+        c.execute("ALTER TABLE productos ADD COLUMN publicar_web "
+                  "INTEGER NOT NULL DEFAULT 1")
     except Exception:
         pass
 

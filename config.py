@@ -82,6 +82,22 @@ DEFAULTS = {
     "aviso_diario_dias_cobertura":  14,
     # Envio a una hora fija, con el TPV abierto. Es lo que uno espera de
     # un "cierre del dia": el resumen llega solo, no cuando se abre la app.
+    # Sincronizacion automatica del catalogo web. Sin esto hay que
+    # acordarse de apretar el boton cada vez que cambia un precio, y la
+    # pagina termina mostrando precios viejos.
+    # Buscador de fotos: bing / duckduckgo / google. Google corta con
+    # captcha apenas detecta el navegador embebido.
+    "buscador_fotos":               "bing",
+
+    # Que se publica en el catalogo web
+    "web_solo_con_stock":           False,
+    "web_solo_con_foto":            False,
+    "web_excluir_categorias":       "",
+
+    "catalogo_sync_auto":           False,
+    "catalogo_sync_cada_horas":     6,
+    "_catalogo_sync_ultima":        "",
+
     "aviso_diario_a_las":           True,
     "aviso_diario_hora":            21,
     "_aviso_diario_ultimo_envio":   "",

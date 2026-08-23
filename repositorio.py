@@ -176,6 +176,7 @@ def get_productos(filtro="", categoria_id=None, solo_activos=True) -> list:
         SELECT p.id, p.codigo, p.descripcion, c.nombre as categoria,
                p.precio_base, p.costo_ultimo, p.margen_pct, p.activo,
                p.ignorar_alerta, p.vendido_por_peso, p.imagen_url, p.marca,
+               COALESCE(p.publicar_web, 1) as publicar_web,
                COALESCE(SUM(l.cantidad_restante), 0) as stock,
                ROUND((p.precio_base - p.costo_ultimo)
                      / NULLIF(p.costo_ultimo, 0) * 100, 1) as margen
@@ -1528,6 +1529,141 @@ def get_promociones_activas_por_producto() -> dict:
         return agrupadas
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PROMOS COMBINABLES — "llevando 3 gaseosas cualquiera"
+# ─────────────────────────────────────────────────────────────────────────────
+
+def guardar_promo_grupo(gid, nombre, cantidad_minima, tipo, valor,
+                        producto_ids, fecha_desde=None, fecha_hasta=None,
+                        activa=True) -> int:
+    """Crea o edita un grupo de promo combinable."""
+    if int(cantidad_minima) < 2:
+        raise ValueError("La cantidad mínima tiene que ser 2 o más.")
+    if len(producto_ids) < 2:
+        raise ValueError("Un grupo combinable necesita al menos 2 productos.")
+
+    with get_connection() as conn:
+        if gid:
+            conn.execute("""
+                UPDATE promo_grupos
+                   SET nombre=?, cantidad_minima=?, tipo=?, valor=?,
+                       fecha_desde=?, fecha_hasta=?, activa=?
+                 WHERE id=?
+            """, (nombre.strip(), int(cantidad_minima), tipo, float(valor),
+                  fecha_desde, fecha_hasta, int(bool(activa)), gid))
+            conn.execute("DELETE FROM promo_grupo_items WHERE grupo_id=?", (gid,))
+        else:
+            cur = conn.execute("""
+                INSERT INTO promo_grupos
+                    (nombre, cantidad_minima, tipo, valor,
+                     fecha_desde, fecha_hasta, activa)
+                VALUES (?,?,?,?,?,?,?)
+            """, (nombre.strip(), int(cantidad_minima), tipo, float(valor),
+                  fecha_desde, fecha_hasta, int(bool(activa))))
+            gid = cur.lastrowid
+        for pid in producto_ids:
+            conn.execute("INSERT OR IGNORE INTO promo_grupo_items "
+                         "(grupo_id, producto_id) VALUES (?,?)", (gid, int(pid)))
+        conn.commit()
+    return gid
+
+
+def get_promo_grupos(solo_activos=False) -> list:
+    cond = "WHERE activa = 1" if solo_activos else ""
+    with get_connection() as conn:
+        grupos = [dict(r) for r in conn.execute(
+            f"SELECT * FROM promo_grupos {cond} ORDER BY nombre").fetchall()]
+        for g in grupos:
+            g["productos"] = [dict(r) for r in conn.execute("""
+                SELECT p.id, p.descripcion, p.codigo, p.precio_base
+                FROM promo_grupo_items i
+                JOIN productos p ON p.id = i.producto_id
+                WHERE i.grupo_id = ?
+                ORDER BY p.descripcion
+            """, (g["id"],)).fetchall()]
+    return grupos
+
+
+def borrar_promo_grupo(gid):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM promo_grupos WHERE id=?", (gid,))
+        conn.commit()
+
+
+def aplicar_promos_combinables(carrito: list) -> list:
+    """Aplica las promos de grupo al carrito y devuelve los avisos.
+
+    Cuenta cuantas unidades del grupo hay en TODO el carrito, sin importar
+    como se repartan entre productos: 1 Coca + 1 Sprite + 1 Fanta son 3
+    unidades y la promo aplica igual que 3 Cocas.
+
+    Modifica el carrito en el lugar. Devuelve una lista de textos para
+    mostrarle al cajero que promo entro.
+    """
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    grupos = [g for g in get_promo_grupos(solo_activos=True)
+              if (not g["fecha_desde"] or g["fecha_desde"] <= hoy)
+              and (not g["fecha_hasta"] or g["fecha_hasta"] >= hoy)]
+    if not grupos:
+        return []
+
+    avisos = []
+    # De mayor a menor exigencia: si un carrito califica para dos grupos,
+    # gana el que pide mas unidades, que es el mejor descuento.
+    for g in sorted(grupos, key=lambda x: -x["cantidad_minima"]):
+        ids = {p["id"] for p in g["productos"]}
+        items = [i for i in carrito
+                 if i.get("producto_id") in ids and not i.get("_promo_grupo")]
+        total_un = sum(i["cantidad"] for i in items)
+        if total_un < g["cantidad_minima"]:
+            continue
+
+        ahorro = 0.0
+        for i in items:
+            base = float(i["precio_unitario"])
+            if g["tipo"] == "descuento_pct":
+                nuevo = base * (1 - float(g["valor"]) / 100)
+            else:
+                nuevo = float(g["valor"])
+            # Nunca se sube el precio: si el producto ya estaba mas barato
+            # que la promo, se respeta el precio que ya tenia.
+            if nuevo >= base:
+                continue
+            ahorro += (base - nuevo) * i["cantidad"]
+            i["precio_unitario"] = nuevo
+            i["subtotal"] = nuevo * i["cantidad"]
+            i["promo_aplicada"] = True
+            i["_promo_grupo"] = g["id"]
+
+        if ahorro > 0:
+            avisos.append(f"{g['nombre']}: {total_un:g} unidades — "
+                          f"ahorra $ {ahorro:,.2f}")
+    return avisos
+
+
+def promo_grupo_faltante(carrito: list) -> list:
+    """Grupos a los que les falta poco para entrar.
+
+    Sirve para avisarle al cajero "con una mas entra la promo": es una
+    venta extra que se pierde solo porque nadie lo dijo.
+    """
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    out = []
+    for g in get_promo_grupos(solo_activos=True):
+        if g["fecha_desde"] and g["fecha_desde"] > hoy:
+            continue
+        if g["fecha_hasta"] and g["fecha_hasta"] < hoy:
+            continue
+        ids = {p["id"] for p in g["productos"]}
+        total = sum(i["cantidad"] for i in carrito
+                    if i.get("producto_id") in ids)
+        falta = g["cantidad_minima"] - total
+        if 0 < falta <= 2 and total > 0:
+            out.append({"nombre": g["nombre"], "falta": falta,
+                        "cantidad_minima": g["cantidad_minima"]})
+    return out
+
+
 def get_precio_con_promo(producto_id: int, cantidad: float) -> tuple[float, bool]:
     """Retorna (precio_unitario, promo_aplicada). Si hay varias promos
     aplicables por la cantidad, usa la que dé el precio más bajo —
@@ -1899,6 +2035,31 @@ def duplicar_producto(producto_id: int, descripcion_nueva: str,
               orig.get("ignorar_alerta") or 0, nuevo_id))
         conn.commit()
     return nuevo_id
+
+
+def toggle_publicar_web(ids, publicar=None) -> int:
+    """Marca o desmarca productos para el catalogo web.
+
+    publicar=None invierte el valor actual de cada uno.
+    """
+    ids = [ids] if isinstance(ids, int) else list(ids)
+    if not ids:
+        return 0
+    marcas = ",".join("?" * len(ids))
+    with get_connection() as conn:
+        if publicar is None:
+            cur = conn.execute(f"""
+                UPDATE productos
+                   SET publicar_web = CASE WHEN COALESCE(publicar_web,1)=1
+                                           THEN 0 ELSE 1 END
+                 WHERE id IN ({marcas})
+            """, ids)
+        else:
+            cur = conn.execute(
+                f"UPDATE productos SET publicar_web = ? WHERE id IN ({marcas})",
+                [int(bool(publicar))] + ids)
+        conn.commit()
+        return cur.rowcount
 
 
 def productos_bajo_costo(ids=None) -> list:

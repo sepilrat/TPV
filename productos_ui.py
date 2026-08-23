@@ -180,6 +180,8 @@ class ProductosUI(ttk.Frame):
             comando=self._marcar_revisar).pack(side="left", padx=6)
         btn(ac, "⧉  Duplicar", variante="neutro",
             comando=self._duplicar).pack(side="left", padx=6)
+        btn(ac, "🌐 Publicar sí/no", variante="neutro",
+            comando=self._toggle_publicar).pack(side="left", padx=6)
         # Todo lo que termina en papel, junto: eran botones sueltos
         # repartidos entre dos filas y la fila se salia de la pantalla.
         self.btn_imprimir = btn(ac, "🖨  Imprimir…", variante="exito",
@@ -754,6 +756,26 @@ class ProductosUI(ttk.Frame):
         imagenes._URLS_FALLIDAS.clear()
         self._refrescar()
 
+    def _toggle_publicar(self):
+        """Saca o vuelve a poner productos en el catálogo web."""
+        from repositorio import toggle_publicar_web
+        sel = self.tree_prod.selection()
+        ids = []
+        for iid in sel:
+            try:
+                ids.append(int(iid))
+            except ValueError:
+                pass
+        if not ids and self._prod_sel:
+            ids = [self._prod_sel]
+        if not ids:
+            messagebox.showinfo("Publicar", "Elegí uno o varios productos.",
+                                parent=self)
+            return
+        n = toggle_publicar_web(ids)
+        self._refrescar_productos()
+        toast(self, f"{n} producto(s) cambiaron de estado en la web")
+
     def _duplicar(self):
         """Copia un producto para dar de alta otra variedad o tamaño.
 
@@ -1284,8 +1306,12 @@ class ProductosUI(ttk.Frame):
             def _trabajar():
                 url, error = "", None
                 try:
+                    # Bing por defecto: Google corta con captcha apenas
+                    # detecta el navegador embebido.
+                    from config import cfg as _cfg
+                    _motor = _cfg().get("buscador_fotos", "bing")
                     resultado = subprocess.run(
-                        [sys.executable, ruta_script, desc],
+                        [sys.executable, ruta_script, desc, _motor],
                         capture_output=True, text=True, timeout=300)
                     salida = resultado.stdout.strip()
                     url = salida.splitlines()[-1].strip() if salida else ""

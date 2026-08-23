@@ -39,6 +39,7 @@ class AppTPV(tk.Tk):
         hacer_backup("inicio")
         self._aviso_diario("apertura del sistema", "aviso_diario_al_abrir_app")
         self._programar_aviso_por_hora()
+        self._programar_sync_catalogo()
 
         self.sesion_id = self._verificar_sesion()
         self._construir_header()
@@ -92,6 +93,67 @@ class AppTPV(tk.Tk):
 
     # ── Header ────────────────────────────────────────────────────────────────
 
+    def _programar_sync_catalogo(self):
+        """Sube el catálogo cada tantas horas, con el TPV abierto.
+
+        Sin esto hay que acordarse de apretar el botón cada vez que
+        cambia un precio, y la página termina mostrando precios viejos —
+        que es peor que no tener página.
+        """
+        try:
+            from config import cfg, set as cfg_set
+            c = cfg()
+            if c.get("catalogo_sync_auto"):
+                cada = max(1, int(c.get("catalogo_sync_cada_horas", 6) or 6))
+                ultima = c.get("_catalogo_sync_ultima") or ""
+                pasaron = True
+                if ultima:
+                    try:
+                        prev = datetime.fromisoformat(ultima)
+                        pasaron = (datetime.now() - prev).total_seconds() >= cada * 3600
+                    except ValueError:
+                        pasaron = True
+                if pasaron:
+                    import threading
+                    import catalogo_web
+
+                    def _correr():
+                        try:
+                            ok, msg = catalogo_web.sincronizar()
+                            logging.info(f"Sync automatica del catalogo: {msg}")
+                            if ok:
+                                cfg_set("_catalogo_sync_ultima",
+                                        datetime.now().isoformat(timespec="seconds"))
+                        except Exception as exc:
+                            logging.warning(f"Sync automatica fallo: {exc}")
+
+                    # En segundo plano: subir el catalogo tarda y no puede
+                    # dejar la caja congelada en medio de una venta.
+                    threading.Thread(target=_correr, daemon=True).start()
+        except Exception as exc:
+            logging.debug(f"No se pudo programar la sync: {exc}")
+
+        # Se revisa cada 15 minutos: si se activa la opcion sin reiniciar,
+        # igual empieza a funcionar.
+        self.after(900000, self._programar_sync_catalogo)
+
+    @staticmethod
+    def _hora_a_entero(valor, defecto=21):
+        """Acepta 21, "21", "21:00" o "9:30" y devuelve la hora entera.
+
+        La config puede tener cualquiera de esas formas segun como se
+        haya cargado, y una comparacion contra texto no falla: no hace
+        nada, que es peor porque no deja rastro.
+        """
+        try:
+            txt = str(valor).strip()
+            if ":" in txt:
+                txt = txt.split(":")[0]
+            h = int(float(txt))
+            return h if 0 <= h <= 23 else defecto
+        except (TypeError, ValueError):
+            return defecto
+
     def _programar_aviso_por_hora(self):
         """Manda el resumen a una hora fija, con el TPV abierto.
 
@@ -104,15 +166,20 @@ class AppTPV(tk.Tk):
             c = cfg()
             activo = c.get("aviso_diario_activo", False)
             por_hora = c.get("aviso_diario_a_las", False)
-            hora = int(c.get("aviso_diario_hora", 21) or 21)
+            # El formulario guarda la hora como TEXTO: sin este int() la
+            # comparacion con ahora.hour daba siempre False y el aviso no
+            # salia nunca.
+            hora = self._hora_a_entero(c.get("aviso_diario_hora", 21))
         except Exception:
             activo, por_hora, hora = False, False, 21
 
         if activo and por_hora:
             ahora = datetime.now()
-            # Se dispara en la hora indicada. La guarda de "una vez por
-            # dia" que ya tiene el aviso evita que se repita cada 5 min.
-            if ahora.hour == hora:
+            # "Ya pasó la hora", no "es exactamente esa hora": con la
+            # comparacion exacta, si el TPV se abria a las 16 y la hora
+            # era 15, el aviso se perdia hasta el dia siguiente. La guarda
+            # de una vez por dia evita que se repita.
+            if ahora.hour >= hora:
                 # El motivo NO lleva la hora: si no, cambiar el horario
                 # en el mismo dia haria que salga un segundo mail.
                 self._aviso_diario("resumen del dia", "aviso_diario_a_las")
@@ -253,6 +320,7 @@ class AppTPV(tk.Tk):
         from precios_ui   import PreciosUI
         from ingreso_ui   import IngresoUI
         from auditoria_ui import AuditoriaUI, OfertasUI
+        from promos_grupo_ui import PromosGrupoUI
         from revision_ui import RevisionUI
         from reposicion_ui import ReposicionUI
         from compras_ui import ComprasUI
@@ -271,6 +339,7 @@ class AppTPV(tk.Tk):
             ("  A revisar ",  RevisionUI),
             ("  Auditoria ",  AuditoriaUI),
             ("  Ofertas   ",  OfertasUI),
+            ("  Promos    ",  PromosGrupoUI),
         ]:
             f = ttk.Frame(nb2)
             nb2.add(f, text=nombre)

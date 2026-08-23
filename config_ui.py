@@ -57,19 +57,41 @@ SECCIONES = [
         ("email_password",      "Contrasena",              "password"),
         ("email_remitente",     "Nombre remitente",        "text"),
     ]),
-    ("Stock y Alertas", [
-        ("stock_alerta_umbral",   "Umbral stock critico (unidades)", "int"),
-        ("permitir_venta_sin_stock", "Permitir vender sin stock registrado", "bool"),
-    ]),
-    ("Informe de stock por email", [
-        ("informe_stock_email_activo",        "Envio automatico activo",  "bool"),
-        ("informe_stock_email_destinatario",  "Email(s) — vacío usa el del aviso diario", "text"),
-        ("informe_stock_email_hora",          "Hora de envio (HH:MM)",    "text"),
-        ("informe_stock_email_solo_criticos", "Enviar solo stock critico (no todo el catalogo)", "bool"),
-    ]),
     ("Caja y Seguridad", [
         ("caja_clave_responsable", "Clave del responsable", "password"),
         ("caja_requiere_fondo",    "Pedir fondo al abrir caja", "bool"),
+    ]),
+    ("Stock, alertas y vencimientos", [
+        ("stock_alerta_umbral",      "Umbral de stock critico (unidades)",   "int"),
+        ("stock_alerta_dias_vto",    "Días de aviso por vencimiento (se puede pisar por producto)", "int"),
+        ("permitir_venta_sin_stock", "Permitir vender sin stock registrado", "bool"),
+    ]),
+    ("Avisos por email", [
+        # Un solo destinatario para TODOS los avisos: tenerlo repetido en
+        # tres secciones hacia que uno quedara vacio y el envio fallara.
+        ("aviso_diario_destinatario",   "Email(s) que reciben los avisos — separar con comas", "text"),
+        ("aviso_diario_activo",         "Activar el aviso diario",              "bool"),
+        ("aviso_diario_a_las",          "Mandarlo a una hora fija (recomendado)", "bool"),
+        ("aviso_diario_hora",           "¿A qué hora?",                         "hora"),
+        ("aviso_diario_dias_cobertura", "Reponer para cuántos días de venta",   "int"),
+        ("aviso_diario_al_abrir_app",   "También al abrir el sistema",          "bool"),
+        ("aviso_diario_al_abrir_caja",  "También al abrir la caja",             "bool"),
+        ("aviso_diario_al_cerrar_caja", "También al cerrar la caja",            "bool"),
+        ("informe_stock_email_activo",  "Además, informe de stock aparte",      "bool"),
+        ("informe_stock_email_hora",    "Hora del informe de stock (HH:MM)",    "text"),
+        ("informe_stock_email_solo_criticos", "Informe: solo lo critico, no todo el catálogo", "bool"),
+    ]),
+    ("Fotos de productos", [
+        ("buscador_fotos", "Buscador (bing / duckduckgo / google)", "text"),
+    ]),
+    ("Catálogo web", [
+        ("catalogo_web_activo",      "Sincronización activa",                "bool"),
+        ("catalogo_web_url",         "URL de la Apps Script Web App",        "text"),
+        ("catalogo_sync_auto",       "Sincronizar solo, cada tantas horas",  "bool"),
+        ("catalogo_sync_cada_horas", "¿Cada cuántas horas?",                 "int"),
+        ("web_solo_con_stock",       "Publicar solo lo que tiene stock",     "bool"),
+        ("web_solo_con_foto",        "Publicar solo lo que tiene foto",      "bool"),
+        ("web_excluir_categorias",   "Categorías que NO se publican (separar con comas)", "text"),
     ]),
     ("Etiquetas de gondola", [
         ("etiqueta_ancho_mm",        "Ancho de etiqueta (mm)",         "int"),
@@ -100,19 +122,6 @@ SECCIONES = [
         ("folleto_categoria_pagina_nueva",
          "Cada categoria en una hoja nueva (destildado = todo seguido)",       "bool"),
     ]),
-    ("Aviso diario por email", [
-        ("aviso_diario_activo",         "Activar el aviso diario",              "bool"),
-        ("aviso_diario_destinatario",   "Email(s) destinatario — separar con comas", "text"),
-        ("aviso_diario_a_las",   "A una hora fija (recomendado)",          "bool"),
-        ("aviso_diario_hora",    "¿A qué hora? (0 a 23)",                  "int"),
-        ("aviso_diario_al_abrir_app",   "También al abrir el sistema",          "bool"),
-        ("aviso_diario_al_abrir_caja",  "También al abrir la caja",             "bool"),
-        ("aviso_diario_al_cerrar_caja", "También al cerrar la caja",            "bool"),
-        ("aviso_diario_dias_cobertura", "Reponer para cuántos días de venta",   "int"),
-    ]),
-    ("Vencimientos", [
-        ("stock_alerta_dias_vto", "Dias de aviso (general, se puede pisar por producto)", "int"),
-    ]),
     ("Redondeo de precios", [
         ("redondeo_precios", "Redondear a multiplos de (0 = sin redondeo; 1, 10, 50, 100)", "int"),
         ("redondeo_modo", "Modo: cercano / arriba / abajo", "text"),
@@ -121,10 +130,6 @@ SECCIONES = [
         ("balanza_activa",   "Balanza activa",                    "bool"),
         ("balanza_puerto",   "Puerto (ej COM3)",                  "text"),
         ("balanza_baudrate", "Velocidad (baudrate, normalmente 9600)", "int"),
-    ]),
-    ("Catálogo web (pedidos de clientes)", [
-        ("catalogo_web_activo", "Sincronización activa",          "bool"),
-        ("catalogo_web_url",    "URL de la Apps Script Web App",  "text"),
     ]),
     ("Sistema", [
         ("moneda_simbolo",    "Simbolo de moneda",         "text"),
@@ -194,6 +199,18 @@ class ConfigUI(ttk.Frame):
                                 padx=(0, 16), pady=(6, 2))
                     self._entries[clave] = ("bool", var)
 
+                elif tipo == "hora":
+                    # Desplegable con las 24 horas: escribir "0 a 23" a
+                    # mano deja lugar a poner "15:30" o "3 PM", que el
+                    # sistema no entiende y hace que el aviso no salga.
+                    var = tk.StringVar()
+                    widget = ttk.Combobox(
+                        c, textvariable=var, width=10, state="readonly",
+                        values=[f"{h:02d}:00" for h in range(24)])
+                    widget.grid(row=j+2, column=1, sticky="w",
+                                padx=(0, 16), pady=(6, 2))
+                    self._entries[clave] = ("hora", var)
+
                 elif tipo == "password":
                     e = tk.Entry(c, font=F.normal, bg=C.superficie,
                                   fg=C.texto, relief="solid", bd=1,
@@ -217,6 +234,8 @@ class ConfigUI(ttk.Frame):
                     self._entries[clave] = (tipo, e)
 
         # Botones guardar / restaurar — en la barra fija de abajo
+        # Dos filas: siete botones en una sola se salian de la pantalla y
+        # el de sincronizar quedaba invisible.
         fb = self._barra_acciones
         btn(fb, "Guardar configuracion", variante="exito",
             comando=self._guardar).pack(side="left")
@@ -226,16 +245,21 @@ class ConfigUI(ttk.Frame):
         if not MODO_PRUEBA:
             btn(fb, "🧪  Abrir modo prueba", variante="neutro",
                 comando=self._abrir_modo_prueba).pack(side="left", padx=8)
-        btn(fb, "Probar impresora", variante="primario",
-            comando=self._probar_impresora).pack(side="right")
-        btn(fb, "Imprimir ticket de ejemplo", variante="primario",
-            comando=self._imprimir_ticket_prueba).pack(side="right", padx=(0,8))
-        btn(fb, "Probar balanza", variante="primario",
-            comando=self._probar_balanza).pack(side="right", padx=(0,8))
-        btn(fb, "✉  Probar los emails", variante="primario",
-            comando=self._probar_emails).pack(side="left", padx=4)
-        btn(fb, "Sincronizar catálogo ahora", variante="primario",
-            comando=self._sincronizar_catalogo).pack(side="right", padx=(0,8))
+
+        fb2 = tk.Frame(fb.master, bg=fb.cget("bg"))
+        fb2.pack(fill="x", pady=(6, 0))
+        tk.Label(fb2, text="Probar:", bg=fb.cget("bg"), fg=C.texto_suave,
+                 font=F.pequeña).pack(side="left", padx=(0, 6))
+        btn(fb2, "🖨 Impresora", variante="primario",
+            comando=self._probar_impresora).pack(side="left", padx=(0, 6))
+        btn(fb2, "🧾 Ticket de ejemplo", variante="primario",
+            comando=self._imprimir_ticket_prueba).pack(side="left", padx=(0, 6))
+        btn(fb2, "⚖ Balanza", variante="primario",
+            comando=self._probar_balanza).pack(side="left", padx=(0, 6))
+        btn(fb2, "✉ Emails", variante="primario",
+            comando=self._probar_emails).pack(side="left", padx=(0, 6))
+        btn(fb2, "🌐 Sincronizar catálogo web", variante="primario",
+            comando=self._sincronizar_catalogo).pack(side="left", padx=(0, 6))
 
     def _cargar_valores(self):
         c = cfg_mod.cargar()
@@ -243,6 +267,13 @@ class ConfigUI(ttk.Frame):
             valor = c.get(clave, "")
             if tipo == "bool":
                 widget.set(bool(valor))
+            elif tipo == "hora":
+                # En la config es un entero; en pantalla se muestra HH:00
+                try:
+                    h = int(str(valor).split(":")[0])
+                except (ValueError, IndexError):
+                    h = 21
+                widget.set(f"{max(0, min(23, h)):02d}:00")
             elif isinstance(widget, ttk.Combobox):
                 # .insert() no tira error en un Combobox "readonly" pero
                 # tampoco hace nada — hay que usar .set()
@@ -257,6 +288,13 @@ class ConfigUI(ttk.Frame):
         for clave, (tipo, widget) in self._entries.items():
             if tipo == "bool":
                 c[clave] = widget.get()
+            elif tipo == "hora":
+                # Se guarda como ENTERO: la comparacion con la hora del
+                # reloj tiene que ser numerica.
+                try:
+                    c[clave] = int(str(widget.get()).split(":")[0])
+                except (ValueError, IndexError):
+                    errores.append(f"{clave}: elegí una hora de la lista")
             elif tipo == "int":
                 try:
                     c[clave] = int(widget.get().strip())
