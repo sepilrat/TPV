@@ -560,6 +560,27 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     # Lo que piden los clientes y nunca se compro: no tiene stock que
     # medir, asi que no sale por ningun otro lado. Es justo lo que uno
     # necesita a mano antes de salir a comprar.
+    # Lo mas vendido del periodo: es lo que hay que tener siempre, y
+    # tenerlo en el mismo mail evita entrar al sistema para verlo.
+    try:
+        from repositorio import get_top_productos
+        from datetime import date as _d, timedelta as _td
+        _dias = int(c.get("aviso_top_dias", 30) or 0)
+        _cant = max(1, int(c.get("aviso_top_cantidad", 10) or 10))
+        _hasta = _d.today()
+        if _dias > 0:
+            _desde = (_hasta - _td(days=_dias - 1)).isoformat()
+            _rotulo = f"últimos {_dias} días"
+        else:
+            # 0 = desde siempre. Una fecha bien vieja alcanza y evita
+            # tener que preguntar cuando empezo el negocio.
+            _desde = "1900-01-01"
+            _rotulo = "histórico completo"
+        top = get_top_productos(_desde, _hasta.isoformat(), limit=_cant)
+    except Exception as _e:
+        logging.warning(f"No se pudo armar el top de productos: {_e}")
+        top, _rotulo = [], ""
+
     try:
         from repositorio import get_lista_compras
         pedidos = [x for x in get_lista_compras() if not x.get("comprado")]
@@ -578,12 +599,15 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     except Exception as _e:
         logging.warning(f"No se pudo calcular lo facturado del dia: {_e}")
         dia = None
-    if (not vtos and not reponer and not pedidos
+    # El top cuenta como contenido: un mail que resume la semana sirve
+    # aunque no haya nada urgente que avisar.
+    if (not vtos and not reponer and not pedidos and not top
             and not (dia and dia.get("tickets"))):
         if not forzar:
             from config import set as cfg_set
             cfg_set(_clave_envio, hoy)
         return False, "Nada para avisar: sin vencimientos ni stock critico."
+
 
     partes = []
     if dia and dia.get("facturado"):
@@ -630,6 +654,45 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
                         f"<td style='color:{color};font-weight:bold'>{cuando}</td></tr>")
         html.append("</table>")
 
+    # El resumen del dia va PRIMERO: es lo que uno abre a mirar.
+    if dia and dia.get("tickets"):
+        html.append(
+            f"<h3>Hoy</h3>"
+            f"<table border='0' cellpadding='6' cellspacing='0' "
+            f"style='border-collapse:collapse;font-size:14px'>"
+            f"<tr><td>Facturado</td><td align='right'><b>"
+            f"$ {dia['facturado']:,.2f}</b></td>"
+            f"<td style='padding-left:18px'>{dia['tickets']} ticket(s)</td></tr>"
+            f"<tr><td>Cobrado</td><td align='right'>"
+            f"$ {dia['cobrado']:,.2f}</td><td style='padding-left:18px'>"
+            f"efectivo $ {dia['efectivo']:,.2f} · tarjeta "
+            f"$ {dia['tarjeta']:,.2f} · QR $ {dia['qr']:,.2f}</td></tr>")
+        if dia.get("fiado"):
+            html.append(
+                f"<tr><td>Quedó fiado</td><td align='right' "
+                f"style='color:#B23B2E'>$ {dia['fiado']:,.2f}</td>"
+                f"<td style='padding-left:18px'>deuda total "
+                f"$ {dia['deuda_total']:,.2f}</td></tr>")
+        html.append(
+            f"<tr><td>Ganancia</td><td align='right'>"
+            f"$ {dia['ganancia']:,.2f}</td><td></td></tr></table>")
+
+    if top:
+        html.append(
+            f"<h3>Lo más vendido ({_rotulo})</h3>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>"
+            "<tr style='background:#DBEAFE'><th align='left'>Producto</th>"
+            "<th align='right'>Unidades</th>"
+            "<th align='right'>Facturado</th></tr>")
+        for x in top:
+            html.append(
+                f"<tr><td>{x.get('descripcion','')}</td>"
+                f"<td align='right'><b>{x.get('cant_vendida') or 0:g}</b></td>"
+                f"<td align='right'>$ "
+                f"{x.get('total_vendido') or 0:,.2f}</td></tr>")
+        html.append("</table>")
+
     if pedidos:
         html.append(
             "<h3>Para comprar</h3>"
@@ -654,29 +717,6 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         if len(pedidos) > 25:
             html.append(f"<p style='font-size:13px'>…y "
                         f"{len(pedidos) - 25} más.</p>")
-
-    # El resumen del dia va PRIMERO: es lo que uno abre a mirar.
-    if dia and dia.get("tickets"):
-        html.append(
-            f"<h3>Hoy</h3>"
-            f"<table border='0' cellpadding='6' cellspacing='0' "
-            f"style='border-collapse:collapse;font-size:14px'>"
-            f"<tr><td>Facturado</td><td align='right'><b>"
-            f"$ {dia['facturado']:,.2f}</b></td>"
-            f"<td style='padding-left:18px'>{dia['tickets']} ticket(s)</td></tr>"
-            f"<tr><td>Cobrado</td><td align='right'>"
-            f"$ {dia['cobrado']:,.2f}</td><td style='padding-left:18px'>"
-            f"efectivo $ {dia['efectivo']:,.2f} · tarjeta "
-            f"$ {dia['tarjeta']:,.2f} · QR $ {dia['qr']:,.2f}</td></tr>")
-        if dia.get("fiado"):
-            html.append(
-                f"<tr><td>Quedó fiado</td><td align='right' "
-                f"style='color:#B23B2E'>$ {dia['fiado']:,.2f}</td>"
-                f"<td style='padding-left:18px'>deuda total "
-                f"$ {dia['deuda_total']:,.2f}</td></tr>")
-        html.append(
-            f"<tr><td>Ganancia</td><td align='right'>"
-            f"$ {dia['ganancia']:,.2f}</td><td></td></tr></table>")
 
     if reponer:
         total_inv = sum(r["costo_reposicion"] for r in reponer)
@@ -711,6 +751,39 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         if len(reponer) > 40:
             html.append(f"<p>…y {len(reponer) - 40} mas. La lista completa "
                         f"esta en Productos → Reposicion.</p>")
+
+    # Listado de stock, si se pidió. Va al final: es lo mas largo y lo
+    # que menos se mira, pero tenerlo evita mandar un segundo mail.
+    if c.get("aviso_incluir_stock_completo"):
+        try:
+            from repositorio import get_informe_stock
+            _umbral = float(c.get("stock_alerta_umbral", 5) or 5)
+            filas_stock = get_informe_stock(solo_criticos=False,
+                                            umbral=_umbral)
+        except Exception as _e:
+            logging.warning(f"No se pudo armar el listado de stock: {_e}")
+            filas_stock = []
+        if filas_stock:
+            html.append(
+                "<h3>Stock completo</h3>"
+                "<table border='0' cellpadding='6' cellspacing='0' "
+                "style='border-collapse:collapse;font-size:13px'>"
+                "<tr style='background:#DBEAFE'><th align='left'>Producto</th>"
+                "<th align='right'>Stock</th><th align='right'>Precio</th>"
+                "<th align='right'>Invertido</th></tr>")
+            for x in filas_stock[:200]:
+                st = x.get("stock") or 0
+                estilo = " style='color:#B23B2E'" if st <= 0 else ""
+                html.append(
+                    f"<tr{estilo}><td>{x.get('descripcion','')}</td>"
+                    f"<td align='right'>{st:g}</td>"
+                    f"<td align='right'>$ {x.get('precio_base') or 0:,.2f}</td>"
+                    f"<td align='right'>$ "
+                    f"{(x.get('costo_ultimo') or 0) * st:,.2f}</td></tr>")
+            html.append("</table>")
+            if len(filas_stock) > 200:
+                html.append(f"<p style='font-size:13px'>…y "
+                            f"{len(filas_stock) - 200} productos más.</p>")
 
     html.append("</body></html>")
 

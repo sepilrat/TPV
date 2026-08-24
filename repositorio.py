@@ -174,6 +174,7 @@ def get_proveedores_ultimo_por_producto() -> dict:
 def get_productos(filtro="", categoria_id=None, solo_activos=True) -> list:
     q = """
         SELECT p.id, p.codigo, p.descripcion, c.nombre as categoria,
+               p.categoria_id,
                p.precio_base, p.costo_ultimo, p.margen_pct, p.activo,
                p.ignorar_alerta, p.vendido_por_peso, p.imagen_url, p.marca,
                COALESCE(p.publicar_web, 1) as publicar_web,
@@ -1664,6 +1665,55 @@ def promo_grupo_faltante(carrito: list) -> list:
     return out
 
 
+def promo_cercana(producto_id: int, cantidad_actual: float) -> dict | None:
+    """La promo del producto a la que le falta poco, si hay alguna.
+
+    Sirve para avisarle al cajero apenas escanea: "con 2 mas se lleva
+    cada uno a $3.200". Es una venta que se pierde solo porque nadie lo
+    dijo — el cliente no tiene como enterarse.
+    """
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    with get_connection() as conn:
+        prod = conn.execute(
+            "SELECT precio_base FROM productos WHERE id = ?",
+            (producto_id,)).fetchone()
+        if not prod:
+            return None
+        precio_base = float(prod["precio_base"] or 0)
+        filas = [dict(r) for r in conn.execute("""
+            SELECT cantidad_minima, precio_unitario, tipo_descuento,
+                   porcentaje_descuento, descripcion
+            FROM promociones
+            WHERE producto_id = ? AND activa = 1
+              AND cantidad_minima > ?
+              AND (fecha_desde IS NULL OR fecha_desde <= ?)
+              AND (fecha_hasta IS NULL OR fecha_hasta >= ?)
+            ORDER BY cantidad_minima
+        """, (producto_id, cantidad_actual, hoy, hoy)).fetchall()]
+
+    for f in filas:
+        falta = f["cantidad_minima"] - cantidad_actual
+        # Mas de 3 de diferencia ya no es un empujoncito: es otra compra
+        # y avisarlo solo hace ruido.
+        if falta > 3:
+            continue
+        if f["tipo_descuento"] == "porcentaje" and f["porcentaje_descuento"]:
+            precio = precio_base * (1 - float(f["porcentaje_descuento"]) / 100)
+        else:
+            precio = float(f["precio_unitario"] or 0)
+        if precio <= 0 or precio >= precio_base:
+            continue
+        return {
+            "falta": falta,
+            "cantidad_minima": f["cantidad_minima"],
+            "precio_promo": precio,
+            "precio_base": precio_base,
+            "ahorro_total": (precio_base - precio) * f["cantidad_minima"],
+            "descripcion": f.get("descripcion") or "",
+        }
+    return None
+
+
 def get_precio_con_promo(producto_id: int, cantidad: float) -> tuple[float, bool]:
     """Retorna (precio_unitario, promo_aplicada). Si hay varias promos
     aplicables por la cantidad, usa la que dé el precio más bajo —
@@ -1999,6 +2049,120 @@ def aplicar_recargo(precio, producto=None, momento=None) -> tuple[float, dict]:
         return float(precio), None
     final = float(precio) * (1 + float(r["porcentaje"]) / 100)
     return redondear_precio(final), r
+
+
+def previsualizar_fusion(id_destino: int, ids_origen: list) -> dict:
+    """Qué va a pasar si se fusionan, SIN tocar nada.
+
+    Fusionar toca ventas ya hechas y no se puede deshacer: hay que poder
+    mirar el resultado antes de apretar el botón.
+    """
+    ids_origen = [int(x) for x in ids_origen if int(x) != int(id_destino)]
+    if not ids_origen:
+        raise ValueError("Elegí al menos un producto para absorber.")
+
+    with get_connection() as conn:
+        dest = conn.execute("SELECT * FROM productos WHERE id = ?",
+                            (id_destino,)).fetchone()
+        if not dest:
+            raise ValueError("El producto destino no existe.")
+        dest = dict(dest)
+        marcas = ",".join("?" * len(ids_origen))
+        origen = [dict(r) for r in conn.execute(
+            f"SELECT * FROM productos WHERE id IN ({marcas})",
+            ids_origen).fetchall()]
+
+        def _stock(pid):
+            return conn.execute(
+                "SELECT COALESCE(SUM(cantidad_restante),0) FROM lotes "
+                "WHERE producto_id = ?", (pid,)).fetchone()[0] or 0
+
+        def _ventas(pid):
+            return conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(cantidad),0) "
+                "FROM detalle_ventas WHERE producto_id = ?", (pid,)).fetchone()
+
+        dest["stock"] = _stock(id_destino)
+        n_d, u_d = _ventas(id_destino)
+        for o in origen:
+            o["stock"] = _stock(o["id"])
+            o["ventas"], o["unidades"] = _ventas(o["id"])
+
+    return {
+        "destino": dest,
+        "origen": origen,
+        "stock_final": dest["stock"] + sum(o["stock"] for o in origen),
+        "ventas_a_mover": sum(o["ventas"] for o in origen),
+        "unidades_a_mover": sum(o["unidades"] for o in origen),
+        "codigos": [o["codigo"] for o in origen if o.get("codigo")],
+    }
+
+
+def fusionar_productos(id_destino: int, ids_origen: list,
+                       responsable: str = "") -> dict:
+    """Junta varios productos en uno, sumando el stock.
+
+    El mismo producto cargado tres veces con nombres distintos parte el
+    stock y la rentabilidad en tres, y ninguno de los tres dice la
+    verdad.
+
+    Los productos absorbidos NO se borran: se desactivan. Borrarlos
+    dejaria las ventas viejas apuntando a la nada, y el historico dejaria
+    de cuadrar.
+    """
+    ids_origen = [int(x) for x in ids_origen if int(x) != int(id_destino)]
+    if not ids_origen:
+        raise ValueError("Elegí al menos un producto para absorber.")
+
+    resumen = previsualizar_fusion(id_destino, ids_origen)
+    marcas = ",".join("?" * len(ids_origen))
+    movidos = {}
+
+    with get_connection() as conn:
+        # Se recorren TODAS las tablas con producto_id: si mañana se
+        # agrega una nueva, entra sola y no queda apuntando a un producto
+        # desactivado.
+        tablas = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        for t in tablas:
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})")]
+            if "producto_id" not in cols or t == "productos":
+                continue
+            try:
+                n = conn.execute(
+                    f"UPDATE OR IGNORE {t} SET producto_id = ? "
+                    f"WHERE producto_id IN ({marcas})",
+                    [id_destino] + ids_origen).rowcount
+                if n:
+                    movidos[t] = n
+                # UPDATE OR IGNORE saltea los que chocarían con una clave
+                # única (ej: el mismo producto ya en esa lista): esas
+                # filas sobrantes se borran.
+                conn.execute(
+                    f"DELETE FROM {t} WHERE producto_id IN ({marcas})",
+                    ids_origen)
+            except Exception as e:
+                logging.warning(f"Fusion: no se pudo mover {t}: {e}")
+
+        # Los absorbidos se desactivan y se les deja dicho a dónde fueron
+        conn.execute(f"""
+            UPDATE productos
+               SET activo = 0,
+                   descripcion = descripcion || ' (unificado)',
+                   modificado_en = datetime('now','localtime')
+             WHERE id IN ({marcas})
+        """, ids_origen)
+        conn.commit()
+
+    registrar_bitacora(
+        "Fusion de productos", responsable or "sin identificar",
+        f"{len(ids_origen)} producto(s) unificados en "
+        f"«{resumen['destino']['descripcion']}»: "
+        + ", ".join(o["descripcion"] for o in resumen["origen"]),
+        0, id_destino)
+
+    resumen["movidos"] = movidos
+    return resumen
 
 
 def duplicar_producto(producto_id: int, descripcion_nueva: str,

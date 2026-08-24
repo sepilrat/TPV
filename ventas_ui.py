@@ -358,13 +358,23 @@ class VentasUI(ttk.Frame):
         # Descuento
         fd = tk.Frame(s, bg=C.superficie)
         fd.pack(fill="x", padx=16)
-        lbl(fd, "Descuento %", variante="suave", bg=C.superficie).pack(side="left")
-        self.entry_desc = tk.Entry(fd, width=6, justify="center",
+        lbl(fd, "Descuento", variante="suave", bg=C.superficie).pack(side="left")
+        self.entry_desc = tk.Entry(fd, width=8, justify="center",
                                     font=F.normal, bg=C.superficie,
                                     fg=C.texto, relief="solid", bd=1)
         self.entry_desc.insert(0, "0")
         self.entry_desc.pack(side="left", padx=8)
         self.entry_desc.bind("<KeyRelease>", lambda e: self._actualizar_totales())
+
+        # % o $: redondear "$500 de descuento" a un porcentaje da numeros
+        # con decimales que despues no cierran contra lo que se cobro.
+        self.desc_modo = tk.StringVar(value="%")
+        for txt in ("%", "$"):
+            tk.Radiobutton(fd, text=txt, variable=self.desc_modo, value=txt,
+                           bg=C.superficie, fg=C.texto, font=F.normal,
+                           selectcolor=C.superficie,
+                           activebackground=C.superficie,
+                           command=self._actualizar_totales).pack(side="left")
 
         ttk.Separator(s, orient="horizontal").pack(fill="x", padx=16, pady=6)
 
@@ -627,10 +637,32 @@ class VentasUI(ttk.Frame):
             f = faltan[0]
             extra = (f"Con {f['falta']:g} más entra «{f['nombre']}»")
             txt = f"{txt}   ·   {extra}" if txt else extra
+
+        # Promos del PRODUCTO (no del grupo): "llevando 3 sale $3.200".
+        # Es lo que hay que decirle al cliente en el momento, porque el
+        # no tiene como enterarse.
+        if not txt:
+            from repositorio import promo_cercana
+            for i in self.carrito:
+                pid = i.get("producto_id")
+                if not pid:
+                    continue
+                try:
+                    pc = promo_cercana(pid, i["cantidad"])
+                except Exception:
+                    continue
+                if pc:
+                    txt = (f"Con {pc['falta']:g} más de "
+                           f"«{i['descripcion'][:22]}» → "
+                           f"$ {pc['precio_promo']:,.0f} c/u "
+                           f"(lleva {pc['cantidad_minima']:g})")
+                    break
         if hasattr(self, "lbl_promo_grupo"):
             self.lbl_promo_grupo.config(
                 text=f"  🏷  {txt}  " if txt else "",
-                bg=C.exito if avisos else (C.advertencia if faltan else C.bg))
+                # Verde = la promo YA entro. Naranja = falta poco, hay que
+                # ofrecerla. Sin el naranja el aviso pasa desapercibido.
+                bg=C.exito if avisos else C.advertencia)
             if txt:
                 self.lbl_promo_grupo.grid(row=4, column=0, sticky="ew",
                                           pady=(0, 6))
@@ -902,13 +934,33 @@ class VentasUI(ttk.Frame):
         if kids:
             self.tree.see(kids[-1])
 
-    def _actualizar_totales(self):
-        try:    desc_pct = float(self.entry_desc.get() or 0)
-        except ValueError: desc_pct = 0.0
+    def _texto_descuento(self, desc_pct):
+        """El descuento tal como se cargó: en $ o en %."""
+        bruto = sum(i["subtotal"] for i in self.carrito)
+        monto = self._descuento_monto(bruto)
+        if getattr(self, "desc_modo", None) and self.desc_modo.get() == "$":
+            return f"  —  Descuento $ {monto:,.2f}"
+        return f"  —  Descuento {desc_pct:.1f}%  ($ {monto:,.2f})"
 
-        bruto   = sum(i["subtotal"] for i in self.carrito)
-        total   = bruto * (1 - desc_pct / 100)
-        n_items = sum(i["cantidad"] for i in self.carrito)
+    def _descuento_monto(self, bruto):
+        """Cuántos pesos de descuento, sea que se cargó en % o en $."""
+        try:
+            valor = float((self.entry_desc.get() or "0").replace(",", "."))
+        except ValueError:
+            return 0.0
+        if valor <= 0:
+            return 0.0
+        if getattr(self, "desc_modo", None) and self.desc_modo.get() == "$":
+            # Nunca mas que el total: un descuento mayor daria total
+            # negativo y la caja quedaria pidiendo plata.
+            return min(valor, bruto)
+        return bruto * min(valor, 100.0) / 100
+
+    def _actualizar_totales(self):
+        bruto      = sum(i["subtotal"] for i in self.carrito)
+        desc_monto = self._descuento_monto(bruto)
+        total      = max(0.0, bruto - desc_monto)
+        n_items    = sum(i["cantidad"] for i in self.carrito)
 
         self.lbl_total.config(text=f"$ {total:,.2f}")
         self.lbl_items.config(
@@ -965,9 +1017,9 @@ class VentasUI(ttk.Frame):
             self.frame_cliente.pack_forget()
 
     def _on_recibido_key(self, event):
-        try:    desc_pct = float(self.entry_desc.get() or 0)
-        except ValueError: desc_pct = 0.0
-        total = sum(i["subtotal"] for i in self.carrito) * (1 - desc_pct / 100)
+        bruto = sum(i["subtotal"] for i in self.carrito)
+        desc_monto = self._descuento_monto(bruto)
+        total = max(0.0, bruto - desc_monto)
         try:
             recibido = float(self.entry_recibido.get().replace(",", "."))
             vuelto = recibido - total
@@ -981,9 +1033,9 @@ class VentasUI(ttk.Frame):
             self.lbl_vuelto.config(text="")
 
     def _on_mixto_key(self, event):
-        try:    desc_pct = float(self.entry_desc.get() or 0)
-        except ValueError: desc_pct = 0.0
-        total = sum(i["subtotal"] for i in self.carrito) * (1 - desc_pct / 100)
+        bruto = sum(i["subtotal"] for i in self.carrito)
+        desc_monto = self._descuento_monto(bruto)
+        total = max(0.0, bruto - desc_monto)
         try:
             efectivo = float(self.entry_efectivo_mixto.get().replace(",", "."))
             resto = total - efectivo
@@ -1089,10 +1141,13 @@ class VentasUI(ttk.Frame):
             toast(self, "El carrito esta vacio", error=True)
             return self.foco_scanner()
 
-        try:    desc_pct = float(self.entry_desc.get() or 0)
-        except ValueError: desc_pct = 0.0
-
-        total  = sum(i["subtotal"] for i in self.carrito) * (1 - desc_pct / 100)
+        bruto      = sum(i["subtotal"] for i in self.carrito)
+        desc_monto = self._descuento_monto(bruto)
+        total      = max(0.0, bruto - desc_monto)
+        # La venta guarda el descuento como PORCENTAJE: se convierte el
+        # importe a su equivalente para no cambiar el historico ni los
+        # informes que ya lo leen asi.
+        desc_pct   = (desc_monto / bruto * 100) if bruto else 0.0
         metodo = self.metodo.get()
         # Reparto del pago entre medios. None = todo al metodo elegido.
         desglose = None
@@ -1101,6 +1156,12 @@ class VentasUI(ttk.Frame):
         if metodo in ("efectivo", "tarjeta", "qr"):
             label = next((l for l, v in METODOS_PAGO if v == metodo), metodo)
             texto_confirmar = f"Total: $ {total:,.2f}\nMetodo: {label}"
+            if desc_monto:
+                if self.desc_modo.get() == "$":
+                    texto_confirmar += f"\nDescuento: $ {desc_monto:,.2f}"
+                else:
+                    texto_confirmar += (f"\nDescuento: {desc_pct:.1f}%  "
+                                        f"($ {desc_monto:,.2f})")
             if metodo == "efectivo":
                 try:
                     recibido = float(self.entry_recibido.get().replace(",", "."))
@@ -1109,10 +1170,12 @@ class VentasUI(ttk.Frame):
                                            f"\nVuelto: $ {recibido - total:,.2f}")
                 except ValueError:
                     pass
+            # default="yes": Enter confirma. Es lo que se hace en el 99%
+            # de las ventas y ahorra mover la mano al mouse.
             if not messagebox.askyesno(
                     "Confirmar cobro",
                     f"{texto_confirmar}\n\nConfirmar?",
-                    parent=self):
+                    parent=self, default="yes"):
                 return self.foco_scanner()
             metodo_db  = metodo
             cliente_id = None
@@ -1227,7 +1290,9 @@ class VentasUI(ttk.Frame):
                  font=("Segoe UI", 26, "bold"),
                  bg=C.superficie, fg=C.primario).pack(pady=(20, 0))
         lbl(s, f"{_fmt_cant(sum(i['cantidad'] for i in self.carrito))} items"
-            + (f"  —  Descuento {desc_pct:.0f}%" if desc_pct else ""),
+            # Se muestra como se cargo: si se puso "$500", ver "3,7%" en
+            # el cartel confunde al cajero y al cliente.
+            + (self._texto_descuento(desc_pct) if desc_pct else ""),
             variante="suave", bg=C.superficie).pack()
 
         ttk.Separator(s, orient="horizontal").pack(fill="x", padx=20, pady=12)
@@ -1787,11 +1852,14 @@ class VentasUI(ttk.Frame):
             if not c.get("impresora_activa", False):
                 return
             from tkinter import messagebox
+            # default="no": la mayoria de las ventas no lleva ticket, y
+            # con F12-Enter-Enter la venta se cierra sin imprimir. Para
+            # imprimir hay que decir que si a proposito.
             if messagebox.askyesno(
                     "Ticket",
                     "Imprimir ticket?",
                     parent=self,
-                    default="yes"):
+                    default="no"):
                 from impresion import imprimir_ticket
                 ok, msg = imprimir_ticket(venta_id)
                 if not ok:
@@ -1806,6 +1874,10 @@ class VentasUI(ttk.Frame):
         self.lbl_cant.config(text="x1")
         self.entry_desc.delete(0, "end")
         self.entry_desc.insert(0, "0")
+        # El modo vuelve a %: dejar "$" puesto de la venta anterior es
+        # como se cobran de menos $500 sin que nadie lo note.
+        if hasattr(self, "desc_modo"):
+            self.desc_modo.set("%")
         self._sel_metodo("efectivo")
         self._actualizar_tabla()
         self._actualizar_totales()

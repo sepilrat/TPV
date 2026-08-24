@@ -77,9 +77,9 @@ SECCIONES = [
         ("aviso_diario_al_abrir_app",   "También al abrir el sistema",          "bool"),
         ("aviso_diario_al_abrir_caja",  "También al abrir la caja",             "bool"),
         ("aviso_diario_al_cerrar_caja", "También al cerrar la caja",            "bool"),
-        ("informe_stock_email_activo",  "Además, informe de stock aparte",      "bool"),
-        ("informe_stock_email_hora",    "Hora del informe de stock (HH:MM)",    "text"),
-        ("informe_stock_email_solo_criticos", "Informe: solo lo critico, no todo el catálogo", "bool"),
+        ("aviso_incluir_stock_completo", "Incluir el listado de stock completo", "bool"),
+        ("aviso_top_dias",     "Lo más vendido: de cuántos días (0 = histórico completo)", "int"),
+        ("aviso_top_cantidad", "Lo más vendido: cuántos productos mostrar",  "int"),
     ]),
     ("Fotos de productos", [
         ("buscador_fotos", "Buscador (bing / duckduckgo / google)", "text"),
@@ -91,7 +91,7 @@ SECCIONES = [
         ("catalogo_sync_cada_horas", "¿Cada cuántas horas?",                 "int"),
         ("web_solo_con_stock",       "Publicar solo lo que tiene stock",     "bool"),
         ("web_solo_con_foto",        "Publicar solo lo que tiene foto",      "bool"),
-        ("web_excluir_categorias",   "Categorías que NO se publican (separar con comas)", "text"),
+        ("web_excluir_categorias",   "Categorías que NO se publican",        "categorias"),
     ]),
     ("Etiquetas de gondola", [
         ("etiqueta_ancho_mm",        "Ancho de etiqueta (mm)",         "int"),
@@ -138,6 +138,122 @@ SECCIONES = [
         ("logs_max",          "Maximos logs a conservar",  "int"),
     ]),
 ]
+
+
+class _SelectorCategorias(tk.Frame):
+    """Casillas con las categorías que existen de verdad.
+
+    Guarda IDS, no nombres: renombrar una categoría no rompe el filtro, y
+    si se borra una simplemente deja de aparecer.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=C.superficie)
+        self._vars = {}
+        self._lbl = tk.Label(self, text="", bg=C.superficie, fg=C.texto_suave,
+                             font=F.pequeña, anchor="w")
+        self._lbl.pack(anchor="w")
+        btn(self, "Elegir categorías…", variante="neutro",
+            comando=self._abrir).pack(anchor="w", pady=(2, 0))
+        self._recargar()
+
+    def _recargar(self):
+        from repositorio import get_categorias
+        try:
+            self._cats = list(get_categorias())
+        except Exception:
+            self._cats = []
+        self._pintar()
+
+    def _pintar(self):
+        elegidas = [c["nombre"] for c in self._cats
+                    if self._vars.get(c["id"])]
+        if not elegidas:
+            self._lbl.config(text="Se publican todas", fg=C.texto_suave)
+        else:
+            txt = ", ".join(elegidas[:3])
+            if len(elegidas) > 3:
+                txt += f" y {len(elegidas) - 3} más"
+            self._lbl.config(text=f"No se publica: {txt}", fg=C.peligro)
+
+    def _abrir(self):
+        self._recargar()
+        d = tk.Toplevel(self)
+        d.title("Categorías que no se publican")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        d.geometry("420x460")
+
+        tk.Label(d, text="Categorías que NO se publican", bg=C.superficie,
+                 fg=C.texto, font=F.titulo, anchor="w").pack(
+            anchor="w", padx=18, pady=(16, 2))
+        tk.Label(d, text="Lo que quede sin marcar sí se publica.",
+                 bg=C.superficie, fg=C.texto_suave, font=F.pequeña,
+                 anchor="w").pack(anchor="w", padx=18)
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x", pady=14)
+
+        cont = tk.Frame(d, bg=C.superficie, highlightthickness=1,
+                        highlightbackground=C.borde)
+        cont.pack(fill="both", expand=True, padx=18, pady=(12, 6))
+        canvas = tk.Canvas(cont, bg=C.superficie, highlightthickness=0)
+        sb = ttk.Scrollbar(cont, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas, bg=C.superficie)
+        inner.bind("<Configure>", lambda e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        temp = {}
+        for cat in self._cats:
+            v = tk.BooleanVar(value=bool(self._vars.get(cat["id"])))
+            temp[cat["id"]] = v
+            tk.Checkbutton(inner, text=cat["nombre"][:34], variable=v,
+                           bg=C.superficie, fg=C.texto, font=F.normal,
+                           anchor="w", selectcolor=C.superficie,
+                           activebackground=C.superficie).pack(
+                anchor="w", padx=10, pady=1)
+
+        def aceptar():
+            self._vars = {k: v.get() for k, v in temp.items()}
+            self._pintar()
+            d.destroy()
+
+        btn(pie, "Aceptar", variante="exito", comando=aceptar).pack(
+            side="left", padx=(18, 6))
+        btn(pie, "Cancelar", variante="neutro", comando=d.destroy).pack(
+            side="left")
+        d.bind("<Escape>", lambda ev: d.destroy())
+
+    def set_seleccion(self, valor):
+        """Acepta lista de ids, texto con comas (formato viejo) o vacío."""
+        self._recargar()
+        self._vars = {}
+        if not valor:
+            self._pintar()
+            return
+        if isinstance(valor, str):
+            partes = [x.strip() for x in valor.split(",") if x.strip()]
+            # Formato viejo: eran NOMBRES. Se convierten a ids una vez.
+            por_nombre = {c["nombre"].lower(): c["id"] for c in self._cats}
+            for x in partes:
+                if x.isdigit():
+                    self._vars[int(x)] = True
+                elif x.lower() in por_nombre:
+                    self._vars[por_nombre[x.lower()]] = True
+        else:
+            for x in valor:
+                try:
+                    self._vars[int(x)] = True
+                except (TypeError, ValueError):
+                    pass
+        self._pintar()
+
+    def get_seleccion(self):
+        return [cid for cid, marcado in self._vars.items() if marcado]
 
 
 class ConfigUI(ttk.Frame):
@@ -198,6 +314,16 @@ class ConfigUI(ttk.Frame):
                     widget.grid(row=j+2, column=1, sticky="w",
                                 padx=(0, 16), pady=(6, 2))
                     self._entries[clave] = ("bool", var)
+
+                elif tipo == "categorias":
+                    # Se eligen de la lista real: escribir el nombre a
+                    # mano se rompe en silencio apenas se renombra una
+                    # categoria, y nadie se entera hasta que la pagina
+                    # muestra algo que no debia.
+                    var = _SelectorCategorias(c)
+                    var.grid(row=j+2, column=1, sticky="w",
+                             padx=(0, 16), pady=(6, 2))
+                    self._entries[clave] = ("categorias", var)
 
                 elif tipo == "hora":
                     # Desplegable con las 24 horas: escribir "0 a 23" a
@@ -267,6 +393,8 @@ class ConfigUI(ttk.Frame):
             valor = c.get(clave, "")
             if tipo == "bool":
                 widget.set(bool(valor))
+            elif tipo == "categorias":
+                widget.set_seleccion(valor)
             elif tipo == "hora":
                 # En la config es un entero; en pantalla se muestra HH:00
                 try:
@@ -288,6 +416,10 @@ class ConfigUI(ttk.Frame):
         for clave, (tipo, widget) in self._entries.items():
             if tipo == "bool":
                 c[clave] = widget.get()
+            elif tipo == "categorias":
+                # Se guardan los IDS, no los nombres: renombrar una
+                # categoria no tiene por que romper el filtro.
+                c[clave] = widget.get_seleccion()
             elif tipo == "hora":
                 # Se guarda como ENTERO: la comparacion con la hora del
                 # reloj tiene que ser numerica.

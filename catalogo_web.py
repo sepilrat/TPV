@@ -66,8 +66,23 @@ def _filtrar_publicables(productos: list) -> list:
     c = cfg()
     solo_con_stock = c.get("web_solo_con_stock", False)
     solo_con_foto = c.get("web_solo_con_foto", False)
-    excluir_txt = (c.get("web_excluir_categorias") or "").strip()
-    excluir = {x.strip().lower() for x in excluir_txt.split(",") if x.strip()}
+    # Se comparan IDS: renombrar una categoria no rompe el filtro. Se
+    # acepta el formato viejo (nombres separados por coma) por si quedo
+    # cargado de antes.
+    crudo = c.get("web_excluir_categorias") or []
+    excluir_ids, excluir_nombres = set(), set()
+    if isinstance(crudo, str):
+        for x in (y.strip() for y in crudo.split(",") if y.strip()):
+            if x.isdigit():
+                excluir_ids.add(int(x))
+            else:
+                excluir_nombres.add(x.lower())
+    else:
+        for x in crudo:
+            try:
+                excluir_ids.add(int(x))
+            except (TypeError, ValueError):
+                pass
 
     out = []
     for p in productos:
@@ -78,7 +93,9 @@ def _filtrar_publicables(productos: list) -> list:
             continue
         if solo_con_foto and not (p.get("imagen_url") or p.get("imagen_local")):
             continue
-        if excluir and (p.get("categoria") or "").lower() in excluir:
+        if excluir_ids and p.get("categoria_id") in excluir_ids:
+            continue
+        if excluir_nombres and (p.get("categoria") or "").lower() in excluir_nombres:
             continue
         out.append(p)
     return out

@@ -116,6 +116,15 @@ DEFAULTS = {
     "redondeo_modo":           "cercano",
 
     # Informe de stock automático por email
+    # El informe de stock ya no es un envio aparte con su propio horario:
+    # era otro mail a otra hora con datos que se solapaban con el aviso
+    # diario. Ahora es una seccion mas del unico informe.
+    "aviso_incluir_stock_completo":       False,
+    # Ventana del ranking de lo mas vendido. 0 = desde siempre.
+    # Una semana muestra lo que rota ahora; el historico completo muestra
+    # que sostiene el negocio. Son preguntas distintas.
+    "aviso_top_dias":                     30,
+    "aviso_top_cantidad":                 10,
     "informe_stock_email_activo":         False,
     "informe_stock_email_destinatario":   "",
     "informe_stock_email_hora":           "08:00",   # HH:MM, 24hs

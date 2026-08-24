@@ -18,12 +18,62 @@ JS_INTERCEPTAR_CLICKS = """
 (function() {
     if (window._tpv_click_instalado) return;
     window._tpv_click_instalado = true;
-    document.addEventListener('click', function(e) {
-        var img = e.target.closest('img');
-        if (img && img.src && img.src.indexOf('http') === 0) {
-            e.preventDefault();
-            e.stopPropagation();
-            window.pywebview.api.elegir_foto(img.src);
+
+    // Bing y Google guardan la URL de la foto GRANDE en atributos del
+    // enlace que envuelve la miniatura. Si se toma el src del <img> se
+    // termina guardando la miniatura de 200px, que en la etiqueta se ve
+    // pixelada.
+    function urlGrande(el) {
+        var a = el.closest('a');
+        if (a) {
+            // Bing: JSON en el atributo m, con la url en "murl"
+            var m = a.getAttribute('m');
+            if (m) {
+                try {
+                    var o = JSON.parse(m.replace(/&quot;/g, '"'));
+                    if (o.murl) { return o.murl; }
+                } catch (err) { /* sigue con las otras formas */ }
+            }
+            // Google y otros: la url viene como parametro imgurl
+            var href = a.getAttribute('href') || '';
+            var mm = href.match(/[?&](imgurl|mediaurl)=([^&]+)/i);
+            if (mm) { return decodeURIComponent(mm[2]); }
+        }
+        var img = el.closest('img') ||
+                  (el.querySelector ? el.querySelector('img') : null);
+        if (img) {
+            // data-src: la url real cuando la imagen todavia no cargo
+            return img.getAttribute('data-src') || img.src || '';
+        }
+        return '';
+    }
+
+    function manejar(e) {
+        // Se busca hacia arriba desde donde se toco: Bing envuelve cada
+        // resultado en varias capas y el click casi nunca cae justo
+        // sobre el <img>.
+        var nodo = e.target;
+        for (var i = 0; i < 6 && nodo; i++) {
+            var u = urlGrande(nodo);
+            if (u && u.indexOf('http') === 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                window.pywebview.api.elegir_foto(u);
+                return;
+            }
+            nodo = nodo.parentElement;
+        }
+    }
+
+    // capture=true para llegar antes que el visor propio del buscador,
+    // que es el que abria la imagen grande en vez de dejar elegirla.
+    document.addEventListener('click', manejar, true);
+    document.addEventListener('mousedown', function(e) {
+        // Bing abre su visor en mousedown: hay que frenarlo antes
+        var nodo = e.target;
+        for (var i = 0; i < 6 && nodo; i++) {
+            if (urlGrande(nodo)) { e.stopPropagation(); return; }
+            nodo = nodo.parentElement;
         }
     }, true);
 })();

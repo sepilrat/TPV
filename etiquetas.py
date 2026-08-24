@@ -67,6 +67,16 @@ def _get_precios_producto(producto_id: int, precio_base: float,
             "label":    "Precio unitario",
         })
 
+    # Una sola linea por cantidad: si hay dos promos cargadas para la
+    # misma cantidad, la etiqueta mostraba las dos con precios distintos.
+    # Se queda la mas barata, que es la que aplica en la caja.
+    mejor_por_cant = {}
+    for _p in precios:
+        _c = _p["cantidad"]
+        if _c not in mejor_por_cant or _p["precio"] < mejor_por_cant[_c]["precio"]:
+            mejor_por_cant[_c] = _p
+    precios = list(mejor_por_cant.values())
+
     # Ordenar de menor a mayor precio (el más barato primero)
     precios.sort(key=lambda x: x["precio"])
     return precios

@@ -182,6 +182,8 @@ class ProductosUI(ttk.Frame):
             comando=self._duplicar).pack(side="left", padx=6)
         btn(ac, "🌐 Publicar sí/no", variante="neutro",
             comando=self._toggle_publicar).pack(side="left", padx=6)
+        btn(ac, "🔗 Unificar", variante="neutro",
+            comando=self._unificar).pack(side="left", padx=6)
         # Todo lo que termina en papel, junto: eran botones sueltos
         # repartidos entre dos filas y la fila se salia de la pantalla.
         self.btn_imprimir = btn(ac, "🖨  Imprimir…", variante="exito",
@@ -755,6 +757,128 @@ class ProductosUI(ttk.Frame):
         # para que un reintento posterior valga la pena.
         imagenes._URLS_FALLIDAS.clear()
         self._refrescar()
+
+    def _unificar(self):
+        """Junta varios productos repetidos en uno solo."""
+        from repositorio import previsualizar_fusion, fusionar_productos
+        from fiado_ui import pedir_autorizacion
+
+        sel = self.tree_prod.selection()
+        ids = []
+        for iid in sel:
+            try:
+                ids.append(int(iid))
+            except ValueError:
+                pass
+        if len(ids) < 2:
+            messagebox.showinfo(
+                "Unificar",
+                "Elegí 2 o más productos con Ctrl.\n\n"
+                "El primero que marques va a ser el que queda; los otros "
+                "se suman a ese.", parent=self)
+            return
+
+        d = tk.Toplevel(self)
+        d.title("Unificar productos")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        _centrar(d, 620, 520)
+
+        lbl(d, "Unificar productos repetidos", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+        lbl(d, "El mismo producto cargado varias veces parte el stock y "
+               "la rentabilidad. Esto los junta en uno.",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x", pady=14)
+
+        lbl(d, "¿Cuál queda?", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(14, 2))
+        from repositorio import get_producto_completo
+        prods = [get_producto_completo(i) for i in ids]
+        prods = [p for p in prods if p]
+        nombres = [f"{p['descripcion'][:44]}  ({p.get('codigo') or 's/cod'})"
+                   for p in prods]
+        v_dest = tk.StringVar(value=nombres[0])
+        ttk.Combobox(d, textvariable=v_dest, state="readonly",
+                     values=nombres).pack(fill="x", padx=18)
+
+        detalle = tk.Text(d, height=12, font=F.mono, bg=C.bg, fg=C.texto,
+                          relief="solid", bd=1, wrap="word")
+        detalle.pack(fill="both", expand=True, padx=18, pady=(12, 6))
+
+        def _previsualizar(*_a):
+            detalle.delete("1.0", "end")
+            dest = prods[nombres.index(v_dest.get())]
+            otros = [p["id"] for p in prods if p["id"] != dest["id"]]
+            try:
+                r = previsualizar_fusion(dest["id"], otros)
+            except Exception as exc:
+                detalle.insert("end", str(exc))
+                return
+            detalle.insert("end", f"QUEDA:\n  {r['destino']['descripcion']}\n")
+            detalle.insert("end", f"  código {r['destino'].get('codigo') or '—'}"
+                                  f"   ·   $ {r['destino'].get('precio_base') or 0:,.2f}"
+                                  f"   ·   stock {r['destino']['stock']:g}\n\n")
+            detalle.insert("end", "SE SUMAN A ESE:\n")
+            for o in r["origen"]:
+                detalle.insert("end",
+                               f"  {o['descripcion'][:40]}\n"
+                               f"      stock {o['stock']:g}"
+                               f"   ·   {o['ventas']} venta(s)"
+                               f"   ·   código {o.get('codigo') or '—'}\n")
+            detalle.insert("end", "\nRESULTADO:\n")
+            detalle.insert("end", f"  stock final: {r['stock_final']:g}\n")
+            detalle.insert("end", f"  se mueven {r['ventas_a_mover']} venta(s)"
+                                  f" al producto que queda\n")
+            if r["codigos"]:
+                detalle.insert("end",
+                               f"\n  Los códigos {', '.join(r['codigos'][:4])} "
+                               f"dejan de existir: si están en la góndola, "
+                               f"hay que reimprimir esas etiquetas.\n")
+            detalle.insert("end", "\n  Los productos absorbidos NO se borran: "
+                                  "quedan desactivados, para que el histórico "
+                                  "siga cuadrando.")
+
+        d.after(50, _previsualizar)
+        for w in d.winfo_children():
+            if isinstance(w, ttk.Combobox):
+                w.bind("<<ComboboxSelected>>", _previsualizar)
+
+        def confirmar():
+            dest = prods[nombres.index(v_dest.get())]
+            otros = [p["id"] for p in prods if p["id"] != dest["id"]]
+            if not messagebox.askyesno(
+                    "Unificar",
+                    f"Se van a unificar {len(otros)} producto(s) en "
+                    f"«{dest['descripcion'][:34]}».\n\n"
+                    "Esto NO se puede deshacer.\n\n¿Sigo?",
+                    parent=d, default="no"):
+                return
+            resp = pedir_autorizacion(
+                d, "Unificar productos mueve ventas ya registradas.")
+            if not resp:
+                return
+            try:
+                r = fusionar_productos(dest["id"], otros, resp)
+            except Exception as exc:
+                messagebox.showerror("Unificar", str(exc), parent=d)
+                return
+            d.destroy()
+            self._refrescar_productos()
+            messagebox.showinfo(
+                "Listo",
+                f"«{r['destino']['descripcion']}» quedó con stock "
+                f"{r['stock_final']:g}.\n\n"
+                f"Se movieron {r['ventas_a_mover']} venta(s).",
+                parent=self)
+
+        btn(pie, "Unificar", variante="peligro",
+            comando=confirmar).pack(side="left", padx=(18, 6))
+        btn(pie, "Cancelar", variante="neutro",
+            comando=d.destroy).pack(side="left")
+        d.bind("<Escape>", lambda ev: d.destroy())
 
     def _toggle_publicar(self):
         """Saca o vuelve a poner productos en el catálogo web."""
