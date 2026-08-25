@@ -581,6 +581,39 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         logging.warning(f"No se pudo armar el top de productos: {_e}")
         top, _rotulo = [], ""
 
+    # Margen: lo que se vende a perdida, al costo, o por debajo de lo que
+    # pide el rubro. Usa el costo del ULTIMO lote con stock, asi que si el
+    # proveedor subio y no se toco el precio, aparece aca.
+    try:
+        from repositorio import alertas_margen
+        alertas = alertas_margen()
+    except Exception as _e:
+        logging.warning(f"No se pudieron calcular las alertas de margen: {_e}")
+        alertas = {"perdida": [], "al_costo": [], "bajo_categoria": []}
+
+    # Precios que BAJARON. Es la red de seguridad contra un cambio que
+    # nadie aprobo: si algo toca un precio de menos, aparece aca al dia
+    # siguiente en vez de descubrirse cuando el margen no cierra.
+    try:
+        from repositorio import get_connection as _gc
+        from datetime import date as _fd, timedelta as _ftd
+        _desde_b = (_fd.today() - _ftd(days=1)).isoformat()
+        with _gc() as _c:
+            bajas = [dict(r) for r in _c.execute("""
+                SELECT p.descripcion, h.precio_viejo, h.precio_nuevo,
+                       h.fecha, COALESCE(h.motivo, '') as motivo,
+                       p.costo_ultimo
+                FROM historial_precios h
+                JOIN productos p ON p.id = h.producto_id
+                WHERE date(h.fecha) >= date(?)
+                  AND h.precio_nuevo < h.precio_viejo
+                ORDER BY (h.precio_viejo - h.precio_nuevo) DESC
+                LIMIT 30
+            """, (_desde_b,)).fetchall()]
+    except Exception as _e:
+        logging.warning(f"No se pudieron leer las bajas de precio: {_e}")
+        bajas = []
+
     try:
         from repositorio import get_lista_compras
         pedidos = [x for x in get_lista_compras() if not x.get("comprado")]
@@ -601,7 +634,8 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         dia = None
     # El top cuenta como contenido: un mail que resume la semana sirve
     # aunque no haya nada urgente que avisar.
-    if (not vtos and not reponer and not pedidos and not top
+    if (not vtos and not reponer and not pedidos and not top and not bajas
+            and not any(alertas.values())
             and not (dia and dia.get("tickets"))):
         if not forzar:
             from config import set as cfg_set
@@ -612,6 +646,10 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     partes = []
     if dia and dia.get("facturado"):
         partes.append(f"$ {dia['facturado']:,.0f} facturado")
+    if alertas.get("perdida"):
+        partes.append(f"⚠ {len(alertas['perdida'])} a PÉRDIDA")
+    if bajas:
+        partes.append(f"⚠ {len(bajas)} precio(s) BAJARON")
     if pedidos:
         partes.append(f"{len(pedidos)} pedido(s) de clientes")
     if criticos:
@@ -676,6 +714,90 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         html.append(
             f"<tr><td>Ganancia</td><td align='right'>"
             f"$ {dia['ganancia']:,.2f}</td><td></td></tr></table>")
+
+    _perd = alertas.get("perdida", [])
+    _costo = alertas.get("al_costo", [])
+    _bajo = alertas.get("bajo_categoria", [])
+
+    if _perd or _costo:
+        html.append(
+            "<h3 style='color:#B23B2E'>⚠ Se está vendiendo a pérdida o al "
+            "costo</h3>"
+            "<p style='font-size:13px;color:#6B7280'>El costo es el del "
+            "último lote con stock: si el proveedor subió y no se tocó el "
+            "precio, aparece acá.</p>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>"
+            "<tr style='background:#FEE2E2'><th align='left'>Producto</th>"
+            "<th align='right'>Precio</th><th align='right'>Costo</th>"
+            "<th align='right'>Margen</th><th align='right'>Stock</th></tr>")
+        for x in (_perd + _costo)[:25]:
+            estilo = (" style='background:#FEE2E2'"
+                      if x["margen"] < 0 else "")
+            html.append(
+                f"<tr{estilo}><td>{x['descripcion']}</td>"
+                f"<td align='right'>$ {x['precio_base']:,.2f}</td>"
+                f"<td align='right'>$ {x['costo']:,.2f}</td>"
+                f"<td align='right'><b>{x['margen']:.1f}%</b></td>"
+                f"<td align='right'>{x['stock']:g}</td></tr>")
+        html.append("</table>")
+        if len(_perd + _costo) > 25:
+            html.append(f"<p style='font-size:13px'>…y "
+                        f"{len(_perd + _costo) - 25} más.</p>")
+
+    if _bajo:
+        html.append(
+            "<h3>Por debajo del margen del rubro</h3>"
+            "<p style='font-size:13px;color:#6B7280'>Ganan, pero menos de lo "
+            "que rinde su categoría.</p>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>"
+            "<tr style='background:#FEF3C7'><th align='left'>Producto</th>"
+            "<th align='left'>Rubro</th><th align='right'>Margen</th>"
+            "<th align='right'>Debería</th>"
+            "<th align='right'>Precio sugerido</th></tr>")
+        for x in _bajo[:20]:
+            html.append(
+                f"<tr><td>{x['descripcion']}</td>"
+                f"<td>{x.get('categoria') or '—'}</td>"
+                f"<td align='right'>{x['margen']:.0f}%</td>"
+                f"<td align='right'>{x['objetivo']:.0f}%</td>"
+                f"<td align='right'><b>$ "
+                f"{x['precio_sugerido']:,.2f}</b></td></tr>")
+        html.append("</table>")
+        if len(_bajo) > 20:
+            html.append(f"<p style='font-size:13px'>…y {len(_bajo) - 20} "
+                        f"más.</p>")
+
+    if bajas:
+        html.append(
+            "<h3 style='color:#B23B2E'>⚠ Precios que bajaron</h3>"
+            "<p style='font-size:13px;color:#6B7280'>Revisá que sean "
+            "cambios que hiciste a propósito.</p>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>"
+            "<tr style='background:#FEE2E2'><th align='left'>Producto</th>"
+            "<th align='right'>Antes</th><th align='right'>Ahora</th>"
+            "<th align='right'>Baja</th>"
+            "<th align='right'>Margen que queda</th></tr>")
+        for b in bajas:
+            viejo = b["precio_viejo"] or 0
+            nuevo = b["precio_nuevo"] or 0
+            caida = ((viejo - nuevo) / viejo * 100) if viejo else 0
+            costo = b["costo_ultimo"] or 0
+            margen = ((nuevo - costo) / costo * 100) if costo else None
+            # Debajo del costo es lo grave: se vende a perdida
+            estilo = " style='background:#FEE2E2'" if (
+                margen is not None and margen < 0) else ""
+            html.append(
+                f"<tr{estilo}><td>{b['descripcion']}</td>"
+                f"<td align='right'>$ {viejo:,.2f}</td>"
+                f"<td align='right'><b>$ {nuevo:,.2f}</b></td>"
+                f"<td align='right'>-{caida:.0f}%</td>"
+                f"<td align='right'>"
+                + (f"{margen:.0f}%" if margen is not None else "—")
+                + "</td></tr>")
+        html.append("</table>")
 
     if top:
         html.append(

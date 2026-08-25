@@ -7,6 +7,7 @@ Soporta: efectivo, tarjeta, mixto, QR, cuenta corriente, cuenta corriente.
 import tkinter as tk
 from tkinter import ttk, messagebox
 import logging
+import sys
 import imagenes
 from styles import C, F, btn, lbl, card, tabla, toast, header_seccion, scrollable
 from repositorio import (resolver_codigo, get_precio_con_promo,
@@ -516,9 +517,20 @@ class VentasUI(ttk.Frame):
                 if not prod:
                     return self.foco_scanner()
 
-        if not prod:
+        # Precio en cero: el producto existe pero se regalaria. Se avisa
+        # con la misma fuerza que si no existiera, porque la consecuencia
+        # es la misma — el cliente se lo lleva sin pagarlo.
+        if prod and not (prod.get("precio_base") or 0) > 0:
             self._flash(error=True)
-            toast(self, f"No se encontro: {codigo}", error=True)
+            self._alertar_precio_cero(prod)
+            return self.foco_scanner()
+
+        if not prod:
+            # Un toast se va solo y en el ritmo de la caja nadie lo mira:
+            # el producto se termina yendo sin cobrar. Esto FRENA hasta
+            # que alguien lo cierre a proposito.
+            self._flash(error=True)
+            self._alertar_no_encontrado(codigo)
             return self.foco_scanner()
         # Sin stock se AVISA, no se frena: hay productos que se venden
         # sin haber pasado nunca por ingreso de stock, y dejar al cliente
@@ -610,6 +622,164 @@ class VentasUI(ttk.Frame):
         self._actualizar_tabla()
         self._actualizar_totales()
         self.foco_scanner()
+
+    def _alertar_precio_cero(self, prod):
+        """El producto existe pero está en $0: no se puede vender así."""
+        try:
+            if sys.platform == "win32":
+                import winsound
+                winsound.Beep(420, 250)
+                winsound.Beep(300, 350)
+            else:
+                self.bell()
+        except Exception:
+            pass
+
+        d = tk.Toplevel(self)
+        d.title("Producto sin precio")
+        d.configure(bg=C.peligro)
+        d.grab_set()
+        d.transient(self.winfo_toplevel())
+        w, h = 540, 310
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//3)}")
+
+        tk.Label(d, text="⚠", bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 42, "bold")).pack(pady=(16, 0))
+        tk.Label(d, text="ESTE PRODUCTO ESTÁ EN $ 0", bg=C.peligro,
+                 fg=C.blanco, font=("Segoe UI", 16, "bold")).pack()
+        tk.Label(d, text=prod["descripcion"][:44], bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 12)).pack(pady=(6, 0))
+        tk.Label(d, text="NO se agregó a la venta.\n"
+                         "Poné el precio antes de venderlo.",
+                 bg=C.peligro, fg=C.blanco, font=("Segoe UI", 11),
+                 justify="center").pack(pady=(12, 0))
+
+        v_precio = tk.StringVar()
+        f = tk.Frame(d, bg=C.peligro)
+        f.pack(pady=(10, 0))
+        tk.Label(f, text="Precio:  $", bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 12)).pack(side="left")
+        e = tk.Entry(f, textvariable=v_precio, font=("Segoe UI", 15, "bold"),
+                     width=10, justify="center", relief="flat")
+        e.pack(side="left", padx=6, ipady=3)
+
+        def guardar(_ev=None):
+            """Se puede resolver acá mismo: el cliente está esperando."""
+            try:
+                nuevo = float(v_precio.get().replace(",", "."))
+            except ValueError:
+                return
+            if nuevo <= 0:
+                return
+            try:
+                from repositorio import set_precio_base
+                set_precio_base(prod["id"], nuevo)
+            except Exception:
+                return
+            d.destroy()
+            toast(self, f"Precio cargado: $ {nuevo:,.2f}. Escaneá de nuevo.")
+            self.foco_scanner()
+
+        def cerrar(_ev=None):
+            d.destroy()
+            self.foco_scanner()
+
+        e.bind("<Return>", guardar)
+        d.bind("<Escape>", cerrar)
+        pie = tk.Frame(d, bg=C.peligro)
+        pie.pack(side="bottom", pady=16)
+        tk.Button(pie, text="Guardar precio  (Enter)", command=guardar,
+                  font=("Segoe UI", 11, "bold"), bg=C.blanco, fg=C.peligro,
+                  relief="flat", padx=16, pady=6,
+                  cursor="hand2").pack(side="left", padx=6)
+        tk.Button(pie, text="Cancelar  (Esc)", command=cerrar,
+                  font=("Segoe UI", 11), bg=C.peligro, fg=C.blanco,
+                  relief="solid", bd=1, padx=14, pady=6,
+                  cursor="hand2").pack(side="left", padx=6)
+        e.focus_set()
+
+    def _alertar_no_encontrado(self, codigo):
+        """Cartel que frena la venta: el producto no está en el sistema.
+
+        Tres avisos a la vez porque en la caja se mira poco: sonido,
+        pantalla roja y un botón que hay que apretar. Si esto pasara
+        desapercibido, el cliente se lleva el producto sin pagarlo.
+        """
+        # Sonido: es lo único que se percibe sin mirar la pantalla
+        try:
+            if sys.platform == "win32":
+                import winsound
+                # Dos tonos graves: distintos del beep del lector, que es
+                # agudo y corto. Se tiene que oír "mal".
+                winsound.Beep(420, 250)
+                winsound.Beep(300, 350)
+            else:
+                self.bell()
+        except Exception:
+            try:
+                self.bell()
+            except Exception:
+                pass
+
+        d = tk.Toplevel(self)
+        d.title("Producto no encontrado")
+        d.configure(bg=C.peligro)
+        d.grab_set()
+        d.transient(self.winfo_toplevel())
+        w, h = 520, 300
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//3)}")
+
+        tk.Label(d, text="⚠", bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 44, "bold")).pack(pady=(18, 0))
+        tk.Label(d, text="ESTE PRODUCTO NO ESTÁ CARGADO",
+                 bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 16, "bold")).pack()
+        tk.Label(d, text=f"Código: {codigo}", bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 13)).pack(pady=(6, 0))
+        tk.Label(d, text="NO se agregó a la venta.\n"
+                         "Si el cliente lo lleva, cobralo aparte "
+                         "o cargalo primero.",
+                 bg=C.peligro, fg=C.blanco, font=("Segoe UI", 11),
+                 justify="center").pack(pady=(12, 0))
+
+        def cerrar(_ev=None):
+            d.destroy()
+            self.foco_scanner()
+
+        def anotarlo():
+            """Lo deja en la lista de compras para cargarlo después.
+
+            En medio de la caja no se puede parar a dar de alta un
+            producto, pero si no queda anotado se olvida y vuelve a pasar
+            lo mismo mañana.
+            """
+            try:
+                from repositorio import agregar_a_comprar
+                agregar_a_comprar(f"CARGAR AL SISTEMA — código {codigo}",
+                                  "", "", "Escaneado en caja, no existía")
+                d.destroy()
+                toast(self, "Anotado en «Comprar» para cargarlo después")
+            except Exception:
+                d.destroy()
+            self.foco_scanner()
+
+        pie = tk.Frame(d, bg=C.peligro)
+        pie.pack(side="bottom", pady=18)
+        b1 = tk.Button(pie, text="Entendido  (Enter)", command=cerrar,
+                       font=("Segoe UI", 11, "bold"), bg=C.blanco,
+                       fg=C.peligro, relief="flat", padx=18, pady=6,
+                       cursor="hand2")
+        b1.pack(side="left", padx=6)
+        tk.Button(pie, text="Anotar para cargarlo", command=anotarlo,
+                  font=("Segoe UI", 11), bg=C.peligro, fg=C.blanco,
+                  relief="solid", bd=1, padx=14, pady=6,
+                  cursor="hand2").pack(side="left", padx=6)
+
+        d.bind("<Return>", cerrar)
+        d.bind("<Escape>", cerrar)
+        b1.focus_set()
 
     def _aplicar_promos_grupo(self):
         """Recalcula las promos combinables sobre todo el carrito."""

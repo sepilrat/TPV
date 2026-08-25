@@ -209,6 +209,21 @@ def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
     alta cierra el circuito de una: se crea, se imprime la etiqueta y ya
     se escanea.
     """
+    # Un producto a $0 se escanea, entra al carrito y el cliente se lo
+    # lleva gratis: nadie mira un renglon que dice cero en el apuro.
+    if not descripcion or not str(descripcion).strip():
+        raise ValueError("El producto necesita una descripción.")
+    try:
+        precio_base = float(precio_base or 0)
+    except (TypeError, ValueError):
+        raise ValueError("El precio no es un número.")
+    if precio_base <= 0:
+        raise ValueError(
+            "El precio de venta no puede ser 0.\n\n"
+            "Si todavía no sabés cuánto va a salir, cargalo con un precio "
+            "provisorio y marcalo para revisar: un producto a $0 se vende "
+            "gratis sin que nadie lo note.")
+
     precio_base = redondear_precio(precio_base)
     codigo = (codigo or "").strip()
     generar = not es_ean_valido(codigo)
@@ -243,6 +258,21 @@ def actualizar_producto(pid, descripcion, codigo, categoria_id,
     # El redondeo es una regla del negocio, no una accion aparte: si
     # se aplica solo en algunas pantallas, el catalogo termina mitad
     # redondeado y mitad con decimales.
+    # Un producto a $0 se escanea, entra al carrito y el cliente se lo
+    # lleva gratis: nadie mira un renglon que dice cero en el apuro.
+    if not descripcion or not str(descripcion).strip():
+        raise ValueError("El producto necesita una descripción.")
+    try:
+        precio_base = float(precio_base or 0)
+    except (TypeError, ValueError):
+        raise ValueError("El precio no es un número.")
+    if precio_base <= 0:
+        raise ValueError(
+            "El precio de venta no puede ser 0.\n\n"
+            "Si todavía no sabés cuánto va a salir, cargalo con un precio "
+            "provisorio y marcalo para revisar: un producto a $0 se vende "
+            "gratis sin que nadie lo note.")
+
     precio_base = redondear_precio(precio_base)
     with get_connection() as conn:
         _anotar_cambio_precio(conn, pid, precio_base)
@@ -2224,6 +2254,67 @@ def toggle_publicar_web(ids, publicar=None) -> int:
                 [int(bool(publicar))] + ids)
         conn.commit()
         return cur.rowcount
+
+
+def alertas_margen() -> dict:
+    """Productos con problemas de margen, agrupados por gravedad.
+
+    Tres niveles distintos, de peor a mejor:
+      - a perdida: el precio esta por DEBAJO del costo
+      - al costo: menos de 5% de margen, practicamente regalado
+      - bajo la categoria: gana, pero menos de lo que deberia
+
+    Se usa el costo del ULTIMO lote con stock, no el costo_ultimo del
+    producto: es lo que realmente se esta por vender. Si el proveedor
+    subio y todavia no se toco el precio, aparece aca.
+    """
+    with get_connection() as conn:
+        filas = [dict(r) for r in conn.execute("""
+            SELECT p.id, p.descripcion, p.precio_base,
+                   p.costo_ultimo, p.margen_pct,
+                   c.nombre as categoria, c.margen_pct as margen_cat,
+                   COALESCE((
+                       SELECT l.costo_unitario FROM lotes l
+                       WHERE l.producto_id = p.id AND l.cantidad_restante > 0
+                         AND COALESCE(l.costo_unitario,0) > 0
+                       ORDER BY l.fecha_ingreso DESC, l.id DESC LIMIT 1
+                   ), p.costo_ultimo) as costo_real,
+                   COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
+                              WHERE l.producto_id = p.id), 0) as stock
+            FROM productos p
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            WHERE COALESCE(p.activo,1) = 1
+              AND COALESCE(p.precio_base,0) > 0
+        """).fetchall()]
+
+    perdida, al_costo, bajo_cat = [], [], []
+    for f in filas:
+        costo = float(f["costo_real"] or 0)
+        if costo <= 0:
+            continue
+        precio = float(f["precio_base"] or 0)
+        margen = (precio - costo) / costo * 100
+        f["costo"] = costo
+        f["margen"] = margen
+        # Cuanto se pierde o se deja de ganar con el stock que hay
+        f["impacto"] = abs(precio - costo) * float(f["stock"] or 0)
+
+        if precio < costo:
+            perdida.append(f)
+        elif margen < 5:
+            al_costo.append(f)
+        else:
+            objetivo = f["margen_cat"]
+            if objetivo is not None and margen < float(objetivo) - 5:
+                f["objetivo"] = float(objetivo)
+                # Cuanto habria que cobrar para llegar al margen del rubro
+                f["precio_sugerido"] = costo * (1 + float(objetivo) / 100)
+                bajo_cat.append(f)
+
+    for lista in (perdida, al_costo, bajo_cat):
+        lista.sort(key=lambda x: -x["impacto"])
+
+    return {"perdida": perdida, "al_costo": al_costo, "bajo_categoria": bajo_cat}
 
 
 def productos_bajo_costo(ids=None) -> list:

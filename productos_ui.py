@@ -1298,15 +1298,52 @@ class ProductosUI(ttk.Frame):
             e_precio.insert(0, f"{nuevo_precio:.2f}")
             precio_manual["valor"] = False  # esto es un recalculo, no algo que tipeó el usuario
 
-        e_margen.bind("<FocusOut>", _recalcular_precio)
-        e_margen.bind("<Return>", _recalcular_precio)
-        e_margen.bind("<KeyRelease>", _recalcular_precio)
-        e_costo.bind("<FocusOut>", _recalcular_precio)
-        e_costo.bind("<Return>", _recalcular_precio)
-        e_costo.bind("<KeyRelease>", _recalcular_precio)
-        lbl(s, "El precio de venta se recalcula solo con el margen y el costo "
-              "de arriba — si querés un precio distinto, escribilo después de "
-              "tocar estos dos campos.",
+        # SOLO el margen recalcula el precio, y solo si de verdad se lo
+        # cambió. Antes el costo también lo hacía, y con <FocusOut>
+        # alcanzaba con pasar por el campo: se entraba a corregir el
+        # nombre de un producto y salía con otro precio de venta.
+        # El margen que se mostraba al abrir. Se guarda en una lista para
+        # poder actualizarlo desde adentro de las funciones.
+        margen_ref = [e_margen.get().strip()]
+
+        def _si_cambio_margen(event=None):
+            """Recalcula solo si el margen REALMENTE cambió.
+
+            Sin esto alcanzaba con pasar por el campo (FocusOut) para que
+            el precio se reescribiera: se entraba a corregir el nombre y
+            se salía con otro precio de venta.
+            """
+            actual = e_margen.get().strip()
+            if actual and actual != margen_ref[0]:
+                margen_ref[0] = actual
+                _recalcular_precio(event)
+
+        e_margen.bind("<FocusOut>", _si_cambio_margen)
+        e_margen.bind("<Return>", _si_cambio_margen)
+        e_margen.bind("<KeyRelease>", _si_cambio_margen)
+
+        # El costo solo actualiza el MARGEN que se muestra: corregir un
+        # costo mal cargado no puede cambiar lo que se le cobra al cliente.
+        def _costo_actualiza_margen(event=None):
+            try:
+                costo = float(e_costo.get().strip().replace(",", "."))
+                precio = float(e_precio.get().strip().replace(",", "."))
+            except ValueError:
+                return
+            if costo > 0:
+                nuevo = f"{(precio - costo) / costo * 100:.2f}"
+                e_margen.delete(0, "end")
+                e_margen.insert(0, nuevo)
+                # Se anota como "el margen actual": si no, este cambio
+                # automatico haria creer que el usuario lo edito y el
+                # precio se recalcularia al salir del campo.
+                margen_ref[0] = nuevo
+
+        e_costo.bind("<FocusOut>", _costo_actualiza_margen)
+        e_costo.bind("<KeyRelease>", _costo_actualiza_margen)
+        lbl(s, "El precio de venta se recalcula solo si cambiás el MARGEN. "
+              "Tocar el costo actualiza el margen que se muestra, pero no "
+              "cambia el precio.",
             variante="suave", bg=C.superficie,
             wraplength=460, justify="left").pack(padx=20, anchor="w", pady=(2,0))
 

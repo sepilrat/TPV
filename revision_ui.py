@@ -453,6 +453,21 @@ class RevisionUI(ttk.Frame):
                 recalculando[0] = False
             _pintar_aviso()
 
+        def _solo_recalcular_margen(*_a):
+            """Costo → margen mostrado, sin tocar el precio.
+
+            Se marca `recalculando` para que el set() del margen no
+            dispare la cadena que reescribiria el precio.
+            """
+            if recalculando[0]:
+                return
+            costo, precio = _num("costo"), _num("precio")
+            if costo and precio is not None:
+                recalculando[0] = True
+                v["margen"].set(f"{(precio - costo) / costo * 100:.2f}")
+                recalculando[0] = False
+            _pintar_aviso()
+
         def _al_cambiar_margen(*_a):
             """Margen → precio. NO vuelve a escribir en el campo margen.
 
@@ -495,7 +510,11 @@ class RevisionUI(ttk.Frame):
 
         v["precio"].trace_add("write", _al_cambiar_precio)
         v["margen"].trace_add("write", _al_cambiar_margen)
-        v["costo"].trace_add("write", _al_cambiar_precio)
+        # El COSTO solo actualiza el margen mostrado. NO recalcula el
+        # precio: corregir un costo mal cargado no puede cambiar solo lo
+        # que se le cobra al cliente. Un fiambre a $20.000 el kilo se
+        # bajaba a $8.200 con solo tipear el costo real.
+        v["costo"].trace_add("write", _solo_recalcular_margen)
         _pintar_aviso()
 
         # ── Guardar ───────────────────────────────────────────────────
