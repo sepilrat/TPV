@@ -1712,6 +1712,11 @@ def aplicar_promos_combinables(carrito: list) -> list:
             base = float(i["precio_unitario"])
             if g["tipo"] == "descuento_pct":
                 nuevo = base * (1 - float(g["valor"]) / 100)
+            elif g["tipo"] == "descuento_monto":
+                # Tantos pesos menos por unidad. Es lo que sirve cuando el
+                # grupo mezcla precios distintos: un precio fijo unico
+                # dejaria sin descuento a lo barato y regalaria lo caro.
+                nuevo = max(0.0, base - float(g["valor"]))
             else:
                 nuevo = float(g["valor"])
             # Nunca se sube el precio: si el producto ya estaba mas barato
@@ -2611,6 +2616,62 @@ def recalcular_precios_categoria(categoria_id: int) -> int:
         """, (categoria_id, categoria_id))
         conn.commit()
         return cur.rowcount
+
+
+def aplicar_promocion_bulk_tipo(ids, escalas, descripcion=None,
+                                desde=None, hasta=None, tipo="pct"):
+    """Como aplicar_promocion_bulk pero con tres formas de calcular.
+
+    tipo: "pct"   -> el valor es un % de descuento
+          "monto" -> el valor es cuantos $ menos por unidad
+          "fijo"  -> el valor ES el precio final por unidad
+
+    El monto y el precio fijo son los que faltaban: "llevando 3 a $3.200"
+    no se puede expresar con un porcentaje si los productos valen
+    distinto.
+    """
+    if not ids or not escalas:
+        return 0
+    with get_connection() as conn:
+        marcas = ",".join("?" * len(ids))
+        filas = [dict(r) for r in conn.execute(
+            f"SELECT id, precio_base FROM productos WHERE id IN ({marcas})",
+            ids).fetchall()]
+
+        # Se borran las promos previas de esas mismas cantidades: si no,
+        # conviven dos precios para "llevando 3" y gana cualquiera.
+        cants = sorted({int(c) for c, _ in escalas})
+        marcas_c = ",".join("?" * len(cants))
+        conn.execute(
+            f"DELETE FROM promociones WHERE producto_id IN ({marcas}) "
+            f"AND cantidad_minima IN ({marcas_c})", ids + cants)
+
+        n = 0
+        for f in filas:
+            base = float(f["precio_base"] or 0)
+            if base <= 0:
+                continue
+            for cant_min, valor in escalas:
+                if tipo == "monto":
+                    precio = round(base - float(valor), 2)
+                elif tipo == "fijo":
+                    precio = round(float(valor), 2)
+                else:
+                    precio = round(base * (1 - float(valor) / 100.0), 2)
+                # Nunca por encima del precio de lista ni negativo: una
+                # promo que sube el precio no es una promo.
+                if precio <= 0 or precio >= base:
+                    continue
+                conn.execute("""
+                    INSERT INTO promociones
+                        (producto_id, cantidad_minima, precio_unitario,
+                         fecha_desde, fecha_hasta, activa, descripcion)
+                    VALUES (?,?,?,?,?,1,?)
+                """, (f["id"], int(cant_min), precio, desde, hasta,
+                      descripcion))
+                n += 1
+        conn.commit()
+    return n
 
 
 def aplicar_promocion_bulk(ids: list, escalas: list[tuple[int, float]],

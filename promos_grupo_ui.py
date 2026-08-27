@@ -79,6 +79,8 @@ class PromosGrupoUI(ttk.Frame):
         for i, g in enumerate(self._filas):
             if g["tipo"] == "descuento_pct":
                 precio = f"-{g['valor']:g}%"
+            elif g["tipo"] == "descuento_monto":
+                precio = f"-$ {g['valor']:,.2f} c/u"
             else:
                 precio = f"$ {g['valor']:,.2f} c/u"
 
@@ -185,12 +187,15 @@ class PromosGrupoUI(ttk.Frame):
 
         lbl(f2, "     Precio:", variante="suave",
             bg=C.superficie).pack(side="left")
+        _tipos = {"precio_fijo": "Precio fijo por unidad",
+                  "descuento_pct": "Descuento %",
+                  "descuento_monto": "Descuento en $ por unidad"}
         v_tipo = tk.StringVar(
-            value="Descuento %" if (g and g["tipo"] == "descuento_pct")
-            else "Precio fijo por unidad")
-        ttk.Combobox(f2, textvariable=v_tipo, width=22, state="readonly",
-                     values=("Precio fijo por unidad",
-                             "Descuento %")).pack(side="left", padx=6)
+            value=_tipos.get(g["tipo"] if g else "", "Precio fijo por unidad"))
+        cb_tipo = ttk.Combobox(f2, textvariable=v_tipo, width=26,
+                               state="readonly",
+                               values=tuple(_tipos.values()))
+        cb_tipo.pack(side="left", padx=6)
         v_valor = tk.StringVar(value=f"{g['valor']:g}" if g else "")
         tk.Entry(f2, textvariable=v_valor, font=F.subtitulo, width=10,
                  justify="center", bg=C.bg, fg=C.texto, relief="solid",
@@ -237,6 +242,14 @@ class PromosGrupoUI(ttk.Frame):
             comando=lambda: _marcar_visibles()).pack(side="left", padx=4)
         btn(filtro, "Desmarcar todo", variante="neutro",
             comando=lambda: _desmarcar()).pack(side="left")
+        # Con el catalogo entero cargado hay que poder revisar QUE quedo
+        # elegido sin scrollear todo.
+        v_solo_marcados = tk.BooleanVar(value=False)
+        tk.Checkbutton(filtro, text="Ver solo los elegidos",
+                       variable=v_solo_marcados, bg=C.superficie,
+                       fg=C.texto, font=F.normal, selectcolor=C.superficie,
+                       activebackground=C.superficie).pack(side="left",
+                                                            padx=(12, 0))
 
         cols = [("sel", "", 34, "center"), ("desc", "Producto", 300, "w"),
                 ("cat", "Categoría", 140, "w"), ("precio", "Precio", 100, "e")]
@@ -251,6 +264,8 @@ class PromosGrupoUI(ttk.Frame):
             filas.clear()
             filas.extend(get_productos(filtro=v_busq.get().strip(),
                                        categoria_id=cat_id))
+            if v_solo_marcados.get():
+                filas[:] = [p for p in filas if p["id"] in marcados]
             tv.delete(*tv.get_children())
             for i, p in enumerate(filas):
                 tv.insert("", "end", iid=str(i), values=(
@@ -289,7 +304,11 @@ class PromosGrupoUI(ttk.Frame):
 
         tv.bind("<Button-1>", _click)
         cb.bind("<<ComboboxSelected>>", cargar)
-        e_b.bind("<KeyRelease>", cargar)
+        # trace en vez de KeyRelease: el bind se dispara ANTES de que la
+        # tecla entre en la variable, asi que la lista quedaba una letra
+        # atras — se veian 9 productos y al marcar aparecian 4.
+        v_busq.trace_add("write", lambda *a: cargar())
+        v_solo_marcados.trace_add("write", lambda *a: cargar())
 
         def guardar(_ev=None):
             nombre = v_nombre.get().strip()
@@ -303,13 +322,34 @@ class PromosGrupoUI(ttk.Frame):
                 messagebox.showwarning("Promo", "La cantidad o el precio no "
                                                 "son números.", parent=d)
                 return
-            tipo = ("descuento_pct" if v_tipo.get().startswith("Descuento")
-                    else "precio_fijo")
+            tipo = {v: k for k, v in _tipos.items()}.get(v_tipo.get(),
+                                                          "precio_fijo")
             if tipo == "descuento_pct" and not (0 < valor < 100):
                 messagebox.showwarning("Promo", "El descuento tiene que "
                                                 "estar entre 1 y 99%.",
                                        parent=d)
                 return
+            if tipo == "precio_fijo" and len(marcados) > 1:
+                # Un precio fijo unico sobre productos de distinto valor
+                # deja sin descuento a lo barato: conviene avisarlo antes
+                # de que salga mal en la caja.
+                from repositorio import get_productos as _gp
+                precios = [p["precio_base"] for p in _gp()
+                           if p["id"] in marcados and p["precio_base"]]
+                if precios and (max(precios) - min(precios)) > max(precios) * 0.3:
+                    if not messagebox.askyesno(
+                            "Precio fijo",
+                            f"Los productos del grupo van de "
+                            f"$ {min(precios):,.0f} a $ {max(precios):,.0f}.\n\n"
+                            f"Con precio fijo, los más baratos no van a "
+                            f"tener descuento.\n\n"
+                            f"¿Preferís «Descuento en $ por unidad»?\n\n"
+                            f"Sí = cambio el tipo   ·   No = dejo precio fijo",
+                            parent=d, default="yes"):
+                        pass
+                    else:
+                        v_tipo.set(_tipos["descuento_monto"])
+                        return
             try:
                 guardar_promo_grupo(
                     g["id"] if g else None, nombre, minimo, tipo, valor,

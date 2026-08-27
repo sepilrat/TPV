@@ -11,8 +11,7 @@ from repositorio import (get_productos, get_categorias, get_promociones,
                          guardar_promocion, toggle_promocion, eliminar_promocion,
                          actualizar_precio, aplicar_aumento_bulk,
                          aplicar_margen_nuevo_bulk,
-                         aplicar_margen_bulk, aplicar_promocion_bulk,
-                         get_promocion_por_id, get_codigo_producto)
+                         aplicar_margen_bulk, get_promocion_por_id, get_codigo_producto)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers DB
@@ -405,8 +404,16 @@ class PreciosUI(ttk.Frame):
             combo_cat.current(0)
 
         f_lista = card(s)
+        # Buscador: con cientos de productos, elegir de a uno scrolleando
+        # la lista entera es impracticable.
+        f_busq = tk.Frame(f_lista, bg=C.superficie)
+        v_busq = tk.StringVar()
+        e_busq = tk.Entry(f_busq, textvariable=v_busq, font=F.normal,
+                          bg=C.bg, fg=C.texto, relief="solid", bd=1)
+        e_busq.pack(side="left", fill="x", expand=True, ipady=3)
         lbl_lista_ayuda = lbl(
-            f_lista, "Ctrl+click (o Shift+click) para elegir varios",
+            f_lista, "Buscá y usá «Elegir los visibles» — o Ctrl+click "
+                     "para elegir de a uno",
             variante="suave", bg=C.superficie)
         f_lista.columnconfigure(0, weight=1)
         tree_multi = ttk.Treeview(f_lista, columns=("desc","cat","precio"),
@@ -423,34 +430,98 @@ class PreciosUI(ttk.Frame):
         tree_multi.configure(yscrollcommand=sb_multi.set)
 
         todos_productos = get_productos(solo_activos=True)
-        for p in todos_productos:
-            tree_multi.insert("", "end", iid=str(p["id"]),
-                              values=(p["descripcion"], p.get("categoria") or "—",
-                                      f"$ {p['precio_base']:,.2f}"))
+
+        def _llenar_lista(*_a):
+            """Filtra por texto sin perder lo que ya estaba elegido."""
+            elegidos = set(tree_multi.selection())
+            q = v_busq.get().strip().lower()
+            partes = [x for x in q.split() if x]
+            tree_multi.delete(*tree_multi.get_children())
+            for p in todos_productos:
+                if partes:
+                    txt = (f"{p['descripcion']} {p.get('marca') or ''} "
+                           f"{p.get('categoria') or ''} "
+                           f"{p.get('codigo') or ''}").lower()
+                    if not all(x in txt for x in partes):
+                        continue
+                tree_multi.insert("", "end", iid=str(p["id"]),
+                                  values=(p["descripcion"],
+                                          p.get("categoria") or "—",
+                                          f"$ {p['precio_base']:,.2f}"))
+            # Lo elegido se mantiene aunque el filtro lo oculte y vuelva
+            vivos = [i for i in elegidos if tree_multi.exists(i)]
+            if vivos:
+                tree_multi.selection_set(vivos)
+
+        def _elegir_visibles():
+            tree_multi.selection_add(*tree_multi.get_children())
+
+        btn(f_busq, "☑ Elegir los visibles", variante="neutro",
+            comando=_elegir_visibles).pack(side="left", padx=6)
+        btn(f_busq, "Ninguno", variante="neutro",
+            comando=lambda: tree_multi.selection_remove(
+                *tree_multi.selection())).pack(side="left")
+        v_busq.trace_add("write", _llenar_lista)
+        _llenar_lista()
 
         def _actualizar_modo():
             combo_cat.pack_forget()
             f_lista.pack_forget()
+            f_busq.grid_forget()
             lbl_lista_ayuda.grid_forget()
             tree_multi.grid_forget()
             sb_multi.grid_forget()
             if modo.get() == "categoria":
                 combo_cat.pack(fill="x", padx=20, pady=(4,10), ipady=3)
             elif modo.get() == "elegir":
-                lbl_lista_ayuda.grid(row=0, column=0, columnspan=2,
-                                     sticky="w", padx=4, pady=(4,0))
-                tree_multi.grid(row=1, column=0, sticky="nsew", padx=(4,0), pady=4)
-                sb_multi.grid(row=1, column=1, sticky="ns", pady=4)
+                f_busq.grid(row=0, column=0, columnspan=2, sticky="ew",
+                            padx=4, pady=(4, 2))
+                lbl_lista_ayuda.grid(row=1, column=0, columnspan=2,
+                                     sticky="w", padx=4)
+                tree_multi.grid(row=2, column=0, sticky="nsew",
+                                padx=(4,0), pady=4)
+                sb_multi.grid(row=2, column=1, sticky="ns", pady=4)
+                f_lista.rowconfigure(2, weight=1)
                 f_lista.pack(fill="both", expand=True, padx=20, pady=(4,10))
 
         _actualizar_modo()
 
-        lbl(s, "Descuento % *", variante="suave", bg=C.superficie).pack(
-            padx=20, anchor="w")
+        # Tres formas de armar la promo. El precio fijo es el que faltaba:
+        # "llevando 3, a $3.200 cada uno" no se puede expresar con un %.
+        _TIPOS = {"pct": "Descuento %",
+                  "monto": "Descuento en $ por unidad",
+                  "fijo": "Precio fijo por unidad"}
+        lbl(s, "Desde cuántas unidades *", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w")
+        v_cant = tk.StringVar(value="3")
+        tk.Entry(s, textvariable=v_cant, font=F.normal, bg=C.superficie,
+                 fg=C.texto, relief="solid", bd=1).pack(
+            fill="x", padx=20, ipady=5, pady=(2, 10))
+
+        lbl(s, "¿Cómo se calcula? *", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w")
+        v_tipo = tk.StringVar(value=_TIPOS["pct"])
+        ttk.Combobox(s, textvariable=v_tipo, font=F.normal, state="readonly",
+                     values=tuple(_TIPOS.values())).pack(
+            fill="x", padx=20, pady=(2, 8), ipady=3)
+
+        lbl_valor = lbl(s, "Descuento % *", variante="suave", bg=C.superficie)
+        lbl_valor.pack(padx=20, anchor="w")
         e_pct = tk.Entry(s, font=F.normal, bg=C.superficie, fg=C.texto,
                          insertbackground=C.primario, relief="solid", bd=1)
         e_pct.insert(0, "10")
         e_pct.pack(fill="x", padx=20, ipady=5, pady=(2,10))
+
+        def _cambio_tipo(*_a):
+            t = v_tipo.get()
+            if t == _TIPOS["pct"]:
+                lbl_valor.config(text="Descuento % *")
+            elif t == _TIPOS["monto"]:
+                lbl_valor.config(text="Cuántos $ menos por unidad *")
+            else:
+                lbl_valor.config(text="Precio final por unidad *")
+
+        v_tipo.trace_add("write", _cambio_tipo)
 
         lbl(s, "Descripción (ej: Oferta del mes)", variante="suave",
             bg=C.superficie).pack(padx=20, anchor="w")
@@ -491,14 +562,19 @@ class PreciosUI(ttk.Frame):
                                     parent=d)
                 return
 
+            _tipo = {v: k for k, v in _TIPOS.items()}.get(v_tipo.get(), "pct")
             try:
                 pct = float(e_pct.get().replace(",", "."))
-                if not (0 < pct < 100):
+                if pct <= 0:
+                    raise ValueError
+                if _tipo == "pct" and pct >= 100:
                     raise ValueError
             except ValueError:
                 messagebox.showwarning(
-                    "Error", "El descuento tiene que ser un número entre "
-                    "0 y 100.", parent=d)
+                    "Error",
+                    "El descuento tiene que ser un número entre 0 y 100."
+                    if _tipo == "pct" else "Poné un importe mayor a 0.",
+                    parent=d)
                 return
 
             hasta = e_hasta.get().strip() or None
@@ -510,15 +586,27 @@ class PreciosUI(ttk.Frame):
                         "Error", f"Fecha inválida: {hasta}", parent=d)
                     return
 
-            desc = e_desc.get().strip() or f"Descuento {pct:g}%"
+            _txt = ({"pct": f"{pct:g}% de descuento",
+                     "monto": f"$ {pct:,.2f} menos por unidad",
+                     "fijo": f"precio fijo de $ {pct:,.2f}"})[_tipo]
+            desc = e_desc.get().strip() or _txt.capitalize()
 
             if not messagebox.askyesno(
                     "Confirmar",
-                    f"Aplicar {pct:g}% de descuento a {len(ids)} producto(s)?",
+                    f"Aplicar {_txt} a {len(ids)} producto(s)?",
                     parent=d):
                 return
 
-            n = aplicar_promocion_bulk(ids, pct, desc, None, hasta)
+            from repositorio import aplicar_promocion_bulk_tipo
+            n = aplicar_promocion_bulk_tipo(ids, [(int(v_cant.get() or 1), pct)],
+                                            desc, None, hasta, _tipo)
+            if n < len(ids):
+                messagebox.showinfo(
+                    "Promoción",
+                    f"Se aplicó a {n} de {len(ids)} producto(s).\n\n"
+                    f"Los que quedaron afuera ya valen eso o menos: una "
+                    f"promo que no baja el precio no se guarda.",
+                    parent=d)
             d.destroy()
             toast(self, f"Promoción aplicada a {n} producto(s)")
             import catalogo_web
