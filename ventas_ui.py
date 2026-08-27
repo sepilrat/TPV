@@ -430,15 +430,26 @@ class VentasUI(ttk.Frame):
                 foco = self.focus_get()
                 # Ningun foco, o el foco quedo en un widget que no acepta
                 # texto (un boton, la tabla): el scanner no llegaria.
+                # La lista de resultados y la tabla del carrito TAMBIEN
+                # son foco valido: sin esto, al buscar un producto por
+                # nombre el foco se lo robaba el scanner cada segundo y
+                # medio — la pantalla titilaba y no se podia elegir nada.
                 if foco is None or not isinstance(
-                        foco, (tk.Entry, tk.Text, ttk.Combobox, ttk.Entry)):
+                        foco, (tk.Entry, tk.Text, tk.Listbox, tk.Spinbox,
+                               ttk.Combobox, ttk.Entry, ttk.Treeview)):
                     # Solo si no hay ventana modal encima
                     if not any(isinstance(w, tk.Toplevel) and w.winfo_ismapped()
                                for w in self.winfo_toplevel().winfo_children()):
-                        self.entry_scan.focus_set()
+                        # Y solo si el scanner esta VACIO: si hay algo a
+                        # medio escribir, moverlo pierde lo tipeado.
+                        if not self.entry_scan.get().strip():
+                            self.entry_scan.focus_set()
         except Exception:
             pass
-        self.after(1500, self._vigilar_foco)
+        # Cada 4 segundos alcanza: es una red de seguridad para cuando un
+        # camino se olvida de devolver el foco, no algo que deba correr
+        # encima del cajero mientras escribe.
+        self.after(4000, self._vigilar_foco)
 
     def _leer_balanza(self):
         """
