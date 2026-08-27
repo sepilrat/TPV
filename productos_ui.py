@@ -1268,8 +1268,6 @@ class ProductosUI(ttk.Frame):
         # vez de simplemente "cambió el texto": .delete()+.insert() (lo
         # que hace _recalcular_precio) NO dispara KeyRelease, solo lo
         # hace que el usuario realmente escriba ahí.
-        precio_manual = {"valor": False}
-        e_precio.bind("<KeyRelease>", lambda e: precio_manual.__setitem__("valor", True))
 
         def _margen_para_calculo():
             """(margen, error) — error es un string para mostrar, o None."""
@@ -1296,7 +1294,6 @@ class ProductosUI(ttk.Frame):
             nuevo_precio = round(costo * (1 + margen / 100), 2)
             e_precio.delete(0, "end")
             e_precio.insert(0, f"{nuevo_precio:.2f}")
-            precio_manual["valor"] = False  # esto es un recalculo, no algo que tipeó el usuario
 
         # SOLO el margen recalcula el precio, y solo si de verdad se lo
         # cambió. Antes el costo también lo hacía, y con <FocusOut>
@@ -1640,20 +1637,21 @@ class ProductosUI(ttk.Frame):
             # recalculo automático del margen/costo haya llegado a
             # dispararse a tiempo) — salvo que el usuario haya tipeado
             # un precio distinto a mano, en cuyo caso se respeta ese.
+            # Se guarda EL PRECIO QUE SE VE, siempre. Antes, si no se
+            # habia tipeado el precio a mano, al guardar se recalculaba
+            # como costo x margen: se entraba a corregir el titulo de un
+            # producto y salia con otro precio de venta.
             precio_txt = entries["Precio de venta"].get().strip()
-            if precio_manual["valor"] and precio_txt:
-                try:
-                    precio = float(precio_txt.replace(",", "."))
-                    if precio <= 0: raise ValueError
-                except ValueError:
-                    messagebox.showwarning("Error", "Precio inválido.", parent=d)
-                    return
-            else:
-                margen_calculo, error = _margen_para_calculo()
-                if error:
-                    messagebox.showwarning("Error", error, parent=d)
-                    return
-                precio = round(costo * (1 + margen_calculo / 100), 2)
+            try:
+                precio = float(precio_txt.replace(",", "."))
+                if precio <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(
+                    "Error",
+                    "El precio de venta no puede quedar vacío ni en 0.",
+                    parent=d)
+                return
 
             # Vender bajo costo puede ser deliberado (liquidar algo por
             # vencer), pero por descuido es plata que se pierde en cada

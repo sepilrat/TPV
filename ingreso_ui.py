@@ -42,6 +42,9 @@ COLS_CRITICO = [
 ]
 
 
+
+
+
 def _centrar(d, w, h):
     sw = d.winfo_screenwidth()
     sh = d.winfo_screenheight()
@@ -191,6 +194,12 @@ class IngresoUI(ttk.Frame):
                 if entry.get() == texto and str(entry.cget("fg")) == C.texto_suave:
                     entry.delete(0, "end")
                     entry.config(fg=C.texto)
+                else:
+                    # Lo que haya queda seleccionado: sin esto hay que
+                    # borrar el "0.00" a mano en cada producto de cada
+                    # ingreso. Va en after() porque el foco todavia no
+                    # termino de asentarse.
+                    entry.after(1, lambda: entry.select_range(0, "end"))
 
             def _focus_out(e):
                 if not entry.get().strip():
@@ -259,7 +268,7 @@ class IngresoUI(ttk.Frame):
         _lbl(self.card_form, "Vencimiento",  3, 0)
         _lbl(self.card_form, "Proveedor",    3, 1)
         self.entry_vence = _entry(self.card_form, 4, 0, "")
-        _placeholder(self.entry_vence, "DD/MM/AAAA")
+        _placeholder(self.entry_vence, "DD/MM/AA")
 
         def _formatear_fecha_vence(event=None):
             # Si hay una tecla de control (flechas, tab, etc.) no hacer nada
@@ -270,7 +279,7 @@ class IngresoUI(ttk.Frame):
             entry = self.entry_vence
             texto = entry.get()
             # No tocar mientras se muestra el placeholder gris
-            if texto == "DD/MM/AAAA" and str(entry.cget("fg")) == C.texto_suave:
+            if texto == "DD/MM/AA" and str(entry.cget("fg")) == C.texto_suave:
                 return
             solo_digitos = "".join(c for c in texto if c.isdigit())[:8]
             partes = []
@@ -343,14 +352,18 @@ class IngresoUI(ttk.Frame):
         # Editar producto. Ya NO se busca sola en Open Food Facts al
         # crear el producto (traía fotos de mala calidad, un tipo
         # sosteniendo el producto, fondos malos, etc.)
+        # Fuera de frame_precio: ese panel se esconde con los productos
+        # que ya existen, y la foto hace falta igual.
+        f_foto = tk.Frame(self.card_form, bg=C.superficie)
+        f_foto.grid(row=10, column=0, columnspan=2, sticky="ew",
+                    padx=(12, 4), pady=(0, 6))
         self.btn_foto_nueva = btn(
-            self.frame_precio, "🔍 Buscar fotos", variante="neutro",
+            f_foto, "🔍 Buscar fotos", variante="neutro",
             comando=self._buscar_fotos_producto_nuevo)
-        self.btn_foto_nueva.grid(row=3, column=0, sticky="ew",
-                                 padx=(12,4), pady=(0,6))
-        self.lbl_foto_nueva = lbl(
-            self.frame_precio, "", variante="suave", bg=C.superficie)
-        self.lbl_foto_nueva.grid(row=3, column=1, sticky="w", padx=(12,4), pady=(0,6))
+        self.btn_foto_nueva.pack(side="left")
+        self.lbl_foto_nueva = lbl(f_foto, "", variante="suave",
+                                  bg=C.superficie)
+        self.lbl_foto_nueva.pack(side="left", padx=12)
 
         # Botón guardar
         btn(self.card_form, "Registrar ingreso   (F4 o Enter)",
@@ -362,6 +375,27 @@ class IngresoUI(ttk.Frame):
             "F7 corregir producto   ·   F8 historial",
             variante="suave").grid(row=9, column=0, columnspan=2,
                                    sticky="w", padx=12, pady=(0, 10))
+
+        # Los campos numericos se seleccionan enteros al enfocarlos: sin
+        # esto hay que borrar el "0.00" a mano antes de escribir, en cada
+        # producto de cada ingreso.
+        def _seleccionar_todo(ev):
+            w = ev.widget
+
+            def _hacer():
+                try:
+                    w.select_range(0, "end")
+                    w.icursor("end")
+                except Exception:
+                    pass
+
+            # after(): el placeholder y el foco terminan de asentarse
+            # despues del evento, y una seleccion hecha antes se pierde.
+            w.after(30, _hacer)
+
+        for _campo in (self.entry_cantidad, self.entry_costo,
+                       self.entry_precio, self.entry_total_linea):
+            _campo.bind("<FocusIn>", _seleccionar_todo, add="+")
 
         self._cargar_combos()
         self._toggle_precio(False)
@@ -466,6 +500,7 @@ class IngresoUI(ttk.Frame):
             # Al recibir mercadería es cuando uno nota que el nombre está
             # mal escrito o le falta el gramaje. Tener que ir al catálogo
             # a corregirlo hace que nadie lo corrija nunca.
+            self.btn_editar_nombre.config(text="✏️  Corregir nombre o precio")
             self.btn_editar_nombre.pack(anchor="w", pady=(4, 0))
             self.lbl_cantidad.config(
                 text=("Cantidad en kg *" if prod.get("vendido_por_peso")
@@ -474,7 +509,10 @@ class IngresoUI(ttk.Frame):
         else:
             self._producto_actual = None
             self.lbl_cantidad.config(text="Cantidad *")
-            self.btn_editar_nombre.pack_forget()
+            # Producto nuevo: el nombre se puede seguir corrigiendo hasta
+            # guardar. Antes habia que guardarlo mal e ir al catalogo.
+            self.btn_editar_nombre.config(text="✏️  Corregir nombre o marca")
+            self.btn_editar_nombre.pack(anchor="w", pady=(4, 0))
             self.lbl_info.config(
                 text="Producto nuevo — completá descripción y precio de venta",
                 fg=C.advertencia,
@@ -573,7 +611,19 @@ class IngresoUI(ttk.Frame):
         return res[0]
 
     def _editar_producto_actual(self):
-        """Corrige el nombre y el precio sin salir del ingreso."""
+        """Corrige el nombre y el precio sin salir del ingreso.
+
+        Si el producto todavia no existe (recien escaneado), reabre el
+        dialogo de alta con lo que ya se habia escrito: corregir un
+        nombre mal tipeado no puede obligar a guardar y volver.
+        """
+        if not self._producto_actual:
+            self._dialogo_nuevo_producto(
+                self.entry_codigo.get().strip(),
+                desc_inicial=getattr(self, "_desc_nuevo", ""),
+                marca_inicial=getattr(self, "_marca_nueva", ""))
+            return
+
         from repositorio import get_producto_completo, actualizar_producto
         prod = self._producto_actual
         if not prod:
@@ -664,13 +714,20 @@ class IngresoUI(ttk.Frame):
         e_d.icursor("end")
 
     def _toggle_precio(self, mostrar):
+        """El panel de precio/categoría solo va en productos nuevos.
+
+        El botón de la foto vive ahí adentro pero se necesita SIEMPRE:
+        recibir mercadería es cuando uno tiene el producto en la mano
+        para sacarle una foto. Se saca del panel y queda aparte.
+        """
         if mostrar:
             self.frame_precio.grid(row=7, column=0, columnspan=2,
                                    sticky="ew", in_=self.card_form)
         else:
             self.frame_precio.grid_remove()
 
-    def _dialogo_nuevo_producto(self, codigo):
+    def _dialogo_nuevo_producto(self, codigo, desc_inicial="",
+                                marca_inicial=""):
         """Pide descripcion (y marca) para un producto nuevo antes de continuar."""
         d = tk.Toplevel(self)
         d.title("Producto nuevo")
@@ -687,6 +744,9 @@ class IngresoUI(ttk.Frame):
         e = tk.Entry(d, font=F.normal, bg=C.superficie, fg=C.texto,
                      relief="solid", bd=1)
         e.pack(fill="x", padx=20, pady=(4,10), ipady=6)
+        if desc_inicial:
+            e.insert(0, desc_inicial)
+            e.select_range(0, "end")
         e.focus_set()
 
         lbl(d, "Marca (opcional)", variante="suave",
@@ -694,6 +754,8 @@ class IngresoUI(ttk.Frame):
         e_marca = tk.Entry(d, font=F.normal, bg=C.superficie, fg=C.texto,
                            relief="solid", bd=1)
         e_marca.pack(fill="x", padx=20, pady=(4,12), ipady=6)
+        if marca_inicial:
+            e_marca.insert(0, marca_inicial)
 
         self._desc_nuevo = ""
         self._marca_nueva = ""
@@ -812,13 +874,17 @@ class IngresoUI(ttk.Frame):
 
         # Vencimiento (opcional)
         vence_ingresado = self.entry_vence.get().strip()
-        if vence_ingresado in ("DD/MM/AAAA", ""):
+        if vence_ingresado in ("DD/MM/AA", "DD/MM/AAAA", ""):
             vence = None
         else:
-            try:
-                vence = datetime.strptime(vence_ingresado, "%d/%m/%Y").strftime("%Y-%m-%d")
-            except ValueError:
-                messagebox.showwarning("Atención", "Fecha inválida. Formato: DD/MM/AAAA", parent=self)
+            from repositorio import parsear_fecha
+            vence = parsear_fecha(vence_ingresado)
+            if not vence:
+                messagebox.showwarning(
+                    "Atención",
+                    "No entiendo esa fecha.\n\n"
+                    "Podés escribirla como 15/03/27, 15/03/2027, "
+                    "15-3-27 o 150327.", parent=self)
                 return
 
         notas = self.entry_notas.get().strip()
@@ -871,8 +937,11 @@ class IngresoUI(ttk.Frame):
                 actualizar_imagen_producto(prod_id, ruta_local)
             except Exception as e:
                 logging.warning(f"No se pudo descargar la foto localmente: {e}")
-                # Si falla la descarga, mejor guardar el link que perder la foto del todo.
+                # Se guarda el link para no perder la foto del todo, pero
+                # se AVISA: guardado en silencio, uno cree que la foto
+                # quedó y despues aparece rota en el catalogo.
                 actualizar_imagen_producto(prod_id, self._foto_nueva_url)
+                self._foto_fallo = str(e)
 
         # Registrar lote — si el costo subió, se recalcula el precio
         # solo (como ya venía funcionando). Si bajó, se pregunta antes
@@ -993,7 +1062,17 @@ class IngresoUI(ttk.Frame):
                     return
                 if url and imagenes.es_url(url):
                     self._foto_nueva_url = url
-                    self.lbl_foto_nueva.config(text="✅  Foto elegida", fg=C.exito)
+                    self.lbl_foto_nueva.config(text="✅  Foto elegida",
+                                               fg=C.exito)
+                else:
+                    # Antes se descartaba en silencio: uno elegia una foto,
+                    # no pasaba nada visible, y al guardar el producto
+                    # quedaba sin imagen sin que nadie supiera por que.
+                    self.lbl_foto_nueva.config(
+                        text="⚠ No se pudo tomar esa foto — probá con otra",
+                        fg=C.peligro)
+                    if url:
+                        logging.warning(f"Foto descartada, URL rara: {url[:80]}")
             try:
                 self.after(0, _aplicar)
             except tk.TclError as e:
@@ -1006,6 +1085,16 @@ class IngresoUI(ttk.Frame):
         self._producto_actual = None
         self._desc_nuevo = ""
         self._marca_nueva = ""
+        _fallo = getattr(self, "_foto_fallo", None)
+        if _fallo:
+            self._foto_fallo = None
+            messagebox.showwarning(
+                "La foto no se pudo bajar",
+                f"El stock se registró bien, pero la foto quedó como link "
+                f"externo y puede no verse.\n\n{_fallo}\n\n"
+                f"Podés probar otra foto desde Catálogo → Editar producto.",
+                parent=self)
+
         self._foto_nueva_url = None
         self.lbl_foto_nueva.config(text="")
         self.var_peso.set(False)
@@ -1076,7 +1165,7 @@ class IngresoUI(ttk.Frame):
         lbl(d, f"Vencimiento actual: {actual}", variante="suave",
             bg=C.superficie).pack(anchor="w", padx=20)
 
-        lbl(d, "Nueva fecha (DD/MM/AAAA — vacío = sin vencimiento)",
+        lbl(d, "Nueva fecha (15/03/27 · vacío = sin vencimiento)",
             variante="suave", bg=C.superficie).pack(anchor="w", padx=20,
                                                     pady=(14, 4))
         var = tk.StringVar()

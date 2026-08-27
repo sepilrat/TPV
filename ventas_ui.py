@@ -520,6 +520,19 @@ class VentasUI(ttk.Frame):
         # Precio en cero: el producto existe pero se regalaria. Se avisa
         # con la misma fuerza que si no existiera, porque la consecuencia
         # es la misma — el cliente se lo lleva sin pagarlo.
+        # Vender por debajo del costo es plata que se pierde en cada
+        # unidad. Se avisa ACA, en la caja, no al dia siguiente por mail.
+        if prod and (prod.get("precio_base") or 0) > 0:
+            try:
+                from repositorio import costo_real_producto
+                _costo = costo_real_producto(prod["id"])
+            except Exception:
+                _costo = 0
+            _precio = float(prod.get("precio_base") or 0)
+            if _costo > 0 and _precio < _costo:
+                if not self._confirmar_perdida(prod, _precio, _costo):
+                    return self.foco_scanner()
+
         if prod and not (prod.get("precio_base") or 0) > 0:
             self._flash(error=True)
             self._alertar_precio_cero(prod)
@@ -622,6 +635,115 @@ class VentasUI(ttk.Frame):
         self._actualizar_tabla()
         self._actualizar_totales()
         self.foco_scanner()
+
+    def _confirmar_perdida(self, prod, precio, costo):
+        """Avisa que ese producto se vende por debajo del costo.
+
+        No lo prohibe: a veces se liquida algo a proposito. Pero tiene
+        que ser una decision, no un descuido — y hasta ahora se enteraba
+        al dia siguiente por el mail, con la venta ya hecha.
+        """
+        try:
+            if sys.platform == "win32":
+                import winsound
+                winsound.Beep(420, 220)
+            else:
+                self.bell()
+        except Exception:
+            pass
+
+        perdida = costo - precio
+        d = tk.Toplevel(self)
+        d.title("Se vende a pérdida")
+        d.configure(bg=C.peligro)
+        d.grab_set()
+        d.transient(self.winfo_toplevel())
+        w, h = 560, 330
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//3)}")
+
+        tk.Label(d, text="⚠", bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 40, "bold")).pack(pady=(14, 0))
+        tk.Label(d, text="ESTE PRODUCTO SE VENDE A PÉRDIDA",
+                 bg=C.peligro, fg=C.blanco,
+                 font=("Segoe UI", 15, "bold")).pack()
+        tk.Label(d, text=prod["descripcion"][:46], bg=C.peligro,
+                 fg=C.blanco, font=("Segoe UI", 12)).pack(pady=(6, 0))
+        tk.Label(d,
+                 text=(f"Precio  $ {precio:,.2f}          "
+                       f"Costo  $ {costo:,.2f}\n"
+                       f"Se pierden $ {perdida:,.2f} por unidad"),
+                 bg=C.peligro, fg=C.blanco, font=("Segoe UI", 12),
+                 justify="center").pack(pady=(10, 0))
+
+        res = {"seguir": False}
+
+        def _corregir():
+            """Se puede arreglar acá mismo: el cliente está esperando."""
+            d.destroy()
+            top = tk.Toplevel(self)
+            top.title("Corregir precio")
+            top.configure(bg=C.superficie)
+            top.grab_set()
+            top.geometry("420x220")
+            lbl(top, prod["descripcion"][:40], variante="titulo",
+                bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+            lbl(top, f"Costo actual: $ {costo:,.2f}", variante="suave",
+                bg=C.superficie).pack(anchor="w", padx=18)
+            v = tk.StringVar(value=f"{costo * 1.3:.2f}")
+            e = tk.Entry(top, textvariable=v, font=F.subtitulo,
+                         justify="center", bg=C.bg, fg=C.texto,
+                         relief="solid", bd=1)
+            e.pack(fill="x", padx=18, pady=(12, 4), ipady=5)
+            lbl(top, "Sugerido: costo + 30%", variante="suave",
+                bg=C.superficie).pack(anchor="w", padx=18)
+
+            def ok(_ev=None):
+                try:
+                    nuevo = float(v.get().replace(",", "."))
+                except ValueError:
+                    return
+                if nuevo <= 0:
+                    return
+                from repositorio import set_precio_base
+                set_precio_base(prod["id"], nuevo)
+                top.destroy()
+                toast(self, f"Precio corregido: $ {nuevo:,.2f}. "
+                            f"Escaneá de nuevo.")
+                self.foco_scanner()
+
+            e.bind("<Return>", ok)
+            fb = tk.Frame(top, bg=C.superficie)
+            fb.pack(side="bottom", pady=14)
+            btn(fb, "Guardar  (Enter)", variante="exito",
+                comando=ok).pack(side="left", padx=6)
+            btn(fb, "Cancelar", variante="neutro",
+                comando=top.destroy).pack(side="left")
+            e.focus_set()
+            e.select_range(0, "end")
+
+        def _vender():
+            res["seguir"] = True
+            d.destroy()
+
+        pie = tk.Frame(d, bg=C.peligro)
+        pie.pack(side="bottom", pady=16)
+        b1 = tk.Button(pie, text="Corregir el precio", command=_corregir,
+                       font=("Segoe UI", 11, "bold"), bg=C.blanco,
+                       fg=C.peligro, relief="flat", padx=16, pady=6,
+                       cursor="hand2")
+        b1.pack(side="left", padx=6)
+        tk.Button(pie, text="Vender igual", command=_vender,
+                  font=("Segoe UI", 11), bg=C.peligro, fg=C.blanco,
+                  relief="solid", bd=1, padx=14, pady=6,
+                  cursor="hand2").pack(side="left", padx=6)
+
+        # Enter = corregir: lo mas probable es que sea un error
+        d.bind("<Return>", lambda e: _corregir())
+        d.bind("<Escape>", lambda e: d.destroy())
+        b1.focus_set()
+        self.wait_window(d)
+        return res["seguir"]
 
     def _alertar_precio_cero(self, prod):
         """El producto existe pero está en $0: no se puede vender así."""
@@ -2039,6 +2161,11 @@ class VentasUI(ttk.Frame):
 
     def _nueva_venta(self):
         self.carrito.clear()
+        # El cartel de promo se va con la venta: si queda, la venta
+        # siguiente arranca ofreciendo algo que ya no esta en el carrito.
+        if hasattr(self, "lbl_promo_grupo"):
+            self.lbl_promo_grupo.config(text="")
+            self.lbl_promo_grupo.grid_forget()
         self.cant_pendiente = None
         self._cliente_cta = None
         self.lbl_cant.config(text="x1")

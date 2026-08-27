@@ -289,7 +289,9 @@ def abrir_selector_lista_compacta(parent):
     d = tk.Toplevel(parent)
     d.title("Lista compacta para exhibidora")
     d.configure(bg=C.superficie)
-    d.grab_set()
+    # SIN grab_set, por lo mismo que el selector de etiquetas: se arma en
+    # varias vueltas y hay que poder usar el resto del sistema.
+    d.transient(parent.winfo_toplevel())
     w, h = 760, min(660, d.winfo_screenheight() - 90)
     sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
     d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//2)}")
@@ -301,8 +303,13 @@ def abrir_selector_lista_compacta(parent):
         variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
 
     # El pie va primero y anclado abajo, para que la tabla no lo empuje
+    # Dos filas: los cuatro botones de accion mas los de las listas
+    # guardadas no entran en los 760px del dialogo y "Generar PDF"
+    # quedaba fuera de pantalla.
     pie = tk.Frame(d, bg=C.superficie)
-    pie.pack(side="bottom", fill="x", pady=12)
+    pie.pack(side="bottom", fill="x", pady=(0, 12))
+    pie_sel = tk.Frame(d, bg=C.superficie)
+    pie_sel.pack(side="bottom", fill="x", pady=(8, 2))
 
     # Listas guardadas: la de la heladera es siempre la misma, lo que
     # cambia son los precios. Se guardan los productos, no los precios.
@@ -529,14 +536,17 @@ def abrir_selector_lista_compacta(parent):
             messagebox.showinfo("Listo", f"PDF generado:\n{ruta}", parent=d)
         toast(parent, "Lista generada")
 
-    btn(pie, "Generar PDF", variante="exito",
+    # Fila de selección (arriba)
+    btn(pie_sel, "Marcar los visibles", variante="neutro",
+        comando=_marcar_visibles).pack(side="left", padx=(18, 4))
+    btn(pie_sel, "Desmarcar todo", variante="neutro",
+        comando=_desmarcar).pack(side="left", padx=4)
+    btn(pie_sel, "✏️ Renglón a mano", variante="neutro",
+        comando=lambda: _renglon_manual()).pack(side="left", padx=4)
+
+    # Fila de acción (abajo): lo que se aprieta al final
+    btn(pie, "🖨  Generar PDF", variante="exito",
         comando=_generar).pack(side="right", padx=(6, 18))
-    btn(pie, "Desmarcar todo", variante="neutro",
-        comando=_desmarcar).pack(side="right", padx=4)
-    btn(pie, "Marcar los visibles", variante="neutro",
-        comando=_marcar_visibles).pack(side="right", padx=4)
-    btn(pie, "✏️ Renglón a mano", variante="neutro",
-        comando=lambda: _renglon_manual()).pack(side="right", padx=4)
 
     # ── Listas guardadas ──────────────────────────────────────────────
 

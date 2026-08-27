@@ -169,6 +169,10 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
             "margen": p.get("margen") if p.get("margen") is not None else "",
             "stock": p.get("stock") or 0,
             "proveedor": proveedores.get(p["id"], ""),
+            # Las promos tambien en el interno: si un producto se vende
+            # con descuento por cantidad, el margen real es OTRO y sin
+            # esto el panel muestra una rentabilidad que no existe.
+            "promos": json.dumps(promos_compactas) if promos_compactas else "",
         })
 
     payload = json.dumps({

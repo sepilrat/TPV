@@ -435,13 +435,16 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
     """
     import tkinter as tk
     from tkinter import ttk, messagebox, simpledialog
-    from styles import C, F, btn, lbl, card
+    from styles import C, F, btn, lbl, card, toast
 
     d = tk.Toplevel(parent)
     d.title("Etiquetas de gondola")
     d.resizable(True, True)
     d.configure(bg=C.bg)
-    d.grab_set()
+    # SIN grab_set: armar una lista de etiquetas lleva un rato, y en el
+    # medio hay que poder ir a corregir un precio o atender la caja. La
+    # ventana queda abierta con lo marcado mientras tanto.
+    d.transient(parent.winfo_toplevel())
     sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
     w, h = min(900, sw-60), min(640, sh-60)
     d.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
@@ -659,6 +662,92 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
 
     # Ediciones a mano: {producto_id: {"texto":…, "precio_texto":…}}
     ediciones = {}
+    # Etiquetas de cosas que NO estan en el catalogo: un cartel de promo,
+    # algo que se vende sin cargar. Se imprimen igual que las demas pero
+    # no tienen producto detras.
+    sueltas = []
+
+    def _etiqueta_suelta():
+        """Una etiqueta escrita a mano, sin producto en el sistema."""
+        top = tk.Toplevel(d)
+        top.title("Etiqueta suelta")
+        top.configure(bg=C.superficie)
+        top.grab_set()
+        top.geometry("470x330")
+
+        lbl(top, "Etiqueta suelta", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
+        lbl(top, "Para un cartel que no corresponde a un producto del "
+                 "catálogo: una promo, algo que se vende sin cargar.",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
+
+        lbl(top, "Texto (lo que se lee grande)", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(14, 2))
+        v_txt = tk.StringVar()
+        e_txt = tk.Entry(top, textvariable=v_txt, font=F.normal, bg=C.bg,
+                         fg=C.texto, relief="solid", bd=1)
+        e_txt.pack(fill="x", padx=18, ipady=5)
+        e_txt.focus_set()
+
+        lbl(top, "Precio, tal cual se imprime", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(10, 2))
+        v_pre = tk.StringVar()
+        tk.Entry(top, textvariable=v_pre, font=F.subtitulo, justify="center",
+                 bg=C.bg, fg=C.texto, relief="solid", bd=1).pack(
+            fill="x", padx=18, ipady=5)
+        lbl(top, "Puede ser «$ 2.000», «2x1» o lo que haga falta: se "
+                 "imprime igual que lo escribas.", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(4, 0))
+
+        f_c = tk.Frame(top, bg=C.superficie)
+        f_c.pack(fill="x", padx=18, pady=(12, 0))
+        lbl(f_c, "¿Cuántas?", variante="suave", bg=C.superficie).pack(
+            side="left")
+        v_cant = tk.StringVar(value="1")
+        tk.Entry(f_c, textvariable=v_cant, width=5, justify="center",
+                 font=F.normal, bg=C.bg, fg=C.texto, relief="solid",
+                 bd=1).pack(side="left", padx=8, ipady=3)
+
+        def ok(_ev=None):
+            if not v_txt.get().strip() or not v_pre.get().strip():
+                messagebox.showwarning("Etiqueta", "Completá el texto y el "
+                                                   "precio.", parent=top)
+                return
+            try:
+                n = max(1, int(v_cant.get() or 1))
+            except ValueError:
+                n = 1
+            sueltas.append({"texto": v_txt.get().strip(),
+                            "precio": v_pre.get().strip(), "cantidad": n})
+            top.destroy()
+            _actualizar_lbl()
+            toast(parent, f"Agregada: {v_txt.get().strip()[:26]}")
+
+        e_txt.bind("<Return>", ok)
+        top.bind("<Escape>", lambda ev: top.destroy())
+        fb = tk.Frame(top, bg=C.superficie)
+        fb.pack(side="bottom", pady=14)
+        btn(fb, "Agregar  (Enter)", variante="exito", comando=ok).pack(
+            side="left", padx=4)
+        btn(fb, "Ver las agregadas", variante="neutro",
+            comando=lambda: _ver_sueltas(top)).pack(side="left", padx=4)
+        btn(fb, "Cerrar", variante="neutro",
+            comando=top.destroy).pack(side="left", padx=4)
+
+    def _ver_sueltas(padre):
+        if not sueltas:
+            messagebox.showinfo("Etiquetas sueltas",
+                                "Todavía no agregaste ninguna.", parent=padre)
+            return
+        txt = "\n".join(f"  · {s['texto']}  →  {s['precio']}"
+                         + (f"   (x{s['cantidad']})" if s["cantidad"] > 1 else "")
+                         for s in sueltas)
+        if messagebox.askyesno(
+                "Etiquetas sueltas",
+                f"{len(sueltas)} etiqueta(s):\n\n{txt}\n\n¿Las borro todas?",
+                parent=padre):
+            sueltas.clear()
+            _actualizar_lbl()
 
     def _editar_etiqueta(event=None):
         """Cambia el texto y el precio de UNA etiqueta, sin tocar el
@@ -741,8 +830,12 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
     tree.tag_configure("editada", background=C.ok_flash)
 
     # Barra inferior
+    # Dos filas: seis botones mas la etiqueta de estado no entran en los
+    # 900px del dialogo, y "Generar PDF" quedaba fuera de pantalla.
     bot = tk.Frame(d, bg=C.bg)
-    bot.grid(row=3, column=0, sticky="ew", padx=12, pady=(0,12))
+    bot.grid(row=3, column=0, sticky="ew", padx=12, pady=(0,2))
+    bot2 = tk.Frame(d, bg=C.bg)
+    bot2.grid(row=4, column=0, sticky="ew", padx=12, pady=(0,12))
 
     lbl_sel = lbl(bot, "Ninguno seleccionado", variante="suave")
     lbl_sel.pack(side="left")
@@ -750,11 +843,15 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
     def _actualizar_lbl():
         n = len(cantidades)
         tot = sum(cantidades.values())
+        n_sueltas = sum(x["cantidad"] for x in sueltas)
         if n:
-            lbl_sel.config(
-                text=f"{n} producto{'s' if n>1 else ''} — {tot} etiqueta{'s' if tot>1 else ''}")
+            txt = (f"{n} producto{'s' if n>1 else ''} — "
+                   f"{tot} etiqueta{'s' if tot>1 else ''}")
         else:
-            lbl_sel.config(text="Ninguno seleccionado")
+            txt = "Ninguno seleccionado"
+        if n_sueltas:
+            txt += f"  +  {n_sueltas} suelta{'s' if n_sueltas>1 else ''}"
+        lbl_sel.config(text=txt)
 
     def _sel_todo():
         for iid in tree.get_children():
@@ -810,6 +907,18 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
                 f"Ahora entran {mejor['por_hoja']} etiquetas por hoja.\n\n"
                 "Generá el PDF para verlo.", parent=d)
 
+    def _refrescar():
+        """Vuelve a leer los precios sin perder lo ya marcado.
+
+        Como la ventana no bloquea el resto del sistema, se puede haber
+        cambiado un precio mientras esta abierta; sin esto la etiqueta
+        saldria con el precio viejo.
+        """
+        cargar(entry_buscar.get().strip())
+        toast(parent, "Precios actualizados")
+
+    btn(bot, "🔄 Actualizar precios", variante="neutro",
+        comando=_refrescar).pack(side="left", padx=(4, 0))
     btn(bot, "📐 Aprovechar la hoja", variante="neutro",
         comando=_aprovechar).pack(side="left", padx=(0,10))
     btn(bot, "Marcar los visibles", variante="neutro",
@@ -818,9 +927,10 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
         comando=_desel_todo).pack(side="left")
 
     def generar():
-        if not cantidades:
+        if not cantidades and not sueltas:
             messagebox.showinfo("Atencion",
-                "Selecciona al menos un producto.", parent=d)
+                "Selecciona al menos un producto, o agregá una etiqueta "
+                "suelta.", parent=d)
             return
         # Expandir según cantidades
         prods_exp = []
@@ -843,9 +953,26 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
         # etiquetados" sirve de verdad la proxima vez.
         try:
             from repositorio import marcar_etiquetas_impresas
-            marcar_etiquetas_impresas({p["id"] for p in prods_exp})
+            marcar_etiquetas_impresas({p["id"] for p in prods_exp if p.get("id")})
         except Exception as _e:
             logging.debug(f"No se pudo marcar las etiquetas impresas: {_e}")
+
+        # Las etiquetas sueltas se suman al final: se dibujan igual que
+        # las demas, con texto y precio a mano y sin codigo de barras.
+        for x in sueltas:
+            for _ in range(x["cantidad"]):
+                prods_exp.append({
+                    "id": None, "codigo": "",
+                    "descripcion": x["texto"],
+                    "nombre_generico": x["texto"],
+                    "_precio_texto": x["precio"],
+                    "precio_base": 0,
+                })
+
+        if not prods_exp:
+            messagebox.showinfo("Etiquetas", "No hay nada para imprimir.",
+                                parent=d)
+            return
 
         ruta = generar_pdf_etiquetas(prods_exp)
         if ruta:
@@ -859,7 +986,10 @@ def abrir_selector_etiquetas(parent, productos_presel=None):
                 "No se pudo generar el PDF.\n"
                 "Instala reportlab: pip install reportlab", parent=d)
 
-    btn(bot, "Generar PDF", variante="exito",
-        comando=generar).pack(side="right")
-    btn(bot, "Cancelar", variante="neutro",
-        comando=d.destroy).pack(side="right", padx=(0,8))
+    # Fila de abajo: lo que se aprieta al final
+    btn(bot2, "✏️ Etiqueta suelta", variante="neutro",
+        comando=lambda: _etiqueta_suelta()).pack(side="left")
+    btn(bot2, "Cancelar", variante="neutro",
+        comando=d.destroy).pack(side="right")
+    btn(bot2, "🖨  Generar PDF", variante="exito",
+        comando=generar).pack(side="right", padx=(0, 8))

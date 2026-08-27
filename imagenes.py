@@ -184,6 +184,12 @@ def guardar_imagen_desde_url(producto_id: int, url: str) -> str:
     depender de que ese sitio externo siga disponible más adelante.
     Lanza excepción si no se pudo descargar o no es una imagen válida.
     """
+    # SVG no lo abre Pillow y no sirve para una etiqueta impresa: se
+    # rechaza de entrada con un motivo claro en vez de fallar despues.
+    if url.strip().lower().split("?")[0].endswith(".svg"):
+        raise ValueError("Esa foto es un SVG y no se puede usar. "
+                         "Probá con otra imagen.")
+
     data = _resolver_bytes(url)
     if not data:
         raise ValueError("No se pudo descargar la imagen de esa URL.")
@@ -246,10 +252,32 @@ def _resolver_bytes(imagen_url: str) -> bytes | None:
         return None
     try:
         if es_url(imagen_url):
-            req = urllib.request.Request(
-                imagen_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=TIMEOUT_URL) as resp:
-                return resp.read()
+            # Cabeceras de navegador de verdad: varios sitios devuelven
+            # 403 a un User-Agent escueto, y otros exigen Referer del
+            # propio dominio. Sin esto la foto se pierde y hay que ir a
+            # bajarla a mano desde el catalogo.
+            from urllib.parse import urlparse
+            _u = urlparse(imagen_url)
+            cabeceras = {
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/122.0 Safari/537.36"),
+                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                "Accept-Language": "es-AR,es;q=0.9",
+                "Referer": f"{_u.scheme}://{_u.netloc}/",
+            }
+            # Dos intentos: el primero corto para no colgar la carga, el
+            # segundo con mas paciencia para los sitios lentos.
+            ultimo = None
+            for espera in (TIMEOUT_URL, TIMEOUT_URL * 3):
+                try:
+                    req = urllib.request.Request(imagen_url,
+                                                 headers=cabeceras)
+                    with urllib.request.urlopen(req, timeout=espera) as resp:
+                        return resp.read()
+                except Exception as exc:
+                    ultimo = exc
+            raise ultimo
         else:
             ruta = imagen_url
             if not os.path.isabs(ruta):

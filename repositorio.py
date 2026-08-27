@@ -1481,6 +1481,50 @@ def actualizar_lote(lote_id: int, cantidad=None, costo=None,
             "vendido": vendido}
 
 
+def parsear_fecha(txt):
+    """Entiende la fecha escrita de varias formas y devuelve AAAA-MM-DD.
+
+    Tipear el año completo en cada producto de cada ingreso es tiempo
+    que se pierde: "15/03/27" alcanza para decir lo mismo. Los años de
+    dos cifras se toman como 2000+, que es lo unico que tiene sentido en
+    un vencimiento.
+    """
+    if not txt:
+        return None
+    txt = txt.strip().replace("-", "/").replace(".", "/").replace(" ", "")
+
+    # Sin separadores: 150327 o 15032027
+    if txt.isdigit():
+        if len(txt) == 6:
+            txt = f"{txt[:2]}/{txt[2:4]}/{txt[4:]}"
+        elif len(txt) == 8:
+            txt = f"{txt[:2]}/{txt[2:4]}/{txt[4:]}"
+        else:
+            return None
+
+    partes = [x for x in txt.split("/") if x]
+    if len(partes) == 2:
+        # Solo mes y año: se toma el ULTIMO dia del mes, que es hasta
+        # cuando el producto sigue siendo apto.
+        partes = ["", partes[0], partes[1]]
+        try:
+            import calendar
+            mes, anio = int(partes[1]), int(partes[2])
+            anio = 2000 + anio if anio < 100 else anio
+            partes[0] = str(calendar.monthrange(anio, mes)[1])
+        except (ValueError, IndexError):
+            return None
+    if len(partes) != 3:
+        return None
+
+    try:
+        dia, mes, anio = int(partes[0]), int(partes[1]), int(partes[2])
+        if anio < 100:
+            anio += 2000
+        return datetime(anio, mes, dia).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
 def actualizar_vencimiento_lote(lote_id: int, fecha) -> str | None:
     """Corrige el vencimiento de un lote ya cargado.
 
@@ -1496,8 +1540,22 @@ def actualizar_vencimiento_lote(lote_id: int, fecha) -> str | None:
             conn.commit()
         return None
 
+    # Formato ISO tal cual (viene de la base, no de alguien tipeando)
     iso = None
-    for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y"):
+    try:
+        iso = datetime.strptime(texto, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        # Todo lo demas lo resuelve el parser flexible: 15/03/27,
+        # 15-3-27, 150327, 3/27...
+        iso = parsear_fecha(texto)
+    if iso:
+        with get_connection() as conn:
+            conn.execute("UPDATE lotes SET fecha_vencimiento=? WHERE id=?",
+                         (iso, lote_id))
+            conn.commit()
+        return iso
+
+    for formato in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y"):
         try:
             iso = datetime.strptime(texto, formato).strftime("%Y-%m-%d")
             break
@@ -2254,6 +2312,25 @@ def toggle_publicar_web(ids, publicar=None) -> int:
                 [int(bool(publicar))] + ids)
         conn.commit()
         return cur.rowcount
+
+
+def costo_real_producto(producto_id: int) -> float:
+    """Costo del ULTIMO lote con stock, o el del producto si no hay.
+
+    Es lo que realmente se esta por vender: si el proveedor subio y no se
+    toco el precio, este numero lo delata y el del producto no.
+    """
+    with get_connection() as conn:
+        r = conn.execute("""
+            SELECT COALESCE((
+                SELECT l.costo_unitario FROM lotes l
+                WHERE l.producto_id = p.id AND l.cantidad_restante > 0
+                  AND COALESCE(l.costo_unitario, 0) > 0
+                ORDER BY l.fecha_ingreso DESC, l.id DESC LIMIT 1
+            ), p.costo_ultimo, 0) as costo
+            FROM productos p WHERE p.id = ?
+        """, (producto_id,)).fetchone()
+    return float(r["costo"] or 0) if r else 0.0
 
 
 def alertas_margen() -> dict:
