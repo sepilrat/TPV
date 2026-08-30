@@ -130,6 +130,66 @@ def hacer_backup(motivo: str = "manual") -> str | None:
         return None
 
 
+def backup_del_dia() -> str | None:
+    """Una copia por dia, aparte de las de apertura y cierre.
+
+    Las de apertura se pisan entre si al cabo de MAX_BACKUPS: si el TPV
+    se abre diez veces en un dia, se pierde todo lo anterior. Esta se
+    guarda con la fecha en el nombre y en su propia carpeta, asi hay a
+    donde volver una semana despues.
+    """
+    from config import cfg
+    if not cfg().get("backup_diario", True):
+        return None
+
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    carpeta = os.path.join(os.path.dirname(DB_PATH), "backups", "diarios")
+    os.makedirs(carpeta, exist_ok=True)
+    destino = os.path.join(carpeta, f"tpv2_{hoy}.db")
+
+    # Ya se hizo hoy: no tiene sentido rehacerla en cada arranque
+    if os.path.exists(destino):
+        return destino
+
+    try:
+        origen = sqlite3.connect(DB_PATH)
+        copia = sqlite3.connect(destino)
+        with copia:
+            origen.backup(copia)
+        copia.close()
+        origen.close()
+
+        # Verificar: un backup corrupto es peor que ninguno, porque uno
+        # cree que esta cubierto.
+        chk = sqlite3.connect(destino)
+        estado = chk.execute("PRAGMA integrity_check").fetchone()[0]
+        chk.close()
+        if estado != "ok":
+            os.remove(destino)
+            logging.error(f"Backup diario corrupto: {estado}")
+            return None
+
+        logging.info(f"Backup diario: {os.path.basename(destino)}")
+        _limpiar_diarios(carpeta,
+                         int(cfg().get("backup_diario_dias", 30) or 30))
+        return destino
+    except Exception as e:
+        logging.error(f"Error en el backup diario: {e}")
+        return None
+
+
+def _limpiar_diarios(carpeta, dias):
+    """Deja los ultimos N dias. Sin esto la carpeta crece sin freno."""
+    try:
+        archivos = sorted(
+            f for f in os.listdir(carpeta)
+            if f.startswith("tpv2_") and f.endswith(".db"))
+        for viejo in archivos[:-dias] if dias > 0 else []:
+            os.remove(os.path.join(carpeta, viejo))
+    except Exception as e:
+        logging.debug(f"No se pudieron limpiar los backups diarios: {e}")
+
+
 def _limpiar_backups_viejos():
     """Borra backups más viejos si hay más de MAX_BACKUPS."""
     try:

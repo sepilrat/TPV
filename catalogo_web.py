@@ -175,6 +175,12 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
             "promos": json.dumps(promos_compactas) if promos_compactas else "",
         })
 
+    # No mandar un catalogo vacio: del otro lado borraria la hoja y los
+    # clientes verian "catalogo vacio" hasta la proxima sincronizacion.
+    if not productos:
+        return False, ("No hay productos para publicar. No se sincronizó "
+                       "para no dejar la página en blanco.")
+
     payload = json.dumps({
         "productos": productos,
         "productos_interno": productos_interno,

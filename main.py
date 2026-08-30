@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import ttk
 from styles import C, aplicar_tema, lbl, btn
 from db import inicializar_db, get_sesion_abierta, abrir_sesion_caja
-from logger import inicializar_logs, hacer_backup
+from logger import inicializar_logs, hacer_backup, backup_del_dia
 from repositorio import get_stock_critico, get_vencimientos_proximos
 
 
@@ -37,6 +37,9 @@ class AppTPV(tk.Tk):
         inicializar_db()
         aplicar_tema()
         hacer_backup("inicio")
+        # Una copia por dia, con la fecha en el nombre. Las de apertura
+        # se pisan entre si; esta queda para volver una semana despues.
+        backup_del_dia()
         self._aviso_diario("apertura del sistema", "aviso_diario_al_abrir_app")
         self._programar_aviso_por_hora()
         self._programar_sync_catalogo()
@@ -198,6 +201,15 @@ class AppTPV(tk.Tk):
         if not cfg().get(clave_config):
             return
 
+        # Un envio a la vez. El aviso corre en un hilo y la marca de
+        # "ya se mando hoy" se graba al TERMINAR: si el SMTP tarda mas
+        # que los 5 minutos del chequeo, se lanzan varios hilos y llegan
+        # varios mails iguales.
+        if getattr(self, "_enviando_aviso", False):
+            logging.debug("Aviso diario ya en curso: no se lanza otro.")
+            return
+        self._enviando_aviso = True
+
         def trabajo():
             try:
                 from impresion import enviar_aviso_diario
@@ -205,6 +217,8 @@ class AppTPV(tk.Tk):
                 (logging.info if ok else logging.debug)(f"Aviso diario: {msg}")
             except Exception as e:
                 logging.warning(f"No se pudo enviar el aviso diario: {e}")
+            finally:
+                self._enviando_aviso = False
 
         threading.Thread(target=trabajo, daemon=True).start()
 

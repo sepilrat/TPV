@@ -190,6 +190,22 @@ def guardar_imagen_desde_url(producto_id: int, url: str) -> str:
         raise ValueError("Esa foto es un SVG y no se puede usar. "
                          "Probá con otra imagen.")
 
+    # Quien llama a ESTA funcion quiere la foto bajada, si o si. La
+    # bandera global existe para que dibujar una lista no dependa de
+    # internet, pero acá es una accion explicita del usuario: sin esto
+    # devolvia None y el producto quedaba con el link externo.
+    global PERMITIR_DESCARGA_URL
+    _antes = PERMITIR_DESCARGA_URL
+    PERMITIR_DESCARGA_URL = True
+    try:
+        return _bajar_y_guardar(producto_id, url)
+    finally:
+        PERMITIR_DESCARGA_URL = _antes
+
+
+def _bajar_y_guardar(producto_id: int, url: str) -> str:
+    """El trabajo real de guardar_imagen_desde_url."""
+
     data = _resolver_bytes(url)
     if not data:
         raise ValueError("No se pudo descargar la imagen de esa URL.")

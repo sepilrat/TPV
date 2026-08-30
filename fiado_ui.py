@@ -256,7 +256,8 @@ def dialogo_fiado(parent) -> dict | None:
     return result[0]
 
 
-def _dialogo_alta(parent, dni, responsable, result_ref):
+def _dialogo_alta(parent, dni, responsable, result_ref,
+                  nombre_inicial=""):
     """Formulario de alta de cliente nuevo."""
     d = tk.Toplevel(parent)
     d.title("Alta de cliente")
@@ -290,7 +291,14 @@ def _dialogo_alta(parent, dni, responsable, result_ref):
     lbl(d, f"DNI: {dni}", variante="suave", bg=C.superficie,
         fg=C.texto_suave).pack(padx=20, anchor="w", pady=(8, 0))
 
+    # El nombre viene precargado si se lo escribio en el buscador: no
+    # tiene sentido hacerlo tipear dos veces con el cliente esperando.
+    if nombre_inicial:
+        entries["e_nombre"].delete(0, "end")
+        entries["e_nombre"].insert(0, nombre_inicial)
+
     entries["e_nombre"].focus_set()
+    entries["e_nombre"].select_range(0, "end")
 
     def guardar(event=None):
         nombre = entries["e_nombre"].get().strip()

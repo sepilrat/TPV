@@ -124,6 +124,10 @@ class RevisionUI(ttk.Frame):
     # ── Datos ─────────────────────────────────────────────────────────
 
     def refrescar(self):
+        # La pantalla puede destruirse entre el after() y su ejecucion:
+        # sin esta guarda Tk tira "invalid command name" en bucle.
+        if not self.winfo_exists():
+            return
         estado = self.filtro.get()
         cat_id = self._cats[[c["nombre"] for c in self._cats]
                             .index(self.var_cat.get())]["id"]

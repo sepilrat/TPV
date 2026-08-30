@@ -127,6 +127,10 @@ class ReposicionUI(ttk.Frame):
     # ── Datos ─────────────────────────────────────────────────────────
 
     def refrescar(self):
+        # La pantalla puede destruirse entre el after() y su ejecucion:
+        # sin esta guarda Tk tira "invalid command name" en bucle.
+        if not self.winfo_exists():
+            return
         try:
             hist = int(self.v_hist.get() or 30)
             cob = int(self.v_cob.get() or 14)

@@ -78,6 +78,7 @@ class VentasUI(ttk.Frame):
         self._atajos()
         self._chequear_recargo()
         self.after(2000, self._vigilar_foco)
+        self._instalar_captura_scanner()
         self.after(100, self.foco_scanner)
 
     def _chequear_recargo(self):
@@ -414,6 +415,57 @@ class VentasUI(ttk.Frame):
         except Exception:
             pass
 
+    def _instalar_captura_scanner(self):
+        """Captura el escaneo aunque el foco esté en otro lado.
+
+        Un lector escribe 12 caracteres en milisegundos y cierra con
+        Enter; una persona no. Cuando se detecta ese patrón, el texto se
+        manda al campo del scanner sin importar dónde estaba el foco: si
+        no, el beep suena, el cajero cree que registró, y el producto se
+        va sin cobrar.
+        """
+        import time as _t
+        self._buf = []
+        self._ult = [0.0]
+
+        def _tecla(ev):
+            if not self.winfo_ismapped():
+                return
+            # Con un diálogo abierto, el teclado es de él
+            if any(isinstance(w, tk.Toplevel) and w.winfo_ismapped()
+                   for w in self.winfo_toplevel().winfo_children()):
+                return
+            # El foco ya está en el scanner: no hace falta hacer nada
+            if self.focus_get() is self.entry_scan:
+                return
+
+            ahora = _t.time()
+            if ahora - self._ult[0] > 0.12:
+                self._buf = []          # pausa larga: es una persona
+            self._ult[0] = ahora
+
+            if ev.keysym == "Return":
+                codigo = "".join(self._buf)
+                self._buf = []
+                # 6 caracteres o más y todo seguido: fue un lector
+                if len(codigo) >= 6:
+                    self.entry_scan.delete(0, "end")
+                    self.entry_scan.insert(0, codigo)
+                    self.entry_scan.focus_set()
+                    self._on_enter(None)
+                    return "break"
+            elif len(ev.char) == 1 and ev.char.isprintable():
+                self._buf.append(ev.char)
+                if len(self._buf) > 40:
+                    self._buf = self._buf[-40:]
+                # Si viene a ritmo de lector, las teclas NO llegan al
+                # campo donde estaba el foco: si no, el codigo termina
+                # escrito en el descuento o en la busqueda.
+                if len(self._buf) >= 4:
+                    return "break"
+
+        self.winfo_toplevel().bind("<Key>", _tecla, add="+")
+
     def _vigilar_foco(self):
         """Red de seguridad: devuelve el foco al scanner solo.
 
@@ -428,6 +480,11 @@ class VentasUI(ttk.Frame):
         try:
             if self.winfo_ismapped():
                 foco = self.focus_get()
+                # Si el foco quedo en un campo de OTRA pantalla, el lector
+                # escribe ahi y la venta no se registra aunque suene el
+                # beep. Solo se respetan los campos de ESTA pantalla.
+                if foco is not None and not str(foco).startswith(str(self)):
+                    foco = None
                 # Ningun foco, o el foco quedo en un widget que no acepta
                 # texto (un boton, la tabla): el scanner no llegaria.
                 # La lista de resultados y la tabla del carrito TAMBIEN
@@ -440,10 +497,14 @@ class VentasUI(ttk.Frame):
                     # Solo si no hay ventana modal encima
                     if not any(isinstance(w, tk.Toplevel) and w.winfo_ismapped()
                                for w in self.winfo_toplevel().winfo_children()):
-                        # Y solo si el scanner esta VACIO: si hay algo a
-                        # medio escribir, moverlo pierde lo tipeado.
-                        if not self.entry_scan.get().strip():
-                            self.entry_scan.focus_set()
+                        # Si el scanner tiene texto viejo de un escaneo
+                        # que se perdio, se limpia: dejarlo hace que el
+                        # proximo codigo se pegue atras y no exista.
+                        actual = self.entry_scan.get().strip()
+                        if actual and actual == getattr(self, "_txt_previo", None):
+                            self.entry_scan.delete(0, "end")
+                        self._txt_previo = actual
+                        self.entry_scan.focus_set()
         except Exception:
             pass
         # Cada 4 segundos alcanza: es una red de seguridad para cuando un
@@ -2022,10 +2083,14 @@ class VentasUI(ttk.Frame):
                     fg=C.advertencia)
                 btn_alta.pack(side="left", padx=8)
             else:
+                # Tambien se ofrece el alta buscando por NOMBRE: antes solo
+                # aparecia con un DNI, y para un cliente nuevo habia que
+                # cancelar el cobro e ir a Fiado.
                 lbl_info.config(
                     text=f"Ningun cliente coincide con \u201c{texto}\u201d. "
-                         f"Proba con parte del nombre o con el DNI.",
+                         f"Presiona 'Dar de alta' para registrarlo.",
                     fg=C.advertencia)
+                btn_alta.pack(side="left", padx=8)
 
         result = [None]
 
@@ -2051,20 +2116,31 @@ class VentasUI(ttk.Frame):
 
         def _dar_alta():
             from fiado_ui import pedir_autorizacion, _dialogo_alta
-            dni = e_dni.get().strip().replace(".", "").replace("-", "")
+            txt = e_dni.get().strip()
+            # Lo escrito puede ser un DNI o un nombre: se manda al campo
+            # que corresponde en vez de meter "Juan Perez" en el DNI.
+            limpio = txt.replace(".", "").replace("-", "").replace(" ", "")
+            if limpio.isdigit():
+                dni, nombre = limpio, ""
+            else:
+                dni, nombre = "", txt
+
             resp = pedir_autorizacion(d,
                 "Registrar un cliente nuevo requiere autorizacion.")
             if not resp:
                 return
             alta_result = [None]
-            _dialogo_alta(d, dni, resp, alta_result)
+            _dialogo_alta(d, dni, resp, alta_result, nombre_inicial=nombre)
             if alta_result[0]:
-                cliente_ref[0] = alta_result[0]
+                c = alta_result[0]
+                cliente_ref[0] = c
                 e_dni.delete(0, "end")
-                e_dni.insert(0, dni)
+                e_dni.insert(0, c.get("nombre", ""))
+                disp = c.get("tope_credito", 0) - c.get("saldo_actual", 0)
                 lbl_info.config(
-                    text=f"{alta_result[0]['nombre']} registrado correctamente.",
-                    fg=C.exito)
+                    text=f"{c['nombre']} registrado.  |  "
+                         f"Disponible: $ {disp:,.2f}",
+                    fg=C.exito if disp >= total else C.advertencia)
                 btn_alta.pack_forget()
 
         # Botones

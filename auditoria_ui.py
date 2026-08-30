@@ -102,6 +102,10 @@ class AuditoriaUI(ttk.Frame):
     # ── datos ──────────────────────────────────────────────────────────────
 
     def refrescar(self):
+        # La pantalla puede destruirse entre el after() y su ejecucion:
+        # sin esta guarda Tk tira "invalid command name" en bucle.
+        if not self.winfo_exists():
+            return
         try:
             productos = repo_aud.get_productos_auditoria()
             descartes = repo_aud.get_descartes()

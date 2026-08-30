@@ -336,6 +336,9 @@ class IngresoUI(ttk.Frame):
         self.combo_cat = ttk.Combobox(f_cat, font=F.normal, state="readonly",
                                       width=16)
         self.combo_cat.grid(row=0, column=0, sticky="ew", ipady=4)
+        self.lbl_margen_info = lbl(self.frame_precio, "", variante="suave")
+        self.lbl_margen_info.grid(row=2, column=0, columnspan=2, sticky="w",
+                                  padx=12, pady=(0, 4))
 
         btn(f_cat, "+", variante="neutro",
             comando=self._nueva_categoria).grid(row=0, column=1, padx=(4,0))
@@ -397,8 +400,46 @@ class IngresoUI(ttk.Frame):
                        self.entry_precio, self.entry_total_linea):
             _campo.bind("<FocusIn>", _seleccionar_todo, add="+")
 
+        # Producto nuevo: al elegir la categoria (o tipear el costo) el
+        # precio de venta sale solo con el margen del rubro. Pensar el
+        # precio de cada producto con el proveedor esperando es lo que
+        # hace lenta la carga.
+        def _sugerir_precio(*_a):
+            if self._producto_actual:
+                return          # producto existente: no se toca su precio
+            try:
+                costo = float(self.entry_costo.get().strip().replace(",", "."))
+            except ValueError:
+                return
+            if costo <= 0:
+                return
+            cat = self.combo_cat.get().strip()
+            margen = getattr(self, "_cat_margen", {}).get(cat)
+            if margen is None:
+                from config import cfg
+                margen = float(cfg().get("margen_default", 30) or 30)
+            from repositorio import redondear_precio
+            sugerido = redondear_precio(costo * (1 + float(margen) / 100))
+            actual = self.entry_precio.get().strip()
+            # No se pisa un precio escrito a mano
+            if actual in ("", "0.00", "0") or actual == getattr(
+                    self, "_precio_sugerido_prev", None):
+                self.entry_precio.delete(0, "end")
+                self.entry_precio.insert(0, f"{sugerido:.2f}")
+                self._precio_sugerido_prev = f"{sugerido:.2f}"
+                self.lbl_margen_info.config(
+                    text=f"margen {float(margen):.0f}% de «{cat or 'general'}»")
+
+        self.combo_cat.bind("<<ComboboxSelected>>", _sugerir_precio)
+        self.entry_costo.bind("<FocusOut>", _sugerir_precio, add="+")
+        self.entry_costo.bind("<Return>", _sugerir_precio, add="+")
+
         self._cargar_combos()
         self._toggle_precio(False)
+
+        # La mercaderia llega por rubro: si el remito trae doce cosas de
+        # almacen, la categoria del anterior acierta once veces.
+        self._ultima_cat = None
         # Al final: los binds necesitan que los campos ya existan.
         self._atajos()
 
@@ -459,6 +500,8 @@ class IngresoUI(ttk.Frame):
 
         cats = get_categorias()
         self._cat_map = {r["nombre"]: r["id"] for r in cats}
+        # El margen de cada rubro, para sugerir el precio de venta
+        self._cat_margen = {r["nombre"]: r.get("margen_pct") for r in cats}
         self.combo_cat["values"] = list(self._cat_map.keys())
         if self._cat_map:
             self.combo_cat.current(0)
@@ -513,6 +556,9 @@ class IngresoUI(ttk.Frame):
             # guardar. Antes habia que guardarlo mal e ir al catalogo.
             self.btn_editar_nombre.config(text="✏️  Corregir nombre o marca")
             self.btn_editar_nombre.pack(anchor="w", pady=(4, 0))
+            # Se repite la categoria del producto anterior
+            if getattr(self, "_ultima_cat", None) and not self.combo_cat.get():
+                self.combo_cat.set(self._ultima_cat)
             self.lbl_info.config(
                 text="Producto nuevo — completá descripción y precio de venta",
                 fg=C.advertencia,
@@ -943,14 +989,28 @@ class IngresoUI(ttk.Frame):
                 actualizar_imagen_producto(prod_id, self._foto_nueva_url)
                 self._foto_fallo = str(e)
 
-        # Registrar lote — si el costo subió, se recalcula el precio
-        # solo (como ya venía funcionando). Si bajó, se pregunta antes
-        # de tocarlo: puede que el usuario quiera mantener el precio
-        # de venta actual (guardar más margen) en vez de bajarlo.
+        # Se pregunta SIEMPRE antes de tocar el precio de venta, suba o
+        # baje el costo. Antes, si subia, se cambiaba solo y recien
+        # despues avisaba: uno cargaba mercaderia y salia con otros
+        # precios en la gondola sin haberlo decidido.
         info = evaluar_cambio_costo(prod_id, costo)
         nuevo_precio_venta = None
-        if info["direccion"] == "subio":
-            nuevo_precio_venta = info["precio_sugerido"]
+        if (info["direccion"] == "subio"
+                and round(info["precio_sugerido"], 2)
+                    != round(info["precio_actual"], 2)):
+            _margen_act = ((info["precio_actual"] - costo) / costo * 100
+                           if costo else 0)
+            if messagebox.askyesno(
+                    "El costo subió",
+                    f"El costo pasó de $ {info['costo_anterior']:,.2f} "
+                    f"a $ {costo:,.2f}.\n\n"
+                    f"Precio actual:    $ {info['precio_actual']:,.2f}   "
+                    f"(margen {_margen_act:.0f}%)\n"
+                    f"Precio sugerido:  $ {info['precio_sugerido']:,.2f}\n\n"
+                    f"¿Actualizo el precio de venta?\n"
+                    f"(si decís que no, se mantiene el actual)",
+                    parent=self, default="yes"):
+                nuevo_precio_venta = info["precio_sugerido"]
         elif (info["direccion"] == "bajo"
               and round(info["precio_sugerido"], 2) != round(info["precio_actual"], 2)):
             nuevo_precio_venta = None
@@ -1007,6 +1067,27 @@ class IngresoUI(ttk.Frame):
                 f"(según margen del producto o categoría)",
                 parent=self
             )
+        # Si la alerta estaba silenciada, se ofrece reactivarla: se
+        # silencia cuando un producto no se va a reponer, y al reponerlo
+        # queda mudo justamente cuando vuelve a hacer falta.
+        try:
+            if (self._producto_actual
+                    and self._producto_actual.get("ignorar_alerta")):
+                if messagebox.askyesno(
+                        "Alerta de stock",
+                        f"«{self._producto_actual['descripcion'][:38]}» tiene "
+                        f"la alerta de stock bajo SILENCIADA.\n\n"
+                        f"Como estás reponiendo, ¿la vuelvo a activar?",
+                        parent=self, default="yes"):
+                    from repositorio import set_ignorar_alerta
+                    set_ignorar_alerta(prod_id, False)
+                    toast(self, "Alerta de stock reactivada")
+        except Exception as exc:
+            logging.debug(f"No se pudo revisar la alerta de stock: {exc}")
+
+        if not self._producto_actual:
+            self._ultima_cat = self.combo_cat.get().strip() or None
+
         toast(self, f"Ingreso OK — {_fmt_cant(cantidad)} u.")
 
         self._limpiar()

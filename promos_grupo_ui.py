@@ -67,6 +67,11 @@ class PromosGrupoUI(ttk.Frame):
         self.tree.bind("<Double-1>", lambda e: self._editar())
 
     def refrescar(self):
+        # La pantalla puede haberse destruido entre que se programo el
+        # after() y que se ejecuta: sin esto Tk tira "invalid command
+        # name" en bucle y llena la consola de errores.
+        if not self.winfo_exists():
+            return
         try:
             self._filas = get_promo_grupos()
         except Exception as exc:
@@ -105,8 +110,11 @@ class PromosGrupoUI(ttk.Frame):
         activas = sum(1 for g in self._filas
                       if g["activa"]
                       and not (g["fecha_hasta"] and g["fecha_hasta"] < hoy))
-        self.lbl_cont.config(text=f"{len(self._filas)} promo(s) · "
-                                  f"{activas} activa(s)")
+        try:
+            self.lbl_cont.config(text=f"{len(self._filas)} promo(s) · "
+                                      f"{activas} activa(s)")
+        except tk.TclError:
+            pass
 
     def _sel(self):
         sel = self.tree.selection()

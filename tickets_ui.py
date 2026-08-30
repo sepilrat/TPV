@@ -104,6 +104,10 @@ class TicketsUI(ttk.Frame):
         self.refrescar()
 
     def refrescar(self):
+        # La pantalla puede destruirse entre el after() y su ejecucion:
+        # sin esta guarda Tk tira "invalid command name" en bucle.
+        if not self.winfo_exists():
+            return
         try:
             self._filas = buscar_tickets(
                 self.v_desde.get().strip() or None,

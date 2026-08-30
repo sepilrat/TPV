@@ -123,6 +123,10 @@ DEFAULTS = {
     # Ventana del ranking de lo mas vendido. 0 = desde siempre.
     # Una semana muestra lo que rota ahora; el historico completo muestra
     # que sostiene el negocio. Son preguntas distintas.
+    # Revision de datos dentro del mail: productos en $0, stock negativo,
+    # promos repetidas. Correr un script a mano no es un plan.
+    "aviso_revisar_datos":                True,
+    "aviso_cuando_vendo":                 True,
     "aviso_top_dias":                     30,
     "aviso_top_cantidad":                 10,
     "informe_stock_email_activo":         False,
@@ -158,6 +162,9 @@ DEFAULTS = {
 
     # Sistema
     "backup_automatico":    True,
+    # Copia diaria aparte, con la fecha en el nombre
+    "backup_diario":        True,
+    "backup_diario_dias":   30,
     "backup_max":           30,
     "logs_max":             10,
     "moneda_simbolo":       "$",

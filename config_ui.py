@@ -78,6 +78,8 @@ SECCIONES = [
         ("aviso_diario_al_abrir_caja",  "También al abrir la caja",             "bool"),
         ("aviso_diario_al_cerrar_caja", "También al cerrar la caja",            "bool"),
         ("aviso_incluir_stock_completo", "Incluir el listado de stock completo", "bool"),
+        ("aviso_revisar_datos", "Incluir la revisión de datos (productos en $0, stock negativo…)", "bool"),
+        ("aviso_cuando_vendo", "Incluir qué días y horas se vende más",  "bool"),
         ("aviso_top_dias",     "Lo más vendido: de cuántos días (0 = histórico completo)", "int"),
         ("aviso_top_cantidad", "Lo más vendido: cuántos productos mostrar",  "int"),
     ]),
@@ -135,6 +137,8 @@ SECCIONES = [
         ("moneda_simbolo",    "Simbolo de moneda",         "text"),
         ("backup_automatico", "Backup automatico",         "bool"),
         ("backup_max",        "Maximos backups a conservar","int"),
+        ("backup_diario",      "Copia diaria aparte (recomendado)", "bool"),
+        ("backup_diario_dias", "Cuántos días de copias diarias guardar", "int"),
         ("logs_max",          "Maximos logs a conservar",  "int"),
     ]),
 ]
@@ -386,6 +390,11 @@ class ConfigUI(ttk.Frame):
             comando=self._probar_emails).pack(side="left", padx=(0, 6))
         btn(fb2, "🌐 Sincronizar catálogo web", variante="primario",
             comando=self._sincronizar_catalogo).pack(side="left", padx=(0, 6))
+
+        self.lbl_sync = tk.Label(fb.master, text="", bg=fb.cget("bg"),
+                                 fg=C.texto_suave, font=F.pequeña, anchor="w")
+        self.lbl_sync.pack(fill="x", pady=(6, 0))
+        self._actualizar_estado_sync()
 
     def _cargar_valores(self):
         c = cfg_mod.cargar()
@@ -712,11 +721,70 @@ class ConfigUI(ttk.Frame):
             baudrate=c.get("balanza_baudrate"))
         messagebox.showinfo("Prueba de balanza", resultado, parent=self)
 
+    def _texto_estado_sync(self):
+        """Cuándo se sincronizó y cuándo vuelve a hacerlo.
+
+        Sin esto no hay forma de saber si la página que ven los clientes
+        está al día: se descubre cuando alguien pide algo a un precio
+        viejo.
+        """
+        from datetime import datetime, timedelta
+        c = cfg_mod.cargar()
+        ultima = c.get("_catalogo_sync_ultima") or ""
+        if not ultima:
+            return ("Todavía no se sincronizó nunca.", C.peligro)
+
+        try:
+            prev = datetime.fromisoformat(ultima)
+        except ValueError:
+            return (f"Última sincronización: {ultima}", C.texto_suave)
+
+        mins = (datetime.now() - prev).total_seconds() / 60
+        if mins < 60:
+            hace = f"hace {mins:.0f} min"
+        elif mins < 60 * 24:
+            hace = f"hace {mins/60:.0f} h"
+        else:
+            hace = f"hace {mins/1440:.0f} días"
+        txt = f"Última: {prev.strftime('%d/%m %H:%M')} ({hace})"
+
+        if not c.get("catalogo_sync_auto"):
+            return (txt + "  ·  la automática está apagada", C.texto_suave)
+
+        cada = max(1, int(c.get("catalogo_sync_cada_horas", 6) or 6))
+        prox = prev + timedelta(hours=cada)
+        if prox <= datetime.now():
+            # Vencida: o el TPV estuvo cerrado, o la sync viene fallando
+            return (txt + "  ·  la próxima ya venció — se hará al abrir "
+                          "el TPV", C.advertencia)
+        falta = (prox - datetime.now()).total_seconds() / 60
+        cuando = (f"en {falta:.0f} min" if falta < 60
+                  else f"en {falta/60:.0f} h")
+        return (txt + f"  ·  próxima {prox.strftime('%H:%M')} ({cuando})",
+                C.texto_suave)
+
+    def _actualizar_estado_sync(self):
+        if not hasattr(self, "lbl_sync"):
+            return
+        try:
+            txt, color = self._texto_estado_sync()
+            self.lbl_sync.config(text=txt, fg=color)
+        except Exception:
+            pass
+        # Se refresca solo: el "hace 5 min" envejece mientras la pantalla
+        # queda abierta.
+        self.after(60000, self._actualizar_estado_sync)
+
     def _sincronizar_catalogo(self):
         """Manda el catálogo actual a la Google Sheet."""
         c = cfg_mod.cargar()
         import catalogo_web
         ok, msg = catalogo_web.sincronizar(c.get("catalogo_web_url"))
+        if ok:
+            from datetime import datetime
+            cfg_mod.set("_catalogo_sync_ultima",
+                        datetime.now().isoformat(timespec="seconds"))
+            self._actualizar_estado_sync()
         if ok:
             messagebox.showinfo("Catálogo web", msg, parent=self)
         else:

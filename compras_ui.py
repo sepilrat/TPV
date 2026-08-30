@@ -169,6 +169,10 @@ class ComprasUI(ttk.Frame):
     # ══════════════════════════════════════════════════════════════════
 
     def refrescar(self):
+        # La pantalla puede destruirse entre el after() y su ejecucion:
+        # sin esta guarda Tk tira "invalid command name" en bucle.
+        if not self.winfo_exists():
+            return
         try:
             self._filas = get_lista_compras(incluir_comprados=True)
         except Exception as exc:

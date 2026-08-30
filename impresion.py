@@ -8,7 +8,7 @@ import sys
 import tempfile
 import logging
 from datetime import datetime
-from config import cfg
+from config import cfg, set as cfg_set
 from db import get_connection
 
 
@@ -547,6 +547,13 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     if not forzar and c.get(_clave_envio) == hoy:
         return False, f"El aviso de hoy ya se mando ({motivo or 'sin motivo'})."
 
+    # Se marca ANTES de armar y enviar, no despues: armar el mail y
+    # hablar con el SMTP puede tardar minutos, y en ese rato el chequeo
+    # vuelve a correr y sale un segundo mail igual. Si el envio falla, se
+    # deshace la marca mas abajo.
+    if not forzar:
+        cfg_set(_clave_envio, hoy)
+
     vtos = get_vencimientos_proximos()
     # Reposicion por velocidad de venta, no por umbral fijo: el listado
     # de "stock bajo" daba 86 productos, la mayoria de rotacion lenta que
@@ -557,9 +564,30 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         cob = 14
     reponer = get_reposicion(30, cob, solo_faltantes=True)
 
+    # Stock bajo por umbral fijo: get_reposicion mide velocidad de venta,
+    # asi que un producto que no se vendio en 30 dias no aparece nunca
+    # aunque tenga 1 unidad. Estos son los que se acaban sin avisar.
+    try:
+        from repositorio import stock_bajo_umbral
+        _ya = {x.get("id") for x in reponer}
+        bajos = [x for x in stock_bajo_umbral() if x["id"] not in _ya]
+    except Exception as _e:
+        logging.warning(f"No se pudo leer el stock bajo: {_e}")
+        bajos = []
+
     # Lo que piden los clientes y nunca se compro: no tiene stock que
     # medir, asi que no sale por ningun otro lado. Es justo lo que uno
     # necesita a mano antes de salir a comprar.
+    # Cuando se vende: para decidir horarios y refuerzos. Va con barras
+    # porque un cuadro de numeros no muestra el patron de un vistazo.
+    try:
+        from repositorio import ventas_por_dia_y_hora
+        cuando = (ventas_por_dia_y_hora(int(c.get("aviso_top_dias", 30) or 30))
+                  if c.get("aviso_cuando_vendo", True) else None)
+    except Exception as _e:
+        logging.warning(f"No se pudo armar el informe por dia/hora: {_e}")
+        cuando = None
+
     # Lo mas vendido del periodo: es lo que hay que tener siempre, y
     # tenerlo en el mismo mail evita entrar al sistema para verlo.
     try:
@@ -590,6 +618,16 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     except Exception as _e:
         logging.warning(f"No se pudieron calcular las alertas de margen: {_e}")
         alertas = {"perdida": [], "al_costo": [], "bajo_categoria": []}
+
+    # Revision de datos: los mismos chequeos del verificador, corriendo
+    # solos. Un producto en $0 o un stock negativo no avisan por si
+    # mismos, y acordarse de correr un script no es un plan.
+    try:
+        from repositorio import chequeos_de_datos
+        revision = chequeos_de_datos() if c.get("aviso_revisar_datos", True) else []
+    except Exception as _e:
+        logging.warning(f"No se pudo hacer la revision de datos: {_e}")
+        revision = []
 
     # Precios que BAJARON. Es la red de seguridad contra un cambio que
     # nadie aprobo: si algo toca un precio de menos, aparece aca al dia
@@ -634,11 +672,11 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         dia = None
     # El top cuenta como contenido: un mail que resume la semana sirve
     # aunque no haya nada urgente que avisar.
-    if (not vtos and not reponer and not pedidos and not top and not bajas
-            and not any(alertas.values())
+    if (not vtos and not reponer and not bajos and not pedidos and not top
+            and not bajas
+            and not revision and not any(alertas.values())
             and not (dia and dia.get("tickets"))):
         if not forzar:
-            from config import set as cfg_set
             cfg_set(_clave_envio, hoy)
         return False, "Nada para avisar: sin vencimientos ni stock critico."
 
@@ -654,6 +692,8 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         partes.append(f"{len(pedidos)} pedido(s) de clientes")
     if criticos:
         partes.append(f"{len(criticos)} urgente(s) para reponer")
+    if bajos:
+        partes.append(f"{len(bajos)} con poco stock")
     elif reponer:
         partes.append(f"{len(reponer)} para reponer")
     vencidos = [v for v in vtos if v["dias_restantes"] < 0]
@@ -769,6 +809,30 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
             html.append(f"<p style='font-size:13px'>…y {len(_bajo) - 20} "
                         f"más.</p>")
 
+    if revision:
+        _n = sum(x["cantidad"] for x in revision)
+        html.append(
+            f"<h3>🔍 Revisión de datos — {_n} cosa(s) para mirar</h3>"
+            "<p style='font-size:13px;color:#6B7280'>Nada urgente, pero "
+            "conviene corregirlo antes de que dé problemas en la caja.</p>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>")
+        for x in revision:
+            html.append(
+                f"<tr style='background:#F3F4F6'><td colspan='2'>"
+                f"<b>{x['titulo']}</b> — {x['cantidad']}"
+                f"<span style='color:#6B7280;font-size:12px'> · se corrige "
+                f"en {x['donde']}</span></td></tr>")
+            for d in x["detalle"]:
+                html.append(f"<tr><td style='padding-left:22px' "
+                            f"colspan='2'>{d}</td></tr>")
+            if x["cantidad"] > len(x["detalle"]):
+                html.append(
+                    f"<tr><td style='padding-left:22px;color:#6B7280' "
+                    f"colspan='2'>…y {x['cantidad'] - len(x['detalle'])} "
+                    f"más</td></tr>")
+        html.append("</table>")
+
     if bajas:
         html.append(
             "<h3 style='color:#B23B2E'>⚠ Precios que bajaron</h3>"
@@ -814,6 +878,51 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
                 f"<td align='right'>$ "
                 f"{x.get('total_vendido') or 0:,.2f}</td></tr>")
         html.append("</table>")
+
+    if cuando and any(x["monto"] for x in cuando["dias"]):
+        def _barra(monto, tope, color):
+            """Barra con una celda de tabla: los <div> con ancho no se
+            ven bien en varios clientes de correo, las tablas sí."""
+            ancho = int(monto / tope * 100) if tope else 0
+            return (f"<table border='0' cellpadding='0' cellspacing='0' "
+                    f"style='display:inline-block;width:150px'><tr>"
+                    f"<td style='background:{color};height:11px;"
+                    f"width:{ancho}%'></td>"
+                    f"<td style='background:#F1F5F9;height:11px'></td>"
+                    f"</tr></table>")
+
+        html.append(f"<h3>Cuándo se vende ({cuando['periodo']} días)</h3>"
+                    "<table border='0' cellpadding='5' cellspacing='0' "
+                    "style='border-collapse:collapse;font-size:14px'>")
+        tope = max(x["monto"] for x in cuando["dias"]) or 1
+        mejor = max(cuando["dias"], key=lambda x: x["monto"])
+        for x in cuando["dias"]:
+            neg = " style='font-weight:700'" if x is mejor else ""
+            html.append(
+                f"<tr{neg}><td>{x['nombre']}</td>"
+                f"<td>{_barra(x['monto'], tope, '#2F7D3A')}</td>"
+                f"<td align='right'>$ {x['monto']:,.0f}</td>"
+                f"<td align='right' style='color:#6B7280'>"
+                f"{x['tickets']} tickets</td></tr>")
+        html.append("</table>")
+
+        if cuando["horas"]:
+            topeh = max(x["monto"] for x in cuando["horas"]) or 1
+            mejorh = max(cuando["horas"], key=lambda x: x["monto"])
+            html.append(
+                "<p style='font-size:13px;color:#6B7280;margin:10px 0 4px'>"
+                f"Por hora — el pico es a las {mejorh['hora']:02d}:00</p>"
+                "<table border='0' cellpadding='4' cellspacing='0' "
+                "style='border-collapse:collapse;font-size:13px'>")
+            for x in cuando["horas"]:
+                neg = " style='font-weight:700'" if x is mejorh else ""
+                html.append(
+                    f"<tr{neg}><td>{x['hora']:02d}:00</td>"
+                    f"<td>{_barra(x['monto'], topeh, '#1D4ED8')}</td>"
+                    f"<td align='right'>$ {x['monto']:,.0f}</td>"
+                    f"<td align='right' style='color:#6B7280'>"
+                    f"{x['tickets']}</td></tr>")
+            html.append("</table>")
 
     if pedidos:
         html.append(
@@ -874,6 +983,32 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
             html.append(f"<p>…y {len(reponer) - 40} mas. La lista completa "
                         f"esta en Productos → Reposicion.</p>")
 
+    if bajos:
+        _sin = sum(1 for x in bajos if (x["stock"] or 0) <= 0)
+        html.append(
+            f"<h3>Poco stock — {len(bajos)} producto(s)</h3>"
+            "<p style='font-size:13px;color:#6B7280'>Por debajo del umbral, "
+            "aunque no se hayan vendido últimamente. "
+            + (f"{_sin} sin nada de stock." if _sin else "") + "</p>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>"
+            "<tr style='background:#FEF3C7'><th align='left'>Producto</th>"
+            "<th align='left'>Categoría</th><th align='right'>Stock</th>"
+            "<th align='right'>Vendido 30d</th></tr>")
+        for x in bajos[:40]:
+            st = x["stock"] or 0
+            estilo = " style='color:#B23B2E'" if st <= 0 else ""
+            html.append(
+                f"<tr{estilo}><td>{x['descripcion']}</td>"
+                f"<td>{x.get('categoria') or '—'}</td>"
+                f"<td align='right'><b>{st:g}</b></td>"
+                f"<td align='right'>{x['vendido_30d']:g}</td></tr>")
+        html.append("</table>")
+        if len(bajos) > 40:
+            html.append(f"<p style='font-size:13px'>…y {len(bajos) - 40} "
+                        f"más. La lista completa está en Productos → "
+                        f"Reposición.</p>")
+
     # Listado de stock, si se pidió. Va al final: es lo mas largo y lo
     # que menos se mira, pero tenerlo evita mandar un segundo mail.
     if c.get("aviso_incluir_stock_completo"):
@@ -925,10 +1060,16 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
             srv.login(c["email_usuario"], c["email_password"])
             srv.send_message(msg)
     except Exception as e:
+        # Se libera la marca del dia: si el envio fallo, el proximo
+        # chequeo tiene que poder reintentar en vez de esperar a mañana.
+        if not forzar:
+            try:
+                cfg_set(_clave_envio, "")
+            except Exception:
+                pass
         return False, f"No se pudo enviar el aviso diario: {e}"
 
     if not forzar:
-        from config import set as cfg_set
         cfg_set("_aviso_diario_ultimo_envio", hoy)
     return True, f"Aviso diario enviado a {destinatario} ({resumen})."
 

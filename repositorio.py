@@ -513,6 +513,97 @@ def get_historial_ajustes(producto_id: int = None, limit: int = 100) -> list:
         return [dict(r) for r in filas]
 
 
+def ventas_por_dia_y_hora(dias=30) -> dict:
+    """Cuando se vende: por dia de semana y por franja horaria.
+
+    Sirve para decidir horarios y refuerzos. Se cuenta lo FACTURADO, no
+    la cantidad de tickets: veinte tickets chicos y cinco grandes no son
+    lo mismo a la hora de decidir si vale la pena abrir.
+    """
+    dias = max(7, int(dias or 30))
+    with get_connection() as conn:
+        # %w: 0=domingo. Se reordena a lunes-primero, que es como se
+        # piensa una semana de trabajo.
+        filas_d = conn.execute("""
+            SELECT CAST(strftime('%w', fecha) AS INTEGER) as dow,
+                   COUNT(*) as tickets, SUM(total) as monto
+            FROM ventas
+            WHERE date(fecha) >= date('now', ?)
+              AND COALESCE(anulada, 0) = 0
+            GROUP BY dow
+        """, (f"-{dias} days",)).fetchall()
+
+        filas_h = conn.execute("""
+            SELECT CAST(strftime('%H', fecha) AS INTEGER) as hora,
+                   COUNT(*) as tickets, SUM(total) as monto
+            FROM ventas
+            WHERE date(fecha) >= date('now', ?)
+              AND COALESCE(anulada, 0) = 0
+            GROUP BY hora ORDER BY hora
+        """, (f"-{dias} days",)).fetchall()
+
+    nombres = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves",
+               "Viernes", "Sábado"]
+    por_dia = {r["dow"]: dict(r) for r in filas_d}
+    dias_sem = []
+    for d in [1, 2, 3, 4, 5, 6, 0]:          # lunes primero
+        r = por_dia.get(d)
+        dias_sem.append({
+            "nombre": nombres[d],
+            "tickets": (r or {}).get("tickets", 0),
+            "monto": float((r or {}).get("monto") or 0),
+        })
+
+    horas = [{"hora": r["hora"], "tickets": r["tickets"],
+              "monto": float(r["monto"] or 0)} for r in filas_h]
+
+    return {"dias": dias_sem, "horas": horas, "periodo": dias}
+
+
+def set_ignorar_alerta(producto_id: int, ignorar: bool):
+    """Silencia o reactiva la alerta de stock bajo de un producto."""
+    with get_connection() as conn:
+        conn.execute("""
+            UPDATE productos SET ignorar_alerta = ?,
+                   modificado_en = datetime('now','localtime')
+             WHERE id = ?
+        """, (1 if ignorar else 0, producto_id))
+        conn.commit()
+
+
+def stock_bajo_umbral(umbral=None) -> list:
+    """Productos con poco stock, por umbral fijo.
+
+    Complementa a get_reposicion(): esa mide velocidad de venta, asi que
+    deja afuera lo que no se vendio en el periodo — justo lo que puede
+    estar en 1 unidad hace un mes sin que nadie lo note.
+    """
+    from config import cfg
+    if umbral is None:
+        umbral = float(cfg().get("stock_alerta_umbral", 5) or 5)
+
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT p.id, p.descripcion, p.precio_base, p.costo_ultimo,
+                   c.nombre as categoria,
+                   COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
+                              WHERE l.producto_id = p.id), 0) as stock,
+                   COALESCE((
+                       SELECT SUM(d.cantidad) FROM detalle_ventas d
+                       JOIN ventas v ON v.id = d.venta_id
+                       WHERE d.producto_id = p.id
+                         AND date(v.fecha) >= date('now','-30 days')
+                   ), 0) as vendido_30d
+            FROM productos p
+            LEFT JOIN categorias c ON c.id = p.categoria_id
+            WHERE COALESCE(p.activo,1) = 1
+              AND COALESCE(p.ignorar_alerta, 0) = 0
+              AND COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
+                            WHERE l.producto_id = p.id), 0) <= ?
+            ORDER BY stock, p.descripcion
+        """, (umbral,)).fetchall()]
+
+
 def get_reposicion(dias_historial=30, dias_cobertura=14,
                    solo_faltantes=True) -> list:
     """Que comprar, calculado por velocidad de venta y no por un umbral fijo.
@@ -2336,6 +2427,130 @@ def costo_real_producto(producto_id: int) -> float:
             FROM productos p WHERE p.id = ?
         """, (producto_id,)).fetchone()
     return float(r["costo"] or 0) if r else 0.0
+
+
+def chequeos_de_datos() -> list:
+    """Los mismos chequeos de verificar_datos.py, pero como datos.
+
+    Devuelve una lista de {clave, titulo, cantidad, detalle, donde}. El
+    script de consola imprime; esto sirve para meterlo en el mail diario,
+    que es lo unico que se lee sin que haya que acordarse.
+
+    Deja afuera lo que el mail ya informa por otro lado (precio bajo
+    costo, margenes) para no decir dos veces lo mismo.
+    """
+    out = []
+
+    def _agregar(clave, titulo, filas, donde, fmt):
+        if filas:
+            out.append({"clave": clave, "titulo": titulo,
+                        "cantidad": len(filas), "donde": donde,
+                        "detalle": [fmt(f) for f in filas[:8]]})
+
+    with get_connection() as conn:
+        _agregar(
+            "sin_precio", "Productos en $ 0 — se regalan al escanearlos",
+            conn.execute("""
+                SELECT descripcion, codigo FROM productos
+                WHERE COALESCE(activo,1)=1 AND COALESCE(precio_base,0) <= 0
+                ORDER BY descripcion
+            """).fetchall(),
+            "Catálogo",
+            lambda f: f"{f[0]} (cod. {f[1] or '—'})")
+
+        _agregar(
+            "costo_cero", "Lotes con stock y costo en cero",
+            conn.execute("""
+                SELECT p.descripcion, l.id, l.cantidad_restante
+                FROM lotes l JOIN productos p ON p.id = l.producto_id
+                WHERE COALESCE(p.activo,1)=1 AND l.cantidad_restante > 0
+                  AND COALESCE(l.costo_unitario,0) <= 0
+            """).fetchall(),
+            "Stock → Ver historial completo → Editar lote",
+            lambda f: f"{f[0]} — lote #{f[1]}, quedan {f[2]:g}")
+
+        _agregar(
+            "costo_igual_precio", "Costo igual al precio de venta",
+            conn.execute("""
+                SELECT descripcion, precio_base FROM productos
+                WHERE COALESCE(activo,1)=1 AND COALESCE(costo_ultimo,0) > 0
+                  AND ABS(precio_base - costo_ultimo) < 0.01
+            """).fetchall(),
+            "Catálogo → Editar producto",
+            lambda f: f"{f[0]} — ambos en $ {f[1]:,.2f}")
+
+        _agregar(
+            "stock_negativo", "Stock negativo",
+            conn.execute("""
+                SELECT p.descripcion, SUM(l.cantidad_restante) as st
+                FROM productos p JOIN lotes l ON l.producto_id = p.id
+                WHERE COALESCE(p.activo,1)=1
+                GROUP BY p.id HAVING st < 0 ORDER BY st
+            """).fetchall(),
+            "Stock → Ajustar stock",
+            lambda f: f"{f[0]}: {f[1]:g}")
+
+        _agregar(
+            "promos_dup", "Promos repetidas para la misma cantidad",
+            conn.execute("""
+                SELECT p.descripcion, pr.cantidad_minima, COUNT(*) as n
+                FROM promociones pr JOIN productos p ON p.id = pr.producto_id
+                WHERE pr.activa = 1
+                GROUP BY pr.producto_id, pr.cantidad_minima HAVING n > 1
+            """).fetchall(),
+            "Precios → Promociones",
+            lambda f: f"{f[0]} — llevando {f[1]}: {f[2]} promos")
+
+        _agregar(
+            "promos_inutiles", "Promos con precio igual o mayor al normal",
+            conn.execute("""
+                SELECT p.descripcion, pr.cantidad_minima, pr.precio_unitario,
+                       p.precio_base
+                FROM promociones pr JOIN productos p ON p.id = pr.producto_id
+                WHERE pr.activa = 1 AND pr.precio_unitario >= p.precio_base
+            """).fetchall(),
+            "Precios → Promociones",
+            lambda f: (f"{f[0]} — x{f[1]} a $ {f[2]:,.0f} "
+                       f"(normal $ {f[3]:,.0f})"))
+
+        _agregar(
+            "codigos_dup", "Códigos de barras repetidos",
+            conn.execute("""
+                SELECT codigo, COUNT(*) as n,
+                       GROUP_CONCAT(descripcion, ' · ') as cuales
+                FROM productos
+                WHERE COALESCE(activo,1)=1 AND codigo IS NOT NULL
+                  AND codigo <> ''
+                GROUP BY codigo HAVING n > 1
+            """).fetchall(),
+            "Catálogo → Unificar",
+            lambda f: f"{f[0]} → {str(f[2])[:60]}")
+
+        _agregar(
+            "nombres_dup", "Productos cargados más de una vez",
+            conn.execute("""
+                SELECT LOWER(REPLACE(REPLACE(descripcion,' ',''),'.','')) as k,
+                       COUNT(*) as n,
+                       GROUP_CONCAT(descripcion, ' · ') as cuales
+                FROM productos WHERE COALESCE(activo,1)=1
+                GROUP BY k HAVING n > 1
+            """).fetchall(),
+            "Catálogo → 🔗 Unificar",
+            lambda f: str(f[2])[:60])
+
+        try:
+            _agregar(
+                "recargo_neg", "Recargos activos que BAJAN el precio",
+                conn.execute("""
+                    SELECT nombre, porcentaje FROM recargos_horario
+                    WHERE activo = 1 AND porcentaje < 0
+                """).fetchall(),
+                "Productos → Recargos",
+                lambda f: f"{f[0]}: {f[1]:+.0f}%")
+        except Exception:
+            pass
+
+    return out
 
 
 def alertas_margen() -> dict:
