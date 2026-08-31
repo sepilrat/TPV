@@ -79,6 +79,7 @@ class VentasUI(ttk.Frame):
         self._chequear_recargo()
         self.after(2000, self._vigilar_foco)
         self._instalar_captura_scanner()
+        self.after(2500, self._rescatar_codigo_perdido)
         self.after(100, self.foco_scanner)
 
     def _chequear_recargo(self):
@@ -416,55 +417,177 @@ class VentasUI(ttk.Frame):
             pass
 
     def _instalar_captura_scanner(self):
-        """Captura el escaneo aunque el foco esté en otro lado.
+        """El escaneo tiene prioridad sobre todo lo demás.
 
-        Un lector escribe 12 caracteres en milisegundos y cierra con
-        Enter; una persona no. Cuando se detecta ese patrón, el texto se
-        manda al campo del scanner sin importar dónde estaba el foco: si
-        no, el beep suena, el cajero cree que registró, y el producto se
-        va sin cobrar.
+        Regla: en la pantalla de venta, un código escaneado SIEMPRE se
+        registra, esté donde esté el foco. Un producto que no entra al
+        carrito se va sin cobrar, y eso es peor que cualquier molestia
+        de tipeo.
+
+        Cómo se distingue un lector de una persona: el lector manda las
+        teclas a menos de 50 ms una de otra. Apenas se detecta ese
+        ritmo, TODO lo que sigue va al campo del scanner hasta el Enter,
+        y el campo donde estaba el foco se deja como estaba.
         """
         import time as _t
-        self._buf = []
-        self._ult = [0.0]
+        self._ult_tecla = [0.0]
+        self._en_scaneo = [False]
+        # Contenido de cada campo antes de la última tecla: sirve para
+        # deshacer los caracteres que alcanzaron a caer ahí.
+        self._valor_previo = {}
+
+        def _recordar(ev):
+            w = ev.widget
+            if isinstance(w, (tk.Entry, ttk.Entry)) and not self._en_scaneo[0]:
+                try:
+                    self._valor_previo[str(w)] = w.get()
+                except Exception:
+                    pass
+
+        self.winfo_toplevel().bind("<KeyRelease>", _recordar, add="+")
 
         def _tecla(ev):
             if not self.winfo_ismapped():
                 return
-            # Con un diálogo abierto, el teclado es de él
+            # Con un diálogo abierto el teclado es de él: ahí se está
+            # confirmando un cobro o cargando un peso.
             if any(isinstance(w, tk.Toplevel) and w.winfo_ismapped()
                    for w in self.winfo_toplevel().winfo_children()):
                 return
-            # El foco ya está en el scanner: no hace falta hacer nada
-            if self.focus_get() is self.entry_scan:
-                return
+
+            foco = self.focus_get()
+            if foco is self.entry_scan:
+                self._en_scaneo[0] = False
+                return          # ya está donde tiene que estar
 
             ahora = _t.time()
-            if ahora - self._ult[0] > 0.12:
-                self._buf = []          # pausa larga: es una persona
-            self._ult[0] = ahora
+            delta = ahora - self._ult_tecla[0]
+            self._ult_tecla[0] = ahora
 
-            if ev.keysym == "Return":
-                codigo = "".join(self._buf)
-                self._buf = []
-                # 6 caracteres o más y todo seguido: fue un lector
-                if len(codigo) >= 6:
-                    self.entry_scan.delete(0, "end")
-                    self.entry_scan.insert(0, codigo)
+            # Fin del escaneo: Enter, o una pausa larga
+            if ev.keysym in ("Return", "KP_Enter"):
+                if self._en_scaneo[0]:
+                    self._en_scaneo[0] = False
+                    if getattr(self, "_timer_scan", None):
+                        try:
+                            self.after_cancel(self._timer_scan)
+                        except Exception:
+                            pass
+                        self._timer_scan = None
                     self.entry_scan.focus_set()
                     self._on_enter(None)
                     return "break"
-            elif len(ev.char) == 1 and ev.char.isprintable():
-                self._buf.append(ev.char)
-                if len(self._buf) > 40:
-                    self._buf = self._buf[-40:]
-                # Si viene a ritmo de lector, las teclas NO llegan al
-                # campo donde estaba el foco: si no, el codigo termina
-                # escrito en el descuento o en la busqueda.
-                if len(self._buf) >= 4:
-                    return "break"
+                return
+            if delta > 0.3:
+                self._en_scaneo[0] = False
 
-        self.winfo_toplevel().bind("<Key>", _tecla, add="+")
+            if len(ev.char) != 1 or not ev.char.isprintable():
+                return
+
+            # Una vez dentro del escaneo, TODAS las teclas van al scanner
+            # hasta el Enter — sin volver a medir tiempos. Si se midiera
+            # cada tecla, una demora del lector partiría el código al
+            # medio y el producto no se registraría.
+            if self._en_scaneo[0]:
+                self.entry_scan.insert("end", ev.char)
+                self.entry_scan.icursor("end")
+                # Red de seguridad: si el lector no manda Enter (algunos
+                # no lo mandan, o se pierde), a los 400 ms de silencio se
+                # procesa igual. Un codigo escrito y nunca registrado es
+                # exactamente el producto que se va sin cobrar.
+                if getattr(self, "_timer_scan", None):
+                    try:
+                        self.after_cancel(self._timer_scan)
+                    except Exception:
+                        pass
+                self._timer_scan = self.after(400, self._cerrar_scaneo)
+                return "break"
+
+            # Dos teclas a menos de 50ms: arrancó un escaneo
+            if delta < 0.05:
+                self._en_scaneo[0] = True
+                # Las teclas que ya cayeron en el otro campo se deshacen
+                try:
+                    prev = self._valor_previo.get(str(foco))
+                    if prev is not None and foco.get() != prev:
+                        foco.delete(0, "end")
+                        foco.insert(0, prev)
+                except Exception:
+                    pass
+                # El código arranca limpio, con el carácter anterior y
+                # este: los dos son parte del código.
+                anterior = getattr(self, "_char_previo", "")
+                self.entry_scan.delete(0, "end")
+                self.entry_scan.insert(0, anterior + ev.char)
+                self.entry_scan.focus_set()
+                self.entry_scan.icursor("end")
+                return "break"
+
+            # Todavía no se sabe si es lector o persona: se guarda el
+            # carácter por si la próxima tecla llega rápido.
+            self._char_previo = ev.char
+
+        # bindtags: se crea una etiqueta propia y se la pone PRIMERA en
+        # los campos de esta pantalla. Un bind normal en el toplevel corre
+        # DESPUES del widget —la tecla ya se escribio— y el "break" llega
+        # tarde: por eso quedaba basura en el descuento.
+        raiz = self.winfo_toplevel()
+        raiz.bind_class("ScanPrio", "<Key>", _tecla)
+
+        def _priorizar(w):
+            try:
+                if isinstance(w, (tk.Entry, ttk.Entry, tk.Text,
+                                  tk.Spinbox, ttk.Combobox)):
+                    tags = list(w.bindtags())
+                    if "ScanPrio" not in tags:
+                        w.bindtags(("ScanPrio",) + tuple(tags))
+            except Exception:
+                pass
+            for hijo in w.winfo_children():
+                _priorizar(hijo)
+
+        _priorizar(self)
+        # Los campos creados despues (dialogos que se cierran, filas que
+        # se repintan) tambien tienen que quedar cubiertos.
+        self.after(1500, lambda: _priorizar(self))
+
+    def _cerrar_scaneo(self):
+        """Procesa un código que quedó escrito sin Enter."""
+        self._timer_scan = None
+        if not getattr(self, "_en_scaneo", [False])[0]:
+            return
+        self._en_scaneo[0] = False
+        if len(self.entry_scan.get().strip()) >= 3:
+            self.entry_scan.focus_set()
+            self._on_enter(None)
+
+    def _rescatar_codigo_perdido(self):
+        """Última red: un código que quedó tipeado en otro campo.
+
+        Si por lo que sea la captura no llegó a tiempo, en algún campo va
+        a quedar un número largo que no tiene sentido ahí: un descuento
+        de 13 dígitos es un código de barras, no un descuento. Se lo saca
+        de ahí y se lo registra.
+        """
+        try:
+            if self.winfo_ismapped():
+                for campo in (self.entry_desc, getattr(self, "entry_recibido",
+                                                       None)):
+                    if campo is None:
+                        continue
+                    txt = campo.get().strip()
+                    # 8 dígitos o más en un campo de importe: es un código
+                    if len(txt) >= 8 and txt.isdigit():
+                        campo.delete(0, "end")
+                        campo.insert(0, "0")
+                        self.entry_scan.delete(0, "end")
+                        self.entry_scan.insert(0, txt)
+                        self.entry_scan.focus_set()
+                        self._on_enter(None)
+                        break
+        except Exception:
+            pass
+        self.after(700, self._rescatar_codigo_perdido)
 
     def _vigilar_foco(self):
         """Red de seguridad: devuelve el foco al scanner solo.
@@ -557,6 +680,8 @@ class VentasUI(ttk.Frame):
             text=f"x{_fmt_cant(self.cant_pendiente)}" if self.cant_pendiente else "x1")
 
     def _on_enter(self, event):
+        if hasattr(self, "_en_scaneo"):
+            self._en_scaneo[0] = False
         txt = self.entry_scan.get().strip()
         self.entry_scan.delete(0, "end")
         if not txt:

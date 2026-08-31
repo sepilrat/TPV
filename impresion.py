@@ -718,18 +718,18 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         for v in vtos:
             d = v["dias_restantes"]
             if d < 0:
-                cuando, color = f"VENCIDO hace {-d} d", "#DC2626"
+                txt_vence, color = f"VENCIDO hace {-d} d", "#DC2626"
             elif d == 0:
-                cuando, color = "vence HOY", "#DC2626"
+                txt_vence, color = "vence HOY", "#DC2626"
             elif d <= 2:
-                cuando, color = f"en {d} d", "#EA580C"
+                txt_vence, color = f"en {d} d", "#EA580C"
             else:
-                cuando, color = f"en {d} d", "#111827"
+                txt_vence, color = f"en {d} d", "#111827"
             html.append(f"<tr><td>{v['descripcion']}</td>"
                         f"<td align='right'>{v['stock']:g}</td>"
                         f"<td align='right'>$ {v['valor_en_riesgo']:,.2f}</td>"
                         f"<td>{v['fecha_vencimiento']}</td>"
-                        f"<td style='color:{color};font-weight:bold'>{cuando}</td></tr>")
+                        f"<td style='color:{color};font-weight:bold'>{txt_vence}</td></tr>")
         html.append("</table>")
 
     # El resumen del dia va PRIMERO: es lo que uno abre a mirar.
