@@ -2,6 +2,7 @@
 informes_ui.py — Dashboard e informes TPV v2.0
 """
 
+import logging
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
@@ -127,6 +128,7 @@ class InformesUI(ttk.Frame):
             ("  Productos  ",   self._build_productos),
             ("  Stock  ",       self._build_stock),
             ("  Rentabilidad ", self._build_rentabilidad),
+            ("  Evolucion ",    self._build_evolucion),
             ("  Cuando vendo ", self._build_cuando),
             ("  Se venden juntos ", self._build_juntos),
             ("  Cobranzas ", self._build_cobranzas),
@@ -1313,3 +1315,212 @@ def _refrescar_cobranzas(self, desde, hasta):
 
 InformesUI._build_cobranzas = _build_cobranzas
 InformesUI._refrescar_cobranzas = _refrescar_cobranzas
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Tab "Evolución" — cómo viene el negocio contra el período anterior
+# ══════════════════════════════════════════════════════════════════════════
+
+def _grafico_barras(canvas, datos, campo="facturado", color="#2F7D3A"):
+    """Dibuja barras en un Canvas de Tk.
+
+    Sin librerías: matplotlib traería 40 MB de dependencias para hacer
+    lo que acá son treinta líneas.
+    """
+    canvas.delete("all")
+    if not datos:
+        canvas.create_text(20, 20, anchor="nw", fill=C.texto_suave,
+                           text="Sin datos en el período", font=F.normal)
+        return
+
+    w = canvas.winfo_width() or 700
+    h = canvas.winfo_height() or 260
+    izq, der, arriba, abajo = 68, 12, 16, 34
+    ancho = max(1, w - izq - der)
+    alto = max(1, h - arriba - abajo)
+
+    tope = max((d[campo] for d in datos), default=0) or 1
+    n = len(datos)
+    paso = ancho / n
+    bw = max(2, min(paso * 0.72, 46))
+
+    # Tres líneas de referencia: sin escala, una barra alta no dice
+    # cuánto es "alto".
+    for i in range(4):
+        y = arriba + alto - (alto * i / 3)
+        canvas.create_line(izq, y, w - der, y, fill="#E5E7EB")
+        val = tope * i / 3
+        etq = (f"${val/1_000_000:.1f}M" if val >= 1_000_000
+               else f"${val/1000:.0f}k" if val >= 1000
+               else f"${val:.0f}")
+        canvas.create_text(izq - 6, y, anchor="e", text=etq,
+                           fill=C.texto_suave, font=("Segoe UI", 8))
+
+    # Con muchas barras no entran todas las etiquetas: se saltean
+    cada = max(1, n // 12)
+    for i, d in enumerate(datos):
+        x = izq + i * paso + (paso - bw) / 2
+        altura = (d[campo] / tope) * alto
+        y0 = arriba + alto - altura
+        canvas.create_rectangle(x, y0, x + bw, arriba + alto,
+                                fill=color, outline="")
+        if i % cada == 0 or i == n - 1:
+            canvas.create_text(x + bw / 2, arriba + alto + 8, anchor="n",
+                               text=str(d["etiqueta"])[-5:],
+                               fill=C.texto_suave, font=("Segoe UI", 8))
+        # El valor sobre la barra solo si hay lugar
+        if paso > 44:
+            canvas.create_text(x + bw / 2, y0 - 2, anchor="s",
+                               text=f"{d[campo]:,.0f}",
+                               fill=C.texto, font=("Segoe UI", 8))
+
+
+def _build_evolucion(self, parent):
+    """Cómo viene el negocio, comparado contra el período anterior.
+
+    Un total suelto no dice si el negocio mejora. Comparado contra el
+    período anterior sí, y con el detalle por producto se ve QUÉ lo
+    explica: un total plano puede esconder que algo se derrumbó y otra
+    cosa lo compensó.
+    """
+    cont = tk.Frame(parent, bg=C.bg)
+    cont.pack(fill="both", expand=True, padx=12, pady=10)
+
+    barra = tk.Frame(cont, bg=C.bg)
+    barra.pack(fill="x", pady=(0, 8))
+    lbl(barra, "Ver por:", variante="suave").pack(side="left", padx=(0, 8))
+
+    self._evo_agrupar = tk.StringVar(value="dia")
+    for txt, val in (("Día", "dia"), ("Semana", "semana"), ("Mes", "mes")):
+        tk.Radiobutton(barra, text=txt, variable=self._evo_agrupar,
+                       value=val, bg=C.bg, fg=C.texto, font=F.normal,
+                       selectcolor=C.bg, activebackground=C.bg,
+                       command=lambda: self._refrescar_evolucion()).pack(
+            side="left", padx=(0, 10))
+
+    lbl(barra, "  ·  Comparar los últimos", variante="suave").pack(side="left")
+    self._evo_dias = tk.StringVar(value="30")
+    ttk.Combobox(barra, textvariable=self._evo_dias, width=5,
+                 state="readonly",
+                 values=("7", "14", "30", "60", "90")).pack(side="left", padx=6)
+    lbl(barra, "días", variante="suave").pack(side="left")
+    self._evo_dias.trace_add("write", lambda *a: self._refrescar_evolucion())
+
+    self._evo_metrica = tk.StringVar(value="facturado")
+    lbl(barra, "  ·  Mostrar:", variante="suave").pack(side="left", padx=(12, 4))
+    ttk.Combobox(barra, textvariable=self._evo_metrica, width=12,
+                 state="readonly",
+                 values=("facturado", "tickets", "unidades")).pack(side="left")
+    self._evo_metrica.trace_add("write",
+                                lambda *a: self._refrescar_evolucion())
+
+    # Fila de indicadores
+    self._evo_kpis = tk.Frame(cont, bg=C.bg)
+    self._evo_kpis.pack(fill="x", pady=(4, 8))
+
+    self._evo_canvas = tk.Canvas(cont, bg=C.superficie, height=260,
+                                 highlightthickness=1,
+                                 highlightbackground=C.borde)
+    self._evo_canvas.pack(fill="x")
+    self._evo_canvas.bind("<Configure>",
+                          lambda e: self._refrescar_evolucion(solo_grafico=True))
+
+    # Qué subió y qué bajó
+    f_det = tk.Frame(cont, bg=C.bg)
+    f_det.pack(fill="both", expand=True, pady=(10, 0))
+    f_det.columnconfigure(0, weight=1)
+    f_det.columnconfigure(1, weight=1)
+
+    cols = [("desc", "Producto", 210, "w"), ("ahora", "Ahora", 95, "e"),
+            ("dif", "Cambio", 95, "e")]
+    izq = tk.Frame(f_det, bg=C.bg)
+    izq.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+    lbl(izq, "Lo que más creció", variante="subtitulo").pack(anchor="w")
+    fr1, self._evo_tv_sube = tabla(izq, cols, altura=7)
+    fr1.pack(fill="both", expand=True)
+
+    der = tk.Frame(f_det, bg=C.bg)
+    der.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+    lbl(der, "Lo que más cayó", variante="subtitulo").pack(anchor="w")
+    fr2, self._evo_tv_baja = tabla(der, cols, altura=7)
+    fr2.pack(fill="both", expand=True)
+    self._evo_tv_sube.tag_configure("nuevo", foreground=C.exito)
+    self._evo_tv_baja.tag_configure("murio", foreground=C.peligro)
+
+    self.after(200, self._refrescar_evolucion)
+
+
+def _refrescar_evolucion(self, solo_grafico=False):
+    from datetime import date, timedelta
+    from repositorio import (comparar_periodos, productos_que_cambiaron,
+                             serie_ventas)
+    if not self.winfo_exists():
+        return
+    try:
+        dias = int(self._evo_dias.get() or 30)
+    except ValueError:
+        dias = 30
+    hoy = date.today()
+    desde = (hoy - timedelta(days=dias - 1)).isoformat()
+    metrica = self._evo_metrica.get()
+
+    # El gráfico se redibuja solo al cambiar el tamaño: recalcular todo
+    # en cada píxel de resize dejaría la pantalla trabada.
+    try:
+        serie = serie_ventas(desde, hoy.isoformat(), self._evo_agrupar.get())
+        color = {"facturado": "#2F7D3A", "tickets": "#1D4ED8",
+                 "unidades": "#B45309"}.get(metrica, "#2F7D3A")
+        _grafico_barras(self._evo_canvas, serie, metrica, color)
+    except Exception as exc:
+        logging.warning(f"No se pudo dibujar la evolución: {exc}")
+    if solo_grafico:
+        return
+
+    try:
+        evo = comparar_periodos(desde, hoy.isoformat())
+        cambios = productos_que_cambiaron(dias)
+    except Exception as exc:
+        logging.warning(f"No se pudo comparar períodos: {exc}")
+        return
+
+    for w in self._evo_kpis.winfo_children():
+        w.destroy()
+
+    a, var = evo["actual"], evo["var"]
+    for clave, etq, fmt in (("facturado", "Facturado", "$ {:,.0f}"),
+                            ("tickets", "Tickets", "{:,.0f}"),
+                            ("ticket_prom", "Ticket prom.", "$ {:,.0f}"),
+                            ("unidades", "Unidades", "{:,.0f}")):
+        v = var.get(clave)
+        caja = tk.Frame(self._evo_kpis, bg=C.superficie,
+                        highlightthickness=1, highlightbackground=C.borde)
+        caja.pack(side="left", padx=(0, 8), ipadx=12, ipady=6)
+        tk.Label(caja, text=etq, bg=C.superficie, fg=C.texto_suave,
+                 font=F.pequeña).pack(anchor="w")
+        tk.Label(caja, text=fmt.format(a.get(clave) or 0), bg=C.superficie,
+                 fg=C.texto, font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        if v is None:
+            txt, col = "sin comparación", C.texto_suave
+        else:
+            txt = f"{'▲' if v >= 0 else '▼'} {abs(v):.0f}%  vs. antes"
+            col = C.exito if v >= 0 else C.peligro
+        tk.Label(caja, text=txt, bg=C.superficie, fg=col,
+                 font=F.pequeña).pack(anchor="w")
+
+    for tv, filas, tag in ((self._evo_tv_sube, cambios["suben"], "nuevo"),
+                           (self._evo_tv_baja, cambios["bajan"], "murio")):
+        tv.delete(*tv.get_children())
+        for i, x in enumerate(filas):
+            marca = x["nuevo"] if tag == "nuevo" else x["dejo_de_venderse"]
+            tv.insert("", "end", iid=str(i), tags=(tag,) if marca else (),
+                      values=(x["descripcion"][:30] +
+                              (" (nuevo)" if x["nuevo"] else "")
+                              + (" — dejó de venderse"
+                                 if x["dejo_de_venderse"] else ""),
+                              f"$ {x['monto_actual']:,.0f}",
+                              f"{'+' if x['dif'] > 0 else ''}"
+                              f"$ {x['dif']:,.0f}"))
+
+
+InformesUI._build_evolucion = _build_evolucion
+InformesUI._refrescar_evolucion = _refrescar_evolucion

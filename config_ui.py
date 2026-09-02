@@ -79,6 +79,8 @@ SECCIONES = [
         ("aviso_diario_al_cerrar_caja", "También al cerrar la caja",            "bool"),
         ("aviso_incluir_stock_completo", "Incluir el listado de stock completo", "bool"),
         ("aviso_revisar_datos", "Incluir la revisión de datos (productos en $0, stock negativo…)", "bool"),
+        ("aviso_evolucion",      "Incluir cómo viene contra el período anterior", "bool"),
+        ("aviso_evolucion_dias", "Comparar de a cuántos días",             "int"),
         ("aviso_cuando_vendo", "Incluir qué días y horas se vende más",  "bool"),
         ("aviso_top_dias",     "Lo más vendido: de cuántos días (0 = histórico completo)", "int"),
         ("aviso_top_cantidad", "Lo más vendido: cuántos productos mostrar",  "int"),

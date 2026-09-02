@@ -126,6 +126,8 @@ DEFAULTS = {
     # Revision de datos dentro del mail: productos en $0, stock negativo,
     # promos repetidas. Correr un script a mano no es un plan.
     "aviso_revisar_datos":                True,
+    "aviso_evolucion":                    True,
+    "aviso_evolucion_dias":               30,
     "aviso_cuando_vendo":                 True,
     "aviso_top_dias":                     30,
     "aviso_top_cantidad":                 10,

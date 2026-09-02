@@ -214,6 +214,8 @@ class CajaUI(ttk.Frame):
         ac.grid(row=2, column=0, sticky="ew", pady=(6,0))
         btn(ac, "Devolver items", variante="exito",
             comando=self._devolver).pack(side="left", padx=4)
+        btn(ac, "💳 Cambiar forma de pago", variante="neutro",
+            comando=self._cambiar_metodo).pack(side="left", padx=4)
         btn(ac, "Anular venta", variante="peligro",
             comando=self._anular_venta).pack(side="left")
         btn(ac, "Actualizar", variante="neutro",
@@ -663,6 +665,147 @@ class CajaUI(ttk.Frame):
         if dev_id:
             toast(self, f"Devolucion #{dev_id} registrada — stock repuesto")
             self.refrescar()
+
+    def _cambiar_metodo(self):
+        """Corrige cómo se cobró una venta ya hecha.
+
+        Pasa seguido: el cliente paga con QR, no le entra, y termina
+        fiando. Sin esto habría que anular y rehacer la venta, con el
+        riesgo de que el stock quede mal.
+        """
+        sel = self.tree_ventas.selection()
+        if not sel:
+            messagebox.showinfo("Cambiar forma de pago",
+                                "Elegí una venta de la lista.", parent=self)
+            return
+        vid = int(sel[0])
+        from db import get_connection
+        with get_connection() as conn:
+            v = conn.execute("""SELECT id, total, metodo_pago,
+                                       COALESCE(anulada, 0) as anulada
+                                  FROM ventas WHERE id = ?""",
+                             (vid,)).fetchone()
+        if not v:
+            return
+        actual = v["metodo_pago"] or ""
+        if v["anulada"]:
+            messagebox.showwarning("Cambiar forma de pago",
+                                   "Esa venta está anulada.", parent=self)
+            return
+
+        d = tk.Toplevel(self)
+        d.title("Cambiar forma de pago")
+        d.configure(bg=C.superficie)
+        d.resizable(False, False)
+        d.grab_set()
+        w, h = 420, 430
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//3)}")
+
+        lbl(d, f"Venta #{vid}", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(16, 2))
+        lbl(d, f"$ {float(v['total'] or 0):,.2f}  ·  cobrada como "
+               f"{actual.replace('_', ' ')}",
+            variante="suave", bg=C.superficie).pack(anchor="w", padx=20)
+
+        lbl(d, "Pasarla a:", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(14, 4))
+
+        v_metodo = tk.StringVar(value="")
+        for etq, val in (("Efectivo", "efectivo"), ("QR", "qr"),
+                         ("Tarjeta", "tarjeta"),
+                         ("Cuenta Corriente", "cuenta_corriente")):
+            if val == actual:
+                continue          # no tiene sentido pasarla a lo mismo
+            tk.Radiobutton(d, text=etq, variable=v_metodo, value=val,
+                           bg=C.superficie, fg=C.texto, font=F.normal,
+                           selectcolor=C.superficie,
+                           activebackground=C.superficie).pack(
+                anchor="w", padx=28, pady=1)
+
+        # El cliente solo hace falta si pasa a cuenta corriente
+        f_cli = tk.Frame(d, bg=C.superficie)
+        lbl(f_cli, "Cliente (nombre o DNI)", variante="suave",
+            bg=C.superficie).pack(anchor="w")
+        e_cli = tk.Entry(f_cli, font=F.normal, bg=C.superficie, fg=C.texto,
+                         relief="solid", bd=1)
+        e_cli.pack(fill="x", ipady=4, pady=(2, 2))
+        lbl_cli = lbl(f_cli, "", variante="suave", bg=C.superficie)
+        lbl_cli.pack(anchor="w")
+        cliente_ref = [None]
+
+        def _buscar_cliente(_ev=None):
+            from repositorio import buscar_clientes
+            txt = e_cli.get().strip()
+            if not txt:
+                return
+            r = buscar_clientes(txt)
+            if not r:
+                cliente_ref[0] = None
+                lbl_cli.config(text=f"No hay ningún cliente con «{txt}»",
+                               fg=C.peligro)
+                return
+            cliente_ref[0] = r[0]
+            disp = ((r[0].get("tope_credito") or 0)
+                    - (r[0].get("saldo_actual") or 0))
+            lbl_cli.config(
+                text=f"{r[0]['nombre']}  ·  disponible $ {disp:,.2f}",
+                fg=C.exito if disp >= float(v["total"] or 0)
+                else C.advertencia)
+
+        e_cli.bind("<Return>", _buscar_cliente)
+        e_cli.bind("<FocusOut>", _buscar_cliente)
+
+        def _al_cambiar(*_a):
+            if v_metodo.get() == "cuenta_corriente":
+                f_cli.pack(fill="x", padx=20, pady=(10, 0))
+            else:
+                f_cli.pack_forget()
+
+        v_metodo.trace_add("write", _al_cambiar)
+
+        def aplicar():
+            nuevo = v_metodo.get()
+            if not nuevo:
+                messagebox.showwarning("Cambiar forma de pago",
+                                       "Elegí la forma de pago nueva.",
+                                       parent=d)
+                return
+            cid = None
+            if nuevo == "cuenta_corriente":
+                _buscar_cliente()
+                if not cliente_ref[0]:
+                    messagebox.showwarning(
+                        "Cambiar forma de pago",
+                        "Buscá el cliente al que se le va a fiar.",
+                        parent=d)
+                    return
+                cid = cliente_ref[0]["id"]
+
+            from fiado_ui import pedir_autorizacion
+            resp = pedir_autorizacion(
+                d, "Cambiar la forma de pago de una venta ya hecha "
+                   "requiere autorización.")
+            if not resp:
+                return
+
+            from repositorio import cambiar_metodo_pago
+            ok, msg = cambiar_metodo_pago(vid, nuevo, cid, resp)
+            if not ok:
+                messagebox.showwarning("Cambiar forma de pago", msg,
+                                       parent=d)
+                return
+            d.destroy()
+            toast(self, msg)
+            self.refrescar()
+
+        fb = tk.Frame(d, bg=C.superficie)
+        fb.pack(side="bottom", pady=16)
+        btn(fb, "Cambiar", variante="exito",
+            comando=aplicar).pack(side="left", padx=6)
+        btn(fb, "Cancelar", variante="neutro",
+            comando=d.destroy).pack(side="left")
+        d.bind("<Escape>", lambda e: d.destroy())
 
     def _anular_venta(self):
         sel = self.tree_ventas.selection()

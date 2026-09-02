@@ -22,6 +22,11 @@ METODOS_PAGO = [
     ("Cuenta Corriente", "cuenta_corriente"),
 ]
 
+# Los tres de todos los dias, a un clic. El resto entra por "Otras
+# formas": mostrar seis botones para usar siempre los mismos tres
+# ocupa la mitad del panel y hace mas lento lo frecuente.
+METODOS_FRECUENTES = ["efectivo", "qr", "cuenta_corriente"]
+
 COLS_CARRITO = [
     ("desc",   "Producto",  300, "w"),
     ("cant",   "Cant.",      60, "e"),
@@ -254,6 +259,19 @@ class VentasUI(ttk.Frame):
 
         # Tabla
         frame_t, self.tree = tabla(p, COLS_CARRITO)
+        # La columna del arbol (#0) muestra la miniatura; las filas se
+        # agrandan para que entre sin recortarse.
+        self.tree.configure(show="tree headings")
+        # 72px para una miniatura de 50: el resto es margen, si no la
+        # foto queda pegada al nombre del producto.
+        self.tree.column("#0", width=72, minwidth=72, stretch=False,
+                         anchor="center")
+        try:
+            # La fila tiene que ser mas alta que la miniatura, si no Tk
+            # la recorta por arriba y por abajo.
+            ttk.Style().configure("Treeview", rowheight=56)
+        except Exception:
+            pass
         frame_t.grid(row=1, column=0, sticky="nsew")
         self.tree.bind("<Delete>",   self._quitar)
         self.tree.bind("<Double-1>", self._editar_cant)
@@ -311,20 +329,34 @@ class VentasUI(ttk.Frame):
             grid_f.columnconfigure(0, weight=1)
             grid_f.columnconfigure(1, weight=1)
             self.btns_pago = {}
-            for i, (label, valor) in enumerate(METODOS_PAGO):
+            frecuentes = [(l, v) for l, v in METODOS_PAGO
+                          if v in METODOS_FRECUENTES]
+            for i, (label, valor) in enumerate(frecuentes):
                 b = tk.Button(grid_f, text=label, font=F.pequeña,
                               relief="flat", cursor="hand2", pady=5,
                               command=lambda v=valor: self._sel_metodo(v))
                 b.grid(row=i//2, column=i%2, sticky="ew", padx=2, pady=2)
                 self.btns_pago[valor] = b
+            b = tk.Button(grid_f, text="Otras formas…", font=F.pequeña,
+                          relief="flat", cursor="hand2", pady=5,
+                          command=self._dialogo_otros_metodos)
+            b.grid(row=len(frecuentes)//2, column=len(frecuentes)%2,
+                   sticky="ew", padx=2, pady=2)
         else:
             self.btns_pago = {}
             for label, valor in METODOS_PAGO:
+                if valor not in METODOS_FRECUENTES:
+                    continue
                 b = tk.Button(fp, text=label, font=F.normal, relief="flat",
                               cursor="hand2", padx=12, pady=6, anchor="w",
                               command=lambda v=valor: self._sel_metodo(v))
                 b.pack(fill="x", pady=1)
                 self.btns_pago[valor] = b
+            self.btn_otros = tk.Button(
+                fp, text="Otras formas de pago…", font=F.normal,
+                relief="flat", cursor="hand2", padx=12, pady=6, anchor="w",
+                fg=C.texto_suave, command=self._dialogo_otros_metodos)
+            self.btn_otros.pack(fill="x", pady=(6, 1))
 
         # Panel efectivo — recibido / vuelto
         self.frame_efectivo = tk.Frame(fp, bg=C.acento)
@@ -759,8 +791,9 @@ class VentasUI(ttk.Frame):
         # se lleva — y si el cajero no lo notaba, se cobraba mal.
         # Una presentacion cerrada (una bolsa con su EAN) no se pesa: ya
         # trae su peso en el factor.
+        precio_ajustado = None
         if es_peso and self.cant_pendiente is None and not pres:
-            peso = self._pedir_peso(prod)
+            peso, precio_ajustado = self._pedir_peso(prod)
             if peso is None:
                 self.cant_pendiente = None
                 self.lbl_cant.config(text="x1")
@@ -809,6 +842,12 @@ class VentasUI(ttk.Frame):
             promo = None
         else:
             precio, promo = get_precio_con_promo(prod["id"], cant_total)
+            # Importe tipeado a mano: manda sobre el precio de lista, para
+            # que el ticket diga el numero que se cobro y no uno redondeado
+            # dos centavos abajo.
+            if precio_ajustado:
+                precio = precio_ajustado
+                promo = None
 
         if existente:
             existente.update(cantidad=cant_total, precio_unitario=precio,
@@ -1100,6 +1139,33 @@ class VentasUI(ttk.Frame):
         d.bind("<Escape>", cerrar)
         b1.focus_set()
 
+    def _dialogo_otros_metodos(self):
+        """Las formas de pago que se usan de vez en cuando."""
+        d = tk.Toplevel(self)
+        d.title("Otras formas de pago")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        _centrar_dialogo(d, 380, 300)
+
+        lbl(d, "Otras formas de pago", variante="titulo",
+            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 10))
+
+        def elegir(valor):
+            d.destroy()
+            self._sel_metodo(valor)
+
+        for label, valor in METODOS_PAGO:
+            if valor in METODOS_FRECUENTES:
+                continue
+            tk.Button(d, text=label, font=F.normal, relief="solid", bd=1,
+                      cursor="hand2", pady=9, bg=C.bg, fg=C.texto,
+                      command=lambda v=valor: elegir(v)).pack(
+                fill="x", padx=18, pady=3)
+
+        btn(d, "Cancelar", variante="neutro",
+            comando=d.destroy).pack(pady=(14, 0))
+        d.bind("<Escape>", lambda e: d.destroy())
+
     def _aplicar_promos_grupo(self):
         """Recalcula las promos combinables sobre todo el carrito."""
         from repositorio import (aplicar_promos_combinables,
@@ -1268,6 +1334,9 @@ class VentasUI(ttk.Frame):
         # Cada campo completa al otro. El flag evita el rebote infinito
         # de "peso escribe importe, importe escribe peso".
         _recalc = [False]
+        # Importe tipeado a mano: cuando esta, el subtotal es EXACTAMENTE
+        # ese numero y el precio por kg se ajusta para que cierre.
+        _importe_exacto = [None]
 
         def _desde_peso(*_a):
             if _recalc[0]:
@@ -1297,13 +1366,26 @@ class VentasUI(ttk.Frame):
                 # 3 decimales: es la precision de una balanza de gramos
                 v_peso.set(f"{imp / precio_kg:.3f}")
                 _recalc[0] = False
-                _calcular()
+                # El importe escrito MANDA: si se recalcula desde los kg
+                # redondeados, $7.300 se convierten en $7.297,50 y esos
+                # $2,50 se pierden en cada venta por peso.
+                _importe_exacto[0] = imp
+                _pintar(f"$ {imp:,.2f}",
+                        f"{imp / precio_kg:.3f} kg · importe exacto")
+                return
 
+        # Al tocar el peso se vuelve al calculo normal: el importe exacto
+        # solo rige mientras no se corrija el peso a mano.
+        def _limpiar_exacto(*_a):
+            if not _recalc[0]:
+                _importe_exacto[0] = None
+
+        v_peso.trace_add("write", _limpiar_exacto)
         v_peso.trace_add("write", _desde_peso)
         v_importe.trace_add("write", _desde_importe)
         _calcular()
 
-        resultado = [None]
+        resultado = [None, None]     # [kg, precio_ajustado]
 
         def aceptar(_ev=None):
             txt = (v_peso.get() or "").strip().replace(",", ".")
@@ -1318,6 +1400,11 @@ class VentasUI(ttk.Frame):
             if stock_disp and kg > stock_disp + 0.001:
                 lbl_bal.config(text=f"No hay tanto: quedan {stock_disp:g} kg.")
                 return
+            # Si se tipeó el importe, el precio por kg se ajusta para que
+            # kg × precio dé EXACTAMENTE ese importe. Es la única forma de
+            # que el ticket diga 7.300 y no 7.297,50.
+            if _importe_exacto[0] and kg > 0:
+                resultado[1] = round(_importe_exacto[0] / kg, 4)
             resultado[0] = kg
             d.destroy()
 
@@ -1333,7 +1420,7 @@ class VentasUI(ttk.Frame):
             comando=d.destroy).pack(side="left")
 
         self.wait_window(d)
-        return resultado[0]
+        return resultado[0], resultado[1]
 
     def _elegir_producto(self, candidatos, texto_buscado):
         """
@@ -1411,8 +1498,23 @@ class VentasUI(ttk.Frame):
     def _actualizar_tabla(self):
         for r in self.tree.get_children():
             self.tree.delete(r)
+        # Las imagenes se guardan mientras la fila exista: si se las deja
+        # ir, Tk las descarta y el renglon queda sin foto.
+        self._imgs_carrito = []
+        import imagenes
         for i in self.carrito:
-            self.tree.insert("", "end", values=(
+            img = None
+            try:
+                if i.get("producto_id"):
+                    from repositorio import get_producto_completo
+                    prod = get_producto_completo(i["producto_id"])
+                    img = imagenes.cargar_thumbnail(
+                        (prod or {}).get("imagen_url"), (50, 50))
+            except Exception:
+                img = None
+            if img is not None:
+                self._imgs_carrito.append(img)
+            self.tree.insert("", "end", image=img or "", values=(
                 i["descripcion"],
                 _fmt_cant(i['cantidad']),
                 f"$ {i['precio_unitario']:,.2f}",
@@ -1479,6 +1581,19 @@ class VentasUI(ttk.Frame):
             else:
                 b.config(bg=C.superficie, fg=C.texto,
                          font=F.pequeña if self._modo_chico else F.normal)
+
+        # Si se eligio uno de los poco frecuentes no hay boton que se
+        # marque: el nombre va en "Otras formas" para que se vea que
+        # metodo esta activo.
+        if hasattr(self, "btn_otros"):
+            if metodo in METODOS_FRECUENTES:
+                self.btn_otros.config(text="Otras formas de pago…",
+                                      bg=C.superficie, fg=C.texto_suave)
+            else:
+                etq = next((l for l, v in METODOS_PAGO if v == metodo),
+                           metodo)
+                self.btn_otros.config(text=f"▸ {etq}", bg=C.acento,
+                                      fg=C.primario)
 
         # Mostrar/ocultar panel efectivo (recibido/vuelto)
         if metodo == "efectivo":
@@ -2373,6 +2488,8 @@ class VentasUI(ttk.Frame):
 
     def _nueva_venta(self):
         self.carrito.clear()
+        # La foto tambien: si queda, la venta siguiente arranca mostrando
+        # un producto que ya se cobro.
         # El cartel de promo se va con la venta: si queda, la venta
         # siguiente arranca ofreciendo algo que ya no esta en el carrito.
         if hasattr(self, "lbl_promo_grupo"):

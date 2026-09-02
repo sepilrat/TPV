@@ -261,10 +261,12 @@ def _dialogo_alta(parent, dni, responsable, result_ref,
     """Formulario de alta de cliente nuevo."""
     d = tk.Toplevel(parent)
     d.title("Alta de cliente")
-    d.resizable(True, True)
+    # Sin resizable: el formulario tiene cuatro campos y estirarlo solo
+    # deja media pantalla en blanco.
+    d.resizable(False, False)
     d.configure(bg=C.superficie)
     d.grab_set()
-    w, h = 380, 280
+    w, h = 400, 400
     sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
     d.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
@@ -287,9 +289,16 @@ def _dialogo_alta(parent, dni, responsable, result_ref,
         e.pack(fill="x", padx=20, ipady=5, pady=(2,0))
         entries[key] = e
 
-    # Pre-cargar DNI
-    lbl(d, f"DNI: {dni}", variante="suave", bg=C.superficie,
-        fg=C.texto_suave).pack(padx=20, anchor="w", pady=(8, 0))
+    # DNI editable: si se llegó buscando por nombre, viene vacío y hay
+    # que poder cargarlo acá. Antes era un texto fijo y el cliente
+    # quedaba sin DNI para siempre.
+    lbl(d, "DNI (opcional)", variante="suave",
+        bg=C.superficie).pack(padx=20, anchor="w", pady=(4, 0))
+    e_dni = tk.Entry(d, font=F.normal, bg=C.superficie, fg=C.texto,
+                     insertbackground=C.primario, relief="solid", bd=1)
+    e_dni.insert(0, dni or "")
+    e_dni.pack(fill="x", padx=20, ipady=5, pady=(2, 0))
+    entries["e_dni"] = e_dni
 
     # El nombre viene precargado si se lo escribio en el buscador: no
     # tiene sentido hacerlo tipear dos veces con el cliente esperando.
@@ -312,7 +321,10 @@ def _dialogo_alta(parent, dni, responsable, result_ref,
         if not nombre:
             messagebox.showwarning("Error", "Ingresa el nombre.", parent=d)
             return
-        cliente = crear_cliente(dni, nombre, tel, tope)
+        # El DNI sale del campo, no del parametro: puede haberse cargado
+        # aca si se llego buscando por nombre.
+        _dni = entries["e_dni"].get().strip().replace(".", "").replace("-", "")
+        cliente = crear_cliente(_dni or None, nombre, tel, tope)
         result_ref[0] = cliente
         d.destroy()
 

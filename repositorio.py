@@ -3082,6 +3082,79 @@ def get_ventas_sesion(sesion_id) -> list:
         """, (sesion_id,)).fetchall()]
 
 
+def cambiar_metodo_pago(venta_id: int, metodo_nuevo: str,
+                        cliente_id: int = None,
+                        autorizado_por: str = "") -> tuple[bool, str]:
+    """Cambia la forma de pago de una venta ya hecha.
+
+    El caso tipico: el cliente paga con QR, no le entra, y termina
+    fiando. Sin esto habria que anular la venta y rehacerla, con el
+    riesgo de que el stock quede mal descontado.
+
+    No toca el stock ni los importes: solo cambia como se cobro, y
+    ajusta la deuda del cliente si entra o sale de cuenta corriente.
+    """
+    with get_connection() as conn:
+        v = conn.execute("""
+            SELECT id, total, metodo_pago, cliente_id,
+                   COALESCE(anulada, 0) as anulada
+            FROM ventas WHERE id = ?
+        """, (venta_id,)).fetchone()
+        if not v:
+            return False, "No se encontró esa venta."
+        if v["anulada"]:
+            return False, "Esa venta está anulada."
+
+        metodo_viejo = v["metodo_pago"]
+        if metodo_viejo == metodo_nuevo and v["cliente_id"] == cliente_id:
+            return False, "Ya está cobrada de esa forma."
+
+        total = float(v["total"] or 0)
+        era_cta = metodo_viejo == "cuenta_corriente"
+        sera_cta = metodo_nuevo == "cuenta_corriente"
+        if sera_cta and not cliente_id:
+            return False, "Para pasar a cuenta corriente hace falta "\
+                          "elegir el cliente."
+
+    # Sale de cuenta corriente: se le descuenta la deuda al cliente que
+    # la tenia. Si no, queda debiendo algo que ya pago.
+    if era_cta and v["cliente_id"]:
+        actualizar_saldo_cliente(
+            v["cliente_id"], -total, venta_id=venta_id,
+            concepto=f"Venta #{venta_id}: pasó a "
+                     f"{metodo_nuevo.replace('_', ' ')}")
+
+    # Entra a cuenta corriente: se le carga la deuda
+    if sera_cta:
+        actualizar_saldo_cliente(
+            cliente_id, total, venta_id=venta_id,
+            concepto=f"Venta #{venta_id}: pasó de "
+                     f"{metodo_viejo.replace('_', ' ')} a cuenta corriente")
+
+    # Los montos por medio de pago tambien se reasignan: si no, el
+    # arqueo de caja sigue contando el efectivo de una venta que ahora
+    # esta fiada.
+    campos = {"efectivo": "monto_efectivo", "tarjeta": "monto_tarjeta",
+              "qr": "monto_qr", "cuenta_corriente": "monto_cta_cte"}
+    with get_connection() as conn:
+        conn.execute("""
+            UPDATE ventas
+               SET metodo_pago = ?, cliente_id = ?,
+                   monto_efectivo = 0, monto_tarjeta = 0,
+                   monto_qr = 0, monto_cta_cte = 0
+             WHERE id = ?
+        """, (metodo_nuevo, cliente_id if sera_cta else None, venta_id))
+        col = campos.get(metodo_nuevo)
+        if col:
+            conn.execute(f"UPDATE ventas SET {col} = ? WHERE id = ?",
+                         (total, venta_id))
+        conn.commit()
+
+    return True, (f"Venta #{venta_id}: "
+                  f"{metodo_viejo.replace('_', ' ')} → "
+                  f"{metodo_nuevo.replace('_', ' ')}")
+
+
 def anular_venta(venta_id: int) -> bool:
     with get_connection() as conn:
         v = conn.execute("""
@@ -4051,6 +4124,142 @@ def registrar_pago_cuenta_corriente(cliente_id: int, monto: float, autorizado_po
 # ─────────────────────────────────────────────────────────────────────────────
 # RENTABILIDAD
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _totales_periodo(desde, hasta) -> dict:
+    """Los numeros gruesos de un periodo: facturado, ganancia, tickets."""
+    with get_connection() as conn:
+        r = conn.execute("""
+            SELECT COUNT(*) as tickets,
+                   COALESCE(SUM(total), 0) as facturado,
+                   COALESCE(AVG(total), 0) as ticket_promedio
+            FROM ventas
+            WHERE date(fecha) BETWEEN date(?) AND date(?)
+              AND COALESCE(anulada, 0) = 0
+        """, (desde, hasta)).fetchone()
+
+        # La ganancia sale del costo del LOTE del que salio cada unidad,
+        # no del costo actual del producto: si el proveedor subio ayer,
+        # lo vendido el mes pasado no cambia de ganancia.
+        g = conn.execute("""
+            SELECT COALESCE(SUM(dv.subtotal), 0) as ingreso,
+                   COALESCE(SUM(dvl.cantidad * l.costo_unitario), 0) as costo
+            FROM detalle_ventas dv
+            JOIN ventas v ON v.id = dv.venta_id
+            LEFT JOIN detalle_ventas_lotes dvl ON dvl.detalle_venta_id = dv.id
+            LEFT JOIN lotes l ON l.id = dvl.lote_id
+            WHERE date(v.fecha) BETWEEN date(?) AND date(?)
+              AND COALESCE(v.anulada, 0) = 0
+        """, (desde, hasta)).fetchone()
+
+        art = conn.execute("""
+            SELECT COALESCE(SUM(dv.cantidad), 0) as unidades,
+                   COUNT(DISTINCT dv.producto_id) as productos_distintos
+            FROM detalle_ventas dv
+            JOIN ventas v ON v.id = dv.venta_id
+            WHERE date(v.fecha) BETWEEN date(?) AND date(?)
+              AND COALESCE(v.anulada, 0) = 0
+        """, (desde, hasta)).fetchone()
+
+    ingreso = float(g["ingreso"] or 0)
+    costo = float(g["costo"] or 0)
+    return {
+        "tickets": r["tickets"] or 0,
+        "facturado": float(r["facturado"] or 0),
+        "ticket_promedio": float(r["ticket_promedio"] or 0),
+        "ganancia": ingreso - costo,
+        "margen_pct": ((ingreso - costo) / ingreso * 100) if ingreso else 0.0,
+        "unidades": float(art["unidades"] or 0),
+        "productos_distintos": art["productos_distintos"] or 0,
+    }
+
+
+def serie_ventas(desde, hasta, agrupar="dia") -> list:
+    """Ventas agrupadas por dia, semana o mes, para graficar.
+
+    agrupar: "dia" | "semana" | "mes"
+    Devuelve [{etiqueta, facturado, tickets, unidades}, ...] en orden.
+    """
+    fmt = {"dia": "%Y-%m-%d", "semana": "%Y-W%W",
+           "mes": "%Y-%m"}.get(agrupar, "%Y-%m-%d")
+    with get_connection() as conn:
+        filas = conn.execute(f"""
+            SELECT strftime('{fmt}', v.fecha) as periodo,
+                   COUNT(DISTINCT v.id) as tickets,
+                   COALESCE(SUM(v.total), 0) as facturado
+            FROM ventas v
+            WHERE date(v.fecha) BETWEEN date(?) AND date(?)
+              AND COALESCE(v.anulada, 0) = 0
+            GROUP BY periodo ORDER BY periodo
+        """, (desde, hasta)).fetchall()
+
+        unidades = {r["periodo"]: float(r["u"] or 0) for r in conn.execute(f"""
+            SELECT strftime('{fmt}', v.fecha) as periodo,
+                   SUM(dv.cantidad) as u
+            FROM detalle_ventas dv
+            JOIN ventas v ON v.id = dv.venta_id
+            WHERE date(v.fecha) BETWEEN date(?) AND date(?)
+              AND COALESCE(v.anulada, 0) = 0
+            GROUP BY periodo
+        """, (desde, hasta)).fetchall()}
+
+    return [{"etiqueta": r["periodo"],
+             "facturado": float(r["facturado"] or 0),
+             "tickets": r["tickets"] or 0,
+             "unidades": unidades.get(r["periodo"], 0.0)} for r in filas]
+
+
+def productos_que_cambiaron(dias=30, limite=8) -> dict:
+    """Que productos subieron y cuales cayeron respecto del periodo previo.
+
+    El total puede quedar igual y esconder que un producto se derrumbo y
+    otro lo compenso. Esto muestra el detalle.
+    """
+    from datetime import date, timedelta
+    dias = max(7, int(dias or 30))
+    hoy = date.today()
+    ini_a = hoy - timedelta(days=dias - 1)
+    fin_p = ini_a - timedelta(days=1)
+    ini_p = fin_p - timedelta(days=dias - 1)
+
+    with get_connection() as conn:
+        def _ventas(d1, d2):
+            return {r["producto_id"]: dict(r) for r in conn.execute("""
+                SELECT dv.producto_id, p.descripcion,
+                       SUM(dv.cantidad) as unidades,
+                       SUM(dv.subtotal) as monto
+                FROM detalle_ventas dv
+                JOIN ventas v ON v.id = dv.venta_id
+                JOIN productos p ON p.id = dv.producto_id
+                WHERE date(v.fecha) BETWEEN date(?) AND date(?)
+                  AND COALESCE(v.anulada, 0) = 0
+                GROUP BY dv.producto_id
+            """, (d1, d2)).fetchall()}
+
+        act = _ventas(ini_a.isoformat(), hoy.isoformat())
+        pre = _ventas(ini_p.isoformat(), fin_p.isoformat())
+
+    filas = []
+    for pid in set(act) | set(pre):
+        a = act.get(pid, {})
+        b = pre.get(pid, {})
+        m_a = float(a.get("monto") or 0)
+        m_b = float(b.get("monto") or 0)
+        # Se ignora lo marginal: un producto que paso de $200 a $400
+        # duplico, pero no mueve la aguja de nada.
+        if max(m_a, m_b) < 1000:
+            continue
+        filas.append({
+            "descripcion": a.get("descripcion") or b.get("descripcion") or "?",
+            "monto_actual": m_a, "monto_previo": m_b,
+            "dif": m_a - m_b,
+            "pct": ((m_a - m_b) / m_b * 100) if m_b else None,
+            "nuevo": m_b == 0, "dejo_de_venderse": m_a == 0,
+        })
+
+    filas.sort(key=lambda x: -x["dif"])
+    return {"suben": [f for f in filas if f["dif"] > 0][:limite],
+            "bajan": [f for f in filas if f["dif"] < 0][-limite:][::-1]}
+
 
 def get_rentabilidad_productos(desde, hasta) -> list:
     """

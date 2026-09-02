@@ -1019,14 +1019,25 @@ class IngresoUI(ttk.Frame):
             # cuanto stock viejo queda (FIFO lo vende primero), que margen
             # se tiene si no se toca nada, y si bajar el precio dejaria el
             # stock viejo vendiendose por debajo de su costo.
+            # El precio sugerido sale del margen del rubro, asi que
+            # puede SUBIR aunque el costo haya bajado. Decir "si bajás el
+            # precio" cuando en realidad sube es lo que confundia.
+            _sug = info["precio_sugerido"]
+            _act = info["precio_actual"]
+            _verbo = "subir" if _sug > _act else "bajar"
+            _dif = abs(_sug - _act)
+
             texto = [
                 f"El costo bajó de $ {info['costo_anterior']:,.2f} "
                 f"a $ {info['costo_nuevo']:,.2f}.",
                 "",
-                f"Si NO tocás nada:   $ {info['precio_actual']:,.2f}"
-                f"   →  margen {info['margen_si_no_toca']:.1f}%",
-                f"Si bajás el precio: $ {info['precio_sugerido']:,.2f}"
-                f"   →  margen {info['margen_sugerido']:.1f}%",
+                f"Dejarlo como está:  $ {_act:,.2f}"
+                f"   →  te queda {info['margen_si_no_toca']:.0f}% de margen",
+                f"{_verbo.capitalize()}lo a:          $ {_sug:,.2f}"
+                f"   →  te queda {info['margen_sugerido']:.0f}% de margen",
+                "",
+                f"({_verbo} $ {_dif:,.2f}, que es el margen "
+                f"de la categoría)",
             ]
 
             if info["stock_viejo"] > 0:
@@ -1045,14 +1056,16 @@ class IngresoUI(ttk.Frame):
                         f"hasta agotarlo: $ {total:,.2f} en total.",
                     ]
                 else:
-                    texto += ["Esas unidades se venderían con el margen nuevo, "
-                              "no con el que tenían."]
+                    texto += ["Esas unidades se venderían con el margen "
+                              "nuevo, no con el que tenían."]
 
-            texto += ["", "¿Bajás el precio de venta ahora?",
-                      "(si decís que no, se mantiene el precio actual)"]
+            texto += ["", f"¿{_verbo.capitalize()} el precio de venta "
+                          f"a $ {_sug:,.2f}?",
+                      f"(si decís que no, queda en $ {_act:,.2f})"]
 
             titulo = ("El costo bajó — ojo con el stock viejo"
-                      if info["bajo_costo_viejo"] else "El costo bajó")
+                      if info["bajo_costo_viejo"]
+                      else f"El costo bajó — ¿{_verbo} el precio?")
             if messagebox.askyesno(titulo, "\n".join(texto), parent=self):
                 nuevo_precio_venta = info["precio_sugerido"]
 

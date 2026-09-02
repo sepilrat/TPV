@@ -121,9 +121,13 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
                        "Andá a Config > Catálogo web.")
 
     from repositorio import get_productos, get_proveedores_ultimo_por_producto, get_promociones_activas_por_producto
-    base = [p for p in get_productos(solo_activos=True)
-           if p["precio_base"] and p["precio_base"] > 0]
-    base = _filtrar_publicables(base)
+    # TODO el catalogo activo va al panel interno: los filtros de
+    # publicacion son para lo que ve el CLIENTE. Un producto sin stock es
+    # justo el que uno quiere ver en el panel, para saber que reponer.
+    todos = [p for p in get_productos(solo_activos=True)
+             if p["precio_base"] and p["precio_base"] > 0]
+    base = _filtrar_publicables(todos)
+    ids_publicos = {p["id"] for p in base}
     proveedores = get_proveedores_ultimo_por_producto()
     promos_por_producto = get_promociones_activas_por_producto()
 
@@ -132,7 +136,8 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
     errores = []
     productos = []
     productos_interno = []
-    for p in base:
+    for p in todos:
+        publico = p["id"] in ids_publicos
         imagen_url_raw = p.get("imagen_url")
         if imagen_url_raw:
             con_foto_asignada += 1
@@ -149,16 +154,19 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
              pr["porcentaje_descuento"] if pr["tipo_descuento"] == "porcentaje" else pr["precio_unitario"]]
             for pr in promos_por_producto.get(p["id"], [])
         ]
-        productos.append({
-            "codigo": p["codigo"],
-            "descripcion": p["descripcion"],
-            "marca": p.get("marca") or "",
-            "categoria": p.get("categoria") or "",
-            "precio": p["precio_base"],
-            "stock": p.get("stock") or 0,
-            "promos": json.dumps(promos_compactas) if promos_compactas else "",
-            "imagen": imagen_final,
-        })
+        # Solo los publicables van al catalogo del cliente
+        if publico:
+            productos.append({
+                "codigo": p["codigo"],
+                "descripcion": p["descripcion"],
+                "marca": p.get("marca") or "",
+                "categoria": p.get("categoria") or "",
+                "precio": p["precio_base"],
+                "stock": p.get("stock") or 0,
+                "promos": (json.dumps(promos_compactas)
+                           if promos_compactas else ""),
+                "imagen": imagen_final,
+            })
         productos_interno.append({
             "codigo": p["codigo"],
             "descripcion": p["descripcion"],

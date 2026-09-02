@@ -25,7 +25,7 @@ def dialogo_historial_lotes(parent):
 
     lbl(d, "Historial de ingresos", variante="titulo", bg=C.superficie).pack(
         anchor="w", padx=20, pady=(16, 2))
-    lbl(d, "Todos los lotes cargados. Doble clic para corregir el vencimiento.",
+    lbl(d, "Todos los lotes cargados. Doble clic en un lote para corregirlo.",
         variante="suave", bg=C.superficie).pack(anchor="w", padx=20)
 
     # ── Filtros ───────────────────────────────────────────────────────────
@@ -58,6 +58,13 @@ def dialogo_historial_lotes(parent):
     tk.Checkbutton(barra, text="Solo con stock", variable=v_stock, bg=C.superficie,
                    fg=C.texto, font=F.normal, activebackground=C.superficie,
                    selectcolor=C.superficie).pack(side="left", padx=10)
+
+    # El pie se reserva ANTES que la tabla: con pack, lo que se empaqueta
+    # con expand=True se queda con todo el espacio libre, y el pie que
+    # viene despues cae fuera de la ventana. Por eso los botones no se
+    # veian al maximizar.
+    pie = tk.Frame(d, bg=C.superficie)
+    pie.pack(side="bottom", fill="x", pady=(8, 14))
 
     # ── Tabla ─────────────────────────────────────────────────────────────
     cont = tk.Frame(d, bg=C.superficie)
@@ -140,60 +147,12 @@ def dialogo_historial_lotes(parent):
                   f"ingresadas   ·   invertido $ {r['invertido']:,.2f}   ·   "
                   f"todavia en stock $ {r['en_stock']:,.2f}"))
 
-    def _editar_vto(_ev=None):
-        sel = tv.selection()
-        if not sel:
-            return
-        lote = filas[int(sel[0])]
-        actual = lote["fecha_vencimiento"] or ""
-        try:
-            ini = (datetime.datetime.strptime(actual, "%Y-%m-%d").strftime("%d/%m/%Y")
-                   if actual else "")
-        except ValueError:
-            ini = actual
-
-        top = tk.Toplevel(d)
-        top.title("Corregir vencimiento")
-        top.configure(bg=C.superficie)
-        top.grab_set()
-        top.geometry("400x210")
-        lbl(top, lote["descripcion"][:44], variante="titulo",
-            bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
-        lbl(top, f"Ingresado el {(lote['fecha_ingreso'] or '')[:10]}   ·   "
-                 f"vence: {actual or 'sin vencimiento'}",
-            variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
-        lbl(top, "Nueva fecha (DD/MM/AAAA — vacío = sin vencimiento)",
-            variante="suave", bg=C.superficie).pack(anchor="w", padx=18, pady=(12, 4))
-        var = tk.StringVar(value=ini)
-        ent = tk.Entry(top, textvariable=var, font=F.normal, justify="center",
-                       bg=C.bg, fg=C.texto, relief="solid", bd=1)
-        ent.pack(fill="x", padx=18, ipady=5)
-        ent.focus_set()
-        ent.select_range(0, "end")
-
-        def guardar(_e=None):
-            try:
-                actualizar_vencimiento_lote(lote["id"], var.get())
-            except ValueError as exc:
-                messagebox.showwarning("Vencimiento", str(exc), parent=top)
-                return
-            top.destroy()
-            _buscar()
-
-        ent.bind("<Return>", guardar)
-        top.bind("<Escape>", lambda e: top.destroy())
-        fb = tk.Frame(top, bg=C.superficie)
-        fb.pack(pady=16)
-        btn(fb, "Guardar", variante="exito", comando=guardar).pack(side="left", padx=4)
-        btn(fb, "Cancelar", variante="neutro", comando=top.destroy).pack(side="left", padx=4)
-
-    tv.bind("<Double-1>", _editar_vto)
+    tv.bind("<Double-1>",
+            lambda e: editar_lote_dialogo(d, tv, filas, _buscar))
     for var in (v_texto, v_desde, v_hasta, v_prov):
         var.trace_add("write", _buscar)
     v_stock.trace_add("write", _buscar)
 
-    pie = tk.Frame(d, bg=C.superficie)
-    pie.pack(side="bottom", fill="x", pady=(8, 14))
     btn(pie, "Ultimos 30 dias", variante="neutro",
         comando=lambda: v_desde.set(
             (datetime.date.today() - datetime.timedelta(days=30)).isoformat())
@@ -253,6 +212,10 @@ def dialogo_lotes_producto(parent, producto_id: int):
     tv.tag_configure("agotado", foreground=C.texto_suave)
     tv.tag_configure("vencido", background=C.err_flash, foreground=C.peligro)
     tv.tag_configure("porvencer", background=C.acento)
+    # El pie primero, por lo mismo que en el historial completo: si no,
+    # la tabla se queda con todo el alto y los botones caen fuera.
+    pie = tk.Frame(d, bg=C.superficie)
+    pie.pack(side="bottom", fill="x", pady=(0, 14))
     tv.pack(fill="both", expand=True, padx=20, pady=8)
 
     filas = []
@@ -366,113 +329,6 @@ def dialogo_lotes_producto(parent, producto_id: int):
 
     _cargar()
     parent.wait_window(d)
-
-
-def corregir_costo_dialogo(d, tv, filas, al_terminar=None):
-    """Corrige el costo de un lote mal cargado.
-
-    Poner el precio de venta en el campo "costo unitario" al ingresar
-    stock es facil de hacer y dificil de ver: el producto sigue
-    mostrando su costo correcto, pero la rentabilidad de todo lo
-    vendido de ese lote sale en cero.
-    """
-    from repositorio import corregir_costo_lote
-    from fiado_ui import pedir_autorizacion
-    sel = tv.selection()
-    if not sel:
-        messagebox.showinfo("Costo", "Elegí un lote de la lista.", parent=d)
-        return
-    lote = filas[int(sel[0])]
-    actual = float(lote.get("costo_unitario") or 0)
-    precio = float(lote.get("precio_base") or 0)
-
-    top = tk.Toplevel(d)
-    top.title("Corregir costo del lote")
-    top.configure(bg=C.superficie)
-    top.grab_set()
-    top.geometry("470x340")
-
-    lbl(top, lote.get("descripcion", "")[:44], variante="titulo",
-        bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
-    lbl(top, f"Lote del {(lote.get('fecha_ingreso') or '')[:10]}   ·   "
-             f"{lote.get('cantidad', 0):g} unidad(es)",
-        variante="suave", bg=C.superficie).pack(anchor="w", padx=18)
-
-    info = tk.Frame(top, bg=C.acento, padx=14, pady=10)
-    info.pack(fill="x", padx=18, pady=(12, 8))
-    tk.Label(info, text=f"Costo cargado: $ {actual:,.2f}", bg=C.acento,
-             fg=C.texto, font=F.normal, anchor="w").pack(anchor="w")
-    tk.Label(info, text=f"Precio de venta: $ {precio:,.2f}", bg=C.acento,
-             fg=C.texto, font=F.normal, anchor="w").pack(anchor="w")
-    if precio and abs(actual - precio) < 0.01:
-        tk.Label(info, text="⚠  El costo es igual al precio de venta: "
-                            "casi seguro se cargó el precio por error.",
-                 bg=C.acento, fg=C.peligro, font=F.pequeña, anchor="w",
-                 wraplength=400, justify="left").pack(anchor="w",
-                                                      pady=(6, 0))
-
-    lbl(top, "Costo real por unidad", variante="suave",
-        bg=C.superficie).pack(anchor="w", padx=18, pady=(6, 2))
-    v_costo = tk.StringVar(value=f"{actual:.2f}")
-    e = tk.Entry(top, textvariable=v_costo, font=F.total, justify="center",
-                 bg=C.bg, fg=C.texto, relief="solid", bd=1)
-    e.pack(fill="x", padx=18, ipady=6)
-    e.focus_set()
-    e.select_range(0, "end")
-
-    lbl_m = tk.Label(top, text="", bg=C.superficie, fg=C.texto_suave,
-                     font=F.pequeña, anchor="w")
-    lbl_m.pack(fill="x", padx=18, pady=(6, 0))
-
-    def _margen(*_a):
-        try:
-            c = float(v_costo.get().replace(",", "."))
-        except ValueError:
-            lbl_m.config(text="")
-            return
-        if c > 0 and precio:
-            lbl_m.config(text=f"Margen con ese costo: "
-                              f"{(precio - c) / c * 100:.1f}%",
-                         fg=C.peligro if precio < c else C.texto_suave)
-    v_costo.trace_add("write", _margen)
-    _margen()
-
-    def guardar(_e=None):
-        try:
-            nuevo = float(v_costo.get().replace(",", "."))
-        except ValueError:
-            messagebox.showwarning("Costo", "No es un número.", parent=top)
-            return
-        resp = pedir_autorizacion(
-            top, "Corregir el costo cambia la ganancia ya informada.")
-        if not resp:
-            return
-        try:
-            r = corregir_costo_lote(lote["id"], nuevo, resp)
-        except Exception as exc:
-            messagebox.showerror("Costo", str(exc), parent=top)
-            return
-        top.destroy()
-        msg = (f"Costo corregido: $ {r['costo_viejo']:,.2f} → "
-               f"$ {r['costo_nuevo']:,.2f}")
-        if r["unidades_vendidas"]:
-            msg += (f"\n\nSe recalculó la ganancia de "
-                    f"{r['unidades_vendidas']:g} unidad(es) ya vendidas: "
-                    f"{'+' if r['ganancia_corregida'] >= 0 else ''}"
-                    f"$ {r['ganancia_corregida']:,.2f}")
-        if r["toco_costo_ultimo"]:
-            msg += "\n\nTambién se actualizó el costo del producto."
-        messagebox.showinfo("Listo", msg, parent=d)
-        al_terminar() if al_terminar else None
-
-    e.bind("<Return>", guardar)
-    top.bind("<Escape>", lambda ev: top.destroy())
-    fb = tk.Frame(top, bg=C.superficie)
-    fb.pack(side="bottom", pady=14)
-    btn(fb, "Guardar  (Enter)", variante="exito",
-        comando=guardar).pack(side="left", padx=4)
-    btn(fb, "Cancelar", variante="neutro",
-        comando=top.destroy).pack(side="left", padx=4)
 
 
 def editar_lote_dialogo(d, tv, filas, al_terminar=None):

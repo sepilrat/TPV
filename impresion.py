@@ -578,6 +578,21 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     # Lo que piden los clientes y nunca se compro: no tiene stock que
     # medir, asi que no sale por ningun otro lado. Es justo lo que uno
     # necesita a mano antes de salir a comprar.
+    # Como viene el mes contra el anterior. Un total suelto no dice si
+    # el negocio mejora: solo comparado se sabe si una decision funciono.
+    try:
+        from repositorio import comparar_periodos, productos_que_cambiaron
+        from datetime import date as _fd, timedelta as _ftd
+        _d = int(c.get("aviso_evolucion_dias", 30) or 30)
+        _h = _fd.today()
+        evol = (comparar_periodos((_h - _ftd(days=_d - 1)).isoformat(),
+                                  _h.isoformat())
+                if c.get("aviso_evolucion", True) else None)
+        cambios = (productos_que_cambiaron(_d) if evol else None)
+    except Exception as _e:
+        logging.warning(f"No se pudo comparar periodos: {_e}")
+        evol, cambios = None, None
+
     # Cuando se vende: para decidir horarios y refuerzos. Va con barras
     # porque un cuadro de numeros no muestra el patron de un vistazo.
     try:
@@ -878,6 +893,71 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
                 f"<td align='right'>$ "
                 f"{x.get('total_vendido') or 0:,.2f}</td></tr>")
         html.append("</table>")
+
+    if evol and evol["anterior"].get("facturado"):
+        def _flecha(v):
+            """Verde si mejora, rojo si empeora. Sin color, un +3% y un
+            -3% se leen igual de rápido y no dicen nada."""
+            if v is None:
+                return "<span style='color:#6B7280'>—</span>"
+            col = "#2F7D3A" if v >= 0 else "#B23B2E"
+            sig = "▲" if v >= 0 else "▼"
+            return (f"<span style='color:{col};font-weight:700'>"
+                    f"{sig} {abs(v):.0f}%</span>")
+
+        a, ant, var = evol["actual"], evol["anterior"], evol["var"]
+        html.append(
+            f"<h3>Cómo viene ({evol['dias']} días vs. los {evol['dias']} "
+            f"anteriores)</h3>"
+            "<table border='0' cellpadding='6' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:14px'>"
+            "<tr style='background:#DBEAFE'><th align='left'>&nbsp;</th>"
+            "<th align='right'>Ahora</th><th align='right'>Antes</th>"
+            "<th align='right'>Cambio</th></tr>")
+        for clave, etq, fmt in (
+                ("facturado", "Facturado", "$ {:,.0f}"),
+                ("tickets", "Tickets", "{:,.0f}"),
+                ("ticket_prom", "Ticket promedio", "$ {:,.0f}"),
+                ("unidades", "Unidades vendidas", "{:,.0f}"),
+                ("productos", "Productos distintos", "{:,.0f}")):
+            html.append(
+                f"<tr><td>{etq}</td>"
+                f"<td align='right'>{fmt.format(a.get(clave) or 0)}</td>"
+                f"<td align='right' style='color:#6B7280'>"
+                f"{fmt.format(ant.get(clave) or 0)}</td>"
+                f"<td align='right'>{_flecha(var.get(clave))}</td></tr>")
+        html.append("</table>")
+        html.append(
+            "<p style='font-size:12px;color:#6B7280'>Los tickets y las "
+            "unidades no se inflan con los precios: si el facturado sube "
+            "pero las unidades bajan, es aumento, no crecimiento.</p>")
+
+        if cambios and (cambios["suben"] or cambios["bajan"]):
+            html.append(
+                "<table border='0' cellpadding='5' cellspacing='0' "
+                "style='border-collapse:collapse;font-size:13px'>")
+            if cambios["suben"]:
+                html.append("<tr><td colspan='3' style='padding-top:8px'>"
+                            "<b>Lo que más creció</b></td></tr>")
+                for x in cambios["suben"][:5]:
+                    etq = " (nuevo)" if x["nuevo"] else ""
+                    html.append(
+                        f"<tr><td>{x['descripcion'][:34]}{etq}</td>"
+                        f"<td align='right'>$ {x['monto_actual']:,.0f}</td>"
+                        f"<td align='right' style='color:#2F7D3A'>"
+                        f"+$ {x['dif']:,.0f}</td></tr>")
+            if cambios["bajan"]:
+                html.append("<tr><td colspan='3' style='padding-top:8px'>"
+                            "<b>Lo que más cayó</b></td></tr>")
+                for x in cambios["bajan"][:5]:
+                    etq = (" — dejó de venderse"
+                           if x["dejo_de_venderse"] else "")
+                    html.append(
+                        f"<tr><td>{x['descripcion'][:34]}{etq}</td>"
+                        f"<td align='right'>$ {x['monto_actual']:,.0f}</td>"
+                        f"<td align='right' style='color:#B23B2E'>"
+                        f"$ {x['dif']:,.0f}</td></tr>")
+            html.append("</table>")
 
     if cuando and any(x["monto"] for x in cuando["dias"]):
         def _barra(monto, tope, color):
