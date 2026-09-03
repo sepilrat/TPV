@@ -5,7 +5,6 @@ Lotes con proveedor, costo y vencimiento. FIFO automático.
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import datetime
 import threading
 import logging
 import os
@@ -15,8 +14,7 @@ import imagenes
 from styles import C, F, btn, lbl, card, tabla, toast, header_seccion, scrollable
 from repositorio import (get_proveedores, get_categorias, crear_proveedor,
                          crear_producto, registrar_lote, get_lotes_recientes,
-                         evaluar_cambio_costo, actualizar_proveedor_lote,
-                         get_stock_critico, get_stock_producto,
+                         evaluar_cambio_costo, get_stock_critico, get_stock_producto,
                          get_producto_por_codigo, actualizar_imagen_producto)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -456,16 +454,17 @@ class IngresoUI(ttk.Frame):
 
         frame_l, self.tree_lotes = tabla(p, COLS_LOTES)
         frame_l.grid(row=1, column=0, sticky="nsew")
-        self.tree_lotes.bind("<Double-1>", self._editar_proveedor_lote)
-        lbl(p, "Doble click en un ingreso para corregir el proveedor",
+        self.tree_lotes.bind("<Double-1>", self._editar_lote)
+        lbl(p, "Doble clic en un ingreso para corregirlo "
+               "(cantidad, costo, proveedor, vencimiento)",
             variante="suave").grid(row=2, column=0, sticky="w", pady=(4,0))
 
         acc_l = tk.Frame(p, bg=C.bg)
         acc_l.grid(row=3, column=0, sticky="w", pady=(6,12))   # fila propia
         btn(acc_l, "🔄  Actualizar", variante="neutro",
             comando=self._refrescar_lotes).pack(side="left")
-        btn(acc_l, "Corregir vencimiento", variante="neutro",
-            comando=self._editar_vencimiento_lote).pack(side="left", padx=6)
+        btn(acc_l, "✏️  Editar lote", variante="neutro",
+            comando=self._editar_lote).pack(side="left", padx=6)
         btn(acc_l, "Ver historial completo", variante="primario",
             comando=self._historial_lotes).pack(side="left")
 
@@ -1231,109 +1230,32 @@ class IngresoUI(ttk.Frame):
         from historial_lotes_ui import dialogo_historial_lotes
         dialogo_historial_lotes(self)
 
-    def _editar_vencimiento_lote(self, event=None):
-        """Corrige el vencimiento de un lote ya cargado.
+    def _editar_lote(self, event=None):
+        """Abre el editor completo del lote seleccionado.
 
-        Hasta ahora la fecha se escribia una sola vez al ingresar el lote y
-        despues no habia forma de tocarla: un error de tipeo se quedaba ahi
-        para siempre, disparando alertas falsas o —peor— callando las reales.
+        Antes había un botón solo para el vencimiento y el doble clic
+        corregía solo el proveedor. Es el mismo editor que usa el
+        historial completo: cantidad, costo, proveedor, vencimiento y
+        notas en un solo lugar.
         """
         sel = self.tree_lotes.selection()
         if not sel:
-            messagebox.showinfo("Vencimiento",
-                                "Seleccioná un ingreso de la lista.", parent=self)
+            messagebox.showinfo("Editar lote",
+                                "Seleccioná un ingreso de la lista.",
+                                parent=self)
             return
         lote_id = int(sel[0])
-        valores = self.tree_lotes.item(sel[0])["values"]
-        descripcion, actual = valores[0], valores[8]
 
-        d = tk.Toplevel(self)
-        d.title("Corregir vencimiento")
-        _centrar(d, 420, 250)
-        d.configure(bg=C.superficie)
-        d.resizable(False, False)
-        d.grab_set()
-
-        lbl(d, descripcion, variante="titulo", bg=C.superficie).pack(
-            anchor="w", padx=20, pady=(18, 2))
-        lbl(d, f"Vencimiento actual: {actual}", variante="suave",
-            bg=C.superficie).pack(anchor="w", padx=20)
-
-        lbl(d, "Nueva fecha (15/03/27 · vacío = sin vencimiento)",
-            variante="suave", bg=C.superficie).pack(anchor="w", padx=20,
-                                                    pady=(14, 4))
-        var = tk.StringVar()
-        if actual and actual != "—":
-            try:
-                var.set(datetime.strptime(actual, "%Y-%m-%d").strftime("%d/%m/%Y"))
-            except ValueError:
-                var.set(actual)
-        e = tk.Entry(d, textvariable=var, font=F.normal, justify="center",
-                     bg=C.superficie, fg=C.texto, relief="solid", bd=1)
-        e.pack(padx=20, fill="x", ipady=5)
-        e.focus_set()
-        e.select_range(0, "end")
-
-        def guardar(_ev=None):
-            from repositorio import actualizar_vencimiento_lote
-            try:
-                nueva = actualizar_vencimiento_lote(lote_id, var.get())
-            except ValueError as exc:
-                messagebox.showwarning("Vencimiento", str(exc), parent=d)
-                return
-            d.destroy()
-            self._refrescar_lotes()
-            toast(self, f"Vencimiento actualizado: {nueva or 'sin vencimiento'}")
-
-        e.bind("<Return>", guardar)
-        d.bind("<Escape>", lambda ev: d.destroy())
-
-        fb = tk.Frame(d, bg=C.superficie)
-        fb.pack(pady=18)
-        btn(fb, "Guardar", variante="exito", comando=guardar).pack(side="left", padx=4)
-        btn(fb, "Cancelar", variante="neutro", comando=d.destroy).pack(side="left", padx=4)
-
-    def _editar_proveedor_lote(self, event=None):
-        sel = self.tree_lotes.selection()
-        if not sel:
+        from repositorio import get_lotes_recientes
+        filas = {int(l["id"]): dict(l) for l in get_lotes_recientes(200)}
+        if lote_id not in filas:
+            messagebox.showinfo("Editar lote",
+                                "No se encontró ese lote.", parent=self)
             return
-        lote_id = int(sel[0])
-        valores = self.tree_lotes.item(sel[0])["values"]
-        descripcion, prov_actual = valores[0], valores[6]
 
-        d = tk.Toplevel(self)
-        d.title("Corregir proveedor")
-        _centrar(d, 380, 220)
-        d.configure(bg=C.superficie)
-        d.resizable(False, False)
-        d.grab_set()
-
-        lbl(d, descripcion, variante="titulo", bg=C.superficie).pack(
-            pady=(20,4), padx=20, anchor="w")
-        lbl(d, f"Proveedor actual: {prov_actual}", variante="suave",
-            bg=C.superficie).pack(padx=20, anchor="w", pady=(0,12))
-
-        lbl(d, "Proveedor correcto", variante="suave", bg=C.superficie).pack(
-            padx=20, anchor="w")
-        prov_map = {r["nombre"]: r["id"] for r in get_proveedores()}
-        combo = ttk.Combobox(d, font=F.normal, state="readonly",
-                             values=["(sin proveedor)"] + list(prov_map.keys()))
-        combo.pack(fill="x", padx=20, pady=(2,14), ipady=4)
-        if prov_actual in prov_map:
-            combo.set(prov_actual)
-        else:
-            combo.current(0)
-
-        def _guardar():
-            elegido = combo.get()
-            nuevo_id = prov_map.get(elegido)  # None si "(sin proveedor)"
-            actualizar_proveedor_lote(lote_id, nuevo_id)
-            d.destroy()
-            toast(self, "✅  Proveedor corregido")
-            self._refrescar_lotes()
-
-        btn(d, "Guardar", variante="exito", comando=_guardar).pack(
-            fill="x", padx=20, pady=(0,20))
+        from historial_lotes_ui import editar_lote_dialogo
+        editar_lote_dialogo(self, self.tree_lotes, filas,
+                            self._refrescar_lotes)
 
     def _refrescar_critico(self):
         for r in self.tree_critico.get_children():

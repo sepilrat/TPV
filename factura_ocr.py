@@ -19,22 +19,75 @@ librería de Python):
   pip install pytesseract
 """
 
+import os
 import re
 
 TESSERACT_LANG = "spa"
 
 
+# Donde deja el ejecutable el instalador de UB-Mannheim. Es habitual que
+# quede instalado pero fuera del PATH: sin esto pytesseract falla aunque
+# el programa este.
+_RUTAS_TESSERACT = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+    os.path.expandvars(r"%USERPROFILE%\AppData\Local\Tesseract-OCR\tesseract.exe"),
+    r"C:\Tesseract-OCR\tesseract.exe",
+)
+
+
+def _apuntar_a_tesseract() -> bool:
+    """Le dice a pytesseract dónde está el ejecutable.
+
+    Primero la ruta que guardó buscar_tesseract.py, después las
+    habituales. Sin esto, tener Tesseract instalado no alcanza: si no
+    quedó en el PATH, el lector de facturas falla igual.
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        return False
+
+    rutas = []
+    try:
+        from config import cfg
+        guardada = (cfg().get("tesseract_ruta") or "").strip()
+        if guardada:
+            rutas.append(guardada)
+    except Exception:
+        pass
+    rutas.extend(_RUTAS_TESSERACT)
+
+    for ruta in rutas:
+        if ruta and os.path.isfile(ruta):
+            pytesseract.pytesseract.tesseract_cmd = ruta
+            try:
+                pytesseract.get_tesseract_version()
+                return True
+            except Exception:
+                continue
+    return False
+
+
 def _tesseract_disponible() -> tuple[bool, str]:
     try:
         import pytesseract
-        version = pytesseract.get_tesseract_version()
-        return True, str(version)
+        try:
+            version = pytesseract.get_tesseract_version()
+            return True, str(version)
+        except Exception:
+            # No está en el PATH: buscarlo en las rutas conocidas
+            if _apuntar_a_tesseract():
+                return True, str(pytesseract.get_tesseract_version())
+            raise
     except ImportError:
         return False, "Falta instalar el paquete pytesseract (pip install pytesseract)."
     except Exception as e:
         return False, (
             "No se encontró el programa Tesseract OCR instalado. "
             "Descargalo de https://github.com/UB-Mannheim/tesseract/wiki "
+            "y, si ya lo instalaste, corré buscar_tesseract.py "
             f"(detalle: {e})")
 
 

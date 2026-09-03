@@ -60,7 +60,19 @@ def _intentar_ubicar_tesseract() -> str:
         import pytesseract
     except ImportError:
         return ""
-    for ruta in _RUTAS_TESSERACT:
+    # Primero la ruta guardada por buscar_tesseract.py: si el instalador
+    # lo dejo en un lugar raro, es la unica que lo encuentra.
+    rutas = []
+    try:
+        from config import cfg
+        guardada = (cfg().get("tesseract_ruta") or "").strip()
+        if guardada:
+            rutas.append(guardada)
+    except Exception:
+        pass
+    rutas.extend(_RUTAS_TESSERACT)
+
+    for ruta in rutas:
         if ruta and os.path.isfile(ruta):
             pytesseract.pytesseract.tesseract_cmd = ruta
             try:

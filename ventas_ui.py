@@ -567,12 +567,14 @@ class VentasUI(ttk.Frame):
         raiz.bind_class("ScanPrio", "<Key>", _tecla)
 
         def _priorizar(w):
+            # TODO widget que pueda tener el foco, no solo los campos de
+            # texto: con el foco en la tabla del carrito el escaneo no
+            # llegaba, y ese es el lugar donde queda el foco despues de
+            # tocar una fila para editarla o quitarla.
             try:
-                if isinstance(w, (tk.Entry, ttk.Entry, tk.Text,
-                                  tk.Spinbox, ttk.Combobox)):
-                    tags = list(w.bindtags())
-                    if "ScanPrio" not in tags:
-                        w.bindtags(("ScanPrio",) + tuple(tags))
+                tags = list(w.bindtags())
+                if "ScanPrio" not in tags:
+                    w.bindtags(("ScanPrio",) + tuple(tags))
             except Exception:
                 pass
             for hijo in w.winfo_children():

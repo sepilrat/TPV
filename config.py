@@ -163,6 +163,9 @@ DEFAULTS = {
     "etiqueta_font_codigo":     12,      # pt — numero de codigo de barras
 
     # Sistema
+    # Ruta a tesseract.exe, si el instalador lo dejo fuera del PATH.
+    # La completa buscar_tesseract.py
+    "tesseract_ruta":       "",
     "backup_automatico":    True,
     # Copia diaria aparte, con la fecha en el nombre
     "backup_diario":        True,
