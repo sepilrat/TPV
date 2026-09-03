@@ -30,7 +30,22 @@ def _icono():
     return sys.executable
 
 
-def _crear(destino, nombre, objetivo, descripcion, icono=None):
+def _pythonw():
+    """pythonw.exe del entorno: abre la app SIN ventana de consola.
+
+    Apuntar el acceso al .bat deja una consola abierta detrás de la
+    aplicación —el .bat se queda esperando— y no aporta nada.
+    """
+    ruta = os.path.join(CARPETA, ".venv", "Scripts", "pythonw.exe")
+    if os.path.isfile(ruta):
+        return ruta
+    # Sin venv: el pythonw que esté al lado del python actual
+    alterno = sys.executable.replace("python.exe", "pythonw.exe")
+    return alterno if os.path.isfile(alterno) else sys.executable
+
+
+def _crear(destino, nombre, objetivo, descripcion, icono=None,
+           argumentos=""):
     """Crea un .lnk usando el COM de Windows.
 
     Se usa pywin32 si está; si no, un script de PowerShell — que viene
@@ -47,6 +62,8 @@ def _crear(destino, nombre, objetivo, descripcion, icono=None):
         shell = win32com.client.Dispatch("WScript.Shell")
         acceso = shell.CreateShortCut(lnk)
         acceso.TargetPath = objetivo
+        if argumentos:
+            acceso.Arguments = argumentos
         acceso.WorkingDirectory = CARPETA
         acceso.Description = descripcion
         acceso.IconLocation = icono or _icono()
@@ -58,9 +75,11 @@ def _crear(destino, nombre, objetivo, descripcion, icono=None):
         pass
 
     import subprocess
+    _args = f"$s.Arguments = '{argumentos}';" if argumentos else ""
     ps = (
         f"$s = (New-Object -COM WScript.Shell).CreateShortcut('{lnk}');"
         f"$s.TargetPath = '{objetivo}';"
+        f"{_args}"
         f"$s.WorkingDirectory = '{CARPETA.replace('/', chr(92))}';"
         f"$s.Description = '{descripcion}';"
         f"$s.IconLocation = '{icono or _icono()}';"
@@ -94,8 +113,11 @@ def main():
 
     hechos = []
     try:
-        hechos.append(_crear(escritorio, "TPV Autoservicio", BAT,
-                             "Abre el TPV con la base del negocio"))
+        # A pythonw.exe directo, no al .bat: el .bat deja una consola
+        # abierta detrás de la aplicación mientras el TPV está en uso.
+        hechos.append(_crear(escritorio, "TPV Autoservicio", _pythonw(),
+                             "Abre el TPV con la base del negocio",
+                             argumentos="main.py"))
         print(f"[OK] En el escritorio: {escritorio}")
     except Exception as exc:
         print(f"[FALLA] Escritorio: {exc}")
@@ -114,8 +136,9 @@ def main():
                         "Start Menu", "Programs")
     if os.path.isdir(menu):
         try:
-            _crear(menu, "TPV Autoservicio", BAT,
-                   "Abre el TPV con la base del negocio")
+            _crear(menu, "TPV Autoservicio", _pythonw(),
+                   "Abre el TPV con la base del negocio",
+                   argumentos="main.py")
             print("[OK] En el menú Inicio (buscá «TPV»)")
         except Exception as exc:
             print(f"[aviso] Menú Inicio: {exc}")
@@ -125,8 +148,9 @@ def main():
                               "Windows", "Start Menu", "Programs", "Startup")
         if os.path.isdir(inicio):
             try:
-                _crear(inicio, "TPV Autoservicio", BAT,
-                       "Abre el TPV al prender la PC")
+                _crear(inicio, "TPV Autoservicio", _pythonw(),
+                       "Abre el TPV al prender la PC",
+                       argumentos="main.py")
                 print("[OK] Arranca solo al prender la PC")
             except Exception as exc:
                 print(f"[aviso] Inicio automático: {exc}")
