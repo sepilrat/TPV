@@ -52,6 +52,11 @@ def inicializar_db():
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre      TEXT NOT NULL UNIQUE,
             margen_pct  REAL DEFAULT 30.0,  -- margen de ganancia por defecto (%)
+            alerta_stock_umbral INTEGER DEFAULT NULL,
+                        -- unidades por debajo de las cuales se avisa
+                        -- stock bajo para TODOS los productos de esta
+                        -- categoría que no tengan su propio número
+                        -- cargado. NULL = usa el umbral general.
             creado_en   TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
@@ -67,6 +72,9 @@ def inicializar_db():
             email       TEXT,
             notas       TEXT,
             activo      INTEGER DEFAULT 1,
+            formato_factura TEXT DEFAULT 'cant_prod_precio_total',
+                        -- como vienen las columnas en las facturas de
+                        -- este proveedor, para el OCR (ver factura_ocr.py)
             creado_en   TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
@@ -85,6 +93,12 @@ def inicializar_db():
             margen_pct      REAL DEFAULT NULL,          -- NULL = heredar margen de categoría
             ignorar_alerta  INTEGER DEFAULT 0,           -- 1 = no alertar stock bajo
             vendido_por_peso INTEGER DEFAULT 0,          -- 1 = admite cantidad decimal (kg)
+            fraccionable    INTEGER DEFAULT 0,           -- 1 = admite venta en fracciones (ej: 0,5 caja)
+            alerta_stock_umbral INTEGER DEFAULT NULL,
+                        -- unidades por debajo de las cuales se avisa
+                        -- stock bajo para ESTE producto en particular.
+                        -- NULL = usa el de la categoría, o si esa
+                        -- tampoco tiene, el umbral general.
             marca           TEXT,                        -- marca/fabricante (para ordenar listas)
             imagen_url      TEXT,
             activo          INTEGER DEFAULT 1,
@@ -554,6 +568,9 @@ def inicializar_db():
         "ALTER TABLE ventas ADD COLUMN cliente_id INTEGER REFERENCES clientes(id)",
         "ALTER TABLE productos ADD COLUMN ignorar_alerta INTEGER DEFAULT 0",
         "ALTER TABLE productos ADD COLUMN vendido_por_peso INTEGER DEFAULT 0",
+        "ALTER TABLE productos ADD COLUMN fraccionable INTEGER DEFAULT 0",
+        "ALTER TABLE productos ADD COLUMN alerta_stock_umbral INTEGER DEFAULT NULL",
+        "ALTER TABLE categorias ADD COLUMN alerta_stock_umbral INTEGER DEFAULT NULL",
         "ALTER TABLE productos ADD COLUMN marca TEXT",
         # Dias de aviso de vencimiento propios del producto. NULL = usar el
         # general de Config. Un yogur no necesita el mismo anticipo que una lata.
@@ -583,6 +600,8 @@ def inicializar_db():
         )""",
         "ALTER TABLE promociones ADD COLUMN tipo_descuento TEXT DEFAULT 'precio_fijo'",
         "ALTER TABLE promociones ADD COLUMN porcentaje_descuento REAL",
+        "ALTER TABLE proveedores ADD COLUMN formato_factura TEXT "
+            "DEFAULT 'cant_prod_precio_total'",
     ]
     for sql in migraciones:
         try:

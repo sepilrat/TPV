@@ -188,6 +188,13 @@ class TicketsUI(ttk.Frame):
         btn(pie, "Cerrar", variante="neutro",
             comando=d.destroy).pack(side="left", padx=18)
 
+        def _reimprimir():
+            from impresion import previsualizar_ticket
+            previsualizar_ticket(d, venta_id)
+
+        btn(pie, "🖨️  Reimprimir ticket", variante="primario",
+            comando=_reimprimir).pack(side="left", padx=6)
+
         cols = [
             ("desc",   "Producto",   240, "w"),
             ("cant",   "Cant.",       80, "e"),

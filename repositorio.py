@@ -201,7 +201,7 @@ def get_productos(filtro="", categoria_id=None, solo_activos=True) -> list:
 
 
 def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
-                   vendido_por_peso=0, marca=None) -> int:
+                   vendido_por_peso=0, marca=None, fraccionable=0) -> int:
     """Crea el producto. Sin codigo escaneable, le genera uno propio.
 
     Un producto que nace sin codigo hay que buscarlo por nombre en cada
@@ -232,11 +232,12 @@ def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
         cur = conn.execute("""
             INSERT INTO productos
                 (codigo, descripcion, categoria_id, precio_base, costo_ultimo,
-                 vendido_por_peso, marca)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 vendido_por_peso, marca, fraccionable)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (codigo or f"_tmp_{descripcion[:20]}_{datetime.now():%H%M%S%f}",
               descripcion, categoria_id, precio_base, costo,
-              int(bool(vendido_por_peso)), (marca or "").strip() or None))
+              int(bool(vendido_por_peso)), (marca or "").strip() or None,
+              int(bool(fraccionable))))
         pid = cur.lastrowid
         conn.commit()
 
@@ -254,7 +255,8 @@ def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
 
 def actualizar_producto(pid, descripcion, codigo, categoria_id,
                         precio_base, costo_ultimo=None, margen_pct=None,
-                        vendido_por_peso=0, imagen_url=None, marca=None):
+                        vendido_por_peso=0, imagen_url=None, marca=None,
+                        fraccionable=0, alerta_stock_umbral=None):
     # El redondeo es una regla del negocio, no una accion aparte: si
     # se aplica solo en algunas pantallas, el catalogo termina mitad
     # redondeado y mitad con decimales.
@@ -280,12 +282,14 @@ def actualizar_producto(pid, descripcion, codigo, categoria_id,
             UPDATE productos
             SET descripcion=?, codigo=?, categoria_id=?, precio_base=?,
                 costo_ultimo=COALESCE(?, costo_ultimo), margen_pct=?,
-                vendido_por_peso=?, imagen_url=?, marca=?,
+                vendido_por_peso=?, imagen_url=?, marca=?, fraccionable=?,
+                alerta_stock_umbral=?,
                 modificado_en=datetime('now','localtime')
             WHERE id=?
         """, (descripcion, codigo, categoria_id, precio_base, costo_ultimo,
               margen_pct, int(bool(vendido_por_peso)), imagen_url,
-              (marca or "").strip() or None, pid))
+              (marca or "").strip() or None, int(bool(fraccionable)),
+              alerta_stock_umbral, pid))
         conn.commit()
 
 
@@ -769,7 +773,9 @@ def get_informe_stock(solo_criticos=False, umbral=None) -> list:
     """
     Devuelve el stock de productos activos, ordenado de MENOR a MAYOR
     stock (los más urgentes primero). Si solo_criticos=True, filtra
-    solo los que están por debajo del umbral configurado.
+    solo los que están por debajo de SU umbral (el propio del
+    producto, si no tiene el de su categoría, si no tiene el general
+    configurado en Ajustes).
     """
     if umbral is None:
         try:
@@ -781,24 +787,24 @@ def get_informe_stock(solo_criticos=False, umbral=None) -> list:
     q = """
         SELECT p.id, p.codigo, p.descripcion, c.nombre as categoria,
                p.vendido_por_peso,
+               COALESCE(p.alerta_stock_umbral, c.alerta_stock_umbral, ?) as umbral_aplicado,
                COALESCE(SUM(l.cantidad_restante), 0) as stock
         FROM productos p
         LEFT JOIN categorias c ON p.categoria_id = c.id
         LEFT JOIN lotes l ON l.producto_id = p.id
         WHERE p.activo = 1
     """
+    params = [umbral]
     if solo_criticos:
-        q += " AND p.ignorar_alerta = 0 GROUP BY p.id HAVING stock < ?"
-        params = (umbral,)
+        q += " AND p.ignorar_alerta = 0 GROUP BY p.id HAVING stock < umbral_aplicado"
     else:
         q += " GROUP BY p.id"
-        params = ()
     q += " ORDER BY stock ASC, p.descripcion ASC"
 
     with get_connection() as conn:
         filas = [dict(r) for r in conn.execute(q, params).fetchall()]
     for f in filas:
-        f["critico"] = f["stock"] < umbral
+        f["critico"] = f["stock"] < f["umbral_aplicado"]
     return filas
 
 
@@ -888,12 +894,14 @@ def get_stock_critico(umbral=None) -> list:
         return [dict(r) for r in conn.execute("""
             SELECT p.id, p.descripcion, p.codigo,
                    COALESCE(SUM(l.cantidad_restante), 0) as stock,
-                   p.precio_base, p.ignorar_alerta
+                   p.precio_base, p.ignorar_alerta,
+                   COALESCE(p.alerta_stock_umbral, c.alerta_stock_umbral, ?) as umbral_aplicado
             FROM productos p
+            LEFT JOIN categorias c ON p.categoria_id = c.id
             LEFT JOIN lotes l ON l.producto_id = p.id
             WHERE p.activo = 1 AND p.ignorar_alerta = 0
             GROUP BY p.id
-            HAVING stock < ?
+            HAVING stock < umbral_aplicado
             ORDER BY stock ASC
         """, (umbral,)).fetchall()]
 
@@ -1181,20 +1189,23 @@ def set_alerta_vto_producto(producto_id: int, dias):
 def get_categorias() -> list:
     with get_connection() as conn:
         return [dict(r) for r in conn.execute(
-            "SELECT id, nombre, margen_pct FROM categorias ORDER BY nombre"
+            "SELECT id, nombre, margen_pct, alerta_stock_umbral "
+            "FROM categorias ORDER BY nombre"
         ).fetchall()]
 
 
-def guardar_categoria(cid, nombre, margen):
+def guardar_categoria(cid, nombre, margen, alerta_stock_umbral=None):
     with get_connection() as conn:
         if cid:
             conn.execute(
-                "UPDATE categorias SET nombre=?, margen_pct=? WHERE id=?",
-                (nombre, margen, cid))
+                "UPDATE categorias SET nombre=?, margen_pct=?, "
+                "alerta_stock_umbral=? WHERE id=?",
+                (nombre, margen, alerta_stock_umbral, cid))
         else:
             conn.execute(
-                "INSERT INTO categorias (nombre, margen_pct) VALUES (?,?)",
-                (nombre, margen))
+                "INSERT INTO categorias (nombre, margen_pct, alerta_stock_umbral) "
+                "VALUES (?,?,?)",
+                (nombre, margen, alerta_stock_umbral))
         conn.commit()
 
 
@@ -1213,7 +1224,8 @@ def eliminar_categoria(cid):
 def get_proveedores() -> list:
     with get_connection() as conn:
         return [dict(r) for r in conn.execute(
-            "SELECT id, nombre FROM proveedores WHERE activo=1 ORDER BY nombre"
+            "SELECT id, nombre, formato_factura FROM proveedores "
+            "WHERE activo=1 ORDER BY nombre"
         ).fetchall()]
 
 
@@ -1223,6 +1235,16 @@ def crear_proveedor(nombre: str) -> int:
             "INSERT INTO proveedores (nombre) VALUES (?)", (nombre,))
         conn.commit()
         return cur.lastrowid
+
+
+def set_formato_factura_proveedor(proveedor_id: int, formato: str):
+    """Recuerda cómo vienen ordenadas las columnas en las facturas de
+    este proveedor, para que el OCR no tenga que adivinar cada vez."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE proveedores SET formato_factura=? WHERE id=?",
+            (formato, proveedor_id))
+        conn.commit()
 
 
 def resumen_cobranzas(desde, hasta) -> dict:

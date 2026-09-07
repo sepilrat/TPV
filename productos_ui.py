@@ -227,7 +227,9 @@ class ProductosUI(ttk.Frame):
         lbl(form, "Categoría", variante="titulo",
             bg=C.superficie).grid(row=0, column=0, sticky="w", padx=16, pady=(16,8))
 
-        campos_cat = [("Nombre *", "entry_cat_nombre"), ("Margen % *", "entry_cat_margen")]
+        campos_cat = [("Nombre *", "entry_cat_nombre"),
+                     ("Margen % *", "entry_cat_margen"),
+                     ("Alerta de stock (unid., opcional)", "entry_cat_alerta")]
         for i, (label, attr) in enumerate(campos_cat):
             lbl(form, label, variante="suave",
                 bg=C.superficie).grid(row=i*2+1, column=0, sticky="w", padx=16, pady=(4,0))
@@ -237,13 +239,13 @@ class ProductosUI(ttk.Frame):
             setattr(self, attr, e)
 
         btn(form, "💾  Guardar", variante="exito",
-            comando=self._guardar_cat).grid(row=5, column=0, sticky="ew",
+            comando=self._guardar_cat).grid(row=7, column=0, sticky="ew",
                                              padx=16, pady=(16,4))
         btn(form, "➕  Nueva", variante="primario",
-            comando=self._nueva_cat).grid(row=6, column=0, sticky="ew",
+            comando=self._nueva_cat).grid(row=8, column=0, sticky="ew",
                                            padx=16, pady=(0,4))
         btn(form, "🗑  Eliminar", variante="peligro",
-            comando=self._eliminar_cat).grid(row=7, column=0, sticky="ew",
+            comando=self._eliminar_cat).grid(row=9, column=0, sticky="ew",
                                               padx=16, pady=(0,16))
 
         self._cat_sel_id = None
@@ -343,6 +345,9 @@ class ProductosUI(ttk.Frame):
             self.entry_cat_margen.delete(0, "end")
             if c["margen_pct"] is not None:
                 self.entry_cat_margen.insert(0, str(c["margen_pct"]))
+            self.entry_cat_alerta.delete(0, "end")
+            if c.get("alerta_stock_umbral") is not None:
+                self.entry_cat_alerta.insert(0, str(c["alerta_stock_umbral"]))
 
     # ── Acciones productos ────────────────────────────────────────────────────
 
@@ -427,7 +432,8 @@ class ProductosUI(ttk.Frame):
                 messagebox.showinfo("Sin cambios",
                                     "La cantidad es igual al stock actual.", parent=d)
                 return
-            if not bool(prod.get("vendido_por_peso")) and nueva != int(nueva):
+            if not bool(prod.get("vendido_por_peso") or prod.get("fraccionable")) \
+                    and nueva != int(nueva):
                 messagebox.showwarning(
                     "Atención",
                     "Este producto se vende por unidad — la cantidad debe ser entera.",
@@ -1255,6 +1261,14 @@ class ProductosUI(ttk.Frame):
         combo.set(prod["cat_nombre"] or "")
         combo.pack(fill="x", padx=20, pady=(2,0))
 
+        lbl(s, "Alerta de stock (unidades, opcional)", variante="suave",
+            bg=C.superficie).pack(fill="x", padx=20, pady=(8,0))
+        e_alerta_stock = tk.Entry(s, font=F.normal, bg=C.superficie,
+                                  fg=C.texto, relief="solid", bd=1)
+        if prod.get("alerta_stock_umbral") is not None:
+            e_alerta_stock.insert(0, str(prod["alerta_stock_umbral"]))
+        e_alerta_stock.pack(fill="x", padx=20, pady=(2,0), ipady=5)
+
         # El precio de venta se recalcula solo cuando cambiás el margen
         # propio (o el costo) — antes había que acordarse de tipear el
         # precio nuevo a mano, y si no, el margen quedaba guardado pero
@@ -1350,6 +1364,13 @@ class ProductosUI(ttk.Frame):
             variable=var_peso, bg=C.superficie, fg=C.texto,
             selectcolor=C.superficie, font=F.normal, anchor="w")
         chk_peso.pack(fill="x", padx=20, pady=(10,0))
+
+        var_fracc = tk.BooleanVar(value=bool(prod.get("fraccionable")))
+        chk_fracc = tk.Checkbutton(
+            s, text="Fraccionable (admite cantidad decimal, ej: 0,5 media caja)",
+            variable=var_fracc, bg=C.superficie, fg=C.texto,
+            selectcolor=C.superficie, font=F.normal, anchor="w")
+        chk_fracc.pack(fill="x", padx=20, pady=(2,0))
 
         # ── Foto del producto ────────────────────────────────────────
         lbl(s, "Foto del producto", variante="suave", bg=C.superficie).pack(
@@ -1675,6 +1696,20 @@ class ProductosUI(ttk.Frame):
 
             cat_id = self._cat_map.get(combo.get())
 
+            alerta_txt = e_alerta_stock.get().strip()
+            alerta_stock = None
+            if alerta_txt:
+                try:
+                    alerta_stock = int(float(alerta_txt.replace(",", ".")))
+                    if alerta_stock < 0:
+                        raise ValueError
+                except ValueError:
+                    messagebox.showwarning(
+                        "Error",
+                        "La alerta de stock tiene que ser un número de "
+                        "unidades (0 o más), o dejarla vacía.", parent=d)
+                    return
+
             # Si el producto tenía una foto guardada localmente y ahora
             # se está reemplazando por otra cosa (una URL, o se quitó),
             # borramos el archivo viejo para no dejarlo huérfano en
@@ -1696,6 +1731,8 @@ class ProductosUI(ttk.Frame):
                 vendido_por_peso=var_peso.get(),
                 imagen_url=estado_img["url"] or None,
                 marca=entries["Marca"].get().strip(),
+                fraccionable=var_fracc.get(),
+                alerta_stock_umbral=alerta_stock,
             )
             import catalogo_web
             catalogo_web.sincronizar_stock_en_segundo_plano()
@@ -1812,6 +1849,18 @@ class ProductosUI(ttk.Frame):
         except ValueError:
             messagebox.showwarning("Error", "Margen inválido.", parent=self)
             return
+        alerta_txt = self.entry_cat_alerta.get().strip()
+        alerta_stock = None
+        if alerta_txt:
+            try:
+                alerta_stock = int(float(alerta_txt.replace(",", ".")))
+                if alerta_stock < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(
+                    "Error", "La alerta de stock tiene que ser un número "
+                    "de unidades (0 o más), o dejarla vacía.", parent=self)
+                return
         if not nombre:
             messagebox.showwarning("Error", "Ingresá un nombre.", parent=self)
             return
@@ -1823,7 +1872,7 @@ class ProductosUI(ttk.Frame):
             if cat_actual and cat_actual["margen_pct"] != margen:
                 margen_cambio = True
 
-        guardar_categoria(cat_id, nombre, margen)
+        guardar_categoria(cat_id, nombre, margen, alerta_stock)
         toast(self, "✅  Categoría guardada")
 
         # Cambiar el margen de la categoría NO recalcula solo los
@@ -1881,6 +1930,7 @@ class ProductosUI(ttk.Frame):
         self.entry_cat_nombre.delete(0, "end")
         self.entry_cat_margen.delete(0, "end")
         self.entry_cat_margen.insert(0, "30")
+        self.entry_cat_alerta.delete(0, "end")
         self.entry_cat_nombre.focus_set()
 
     def _eliminar_cat(self):

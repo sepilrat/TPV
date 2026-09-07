@@ -334,12 +334,22 @@ class IngresoUI(ttk.Frame):
         self.combo_cat = ttk.Combobox(f_cat, font=F.normal, state="readonly",
                                       width=16)
         self.combo_cat.grid(row=0, column=0, sticky="ew", ipady=4)
-        self.lbl_margen_info = lbl(self.frame_precio, "", variante="suave")
-        self.lbl_margen_info.grid(row=2, column=0, columnspan=2, sticky="w",
-                                  padx=12, pady=(0, 4))
-
         btn(f_cat, "+", variante="neutro",
             comando=self._nueva_categoria).grid(row=0, column=1, padx=(4,0))
+
+        lbl(self.frame_precio, "Marca (se sugiere sola, editable)",
+            variante="suave", bg=C.superficie).grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=(12,4), pady=(4,0))
+        self.entry_marca = tk.Entry(self.frame_precio, font=F.normal,
+                                    bg=C.superficie, fg=C.texto,
+                                    insertbackground=C.primario,
+                                    relief="solid", bd=1)
+        self.entry_marca.grid(row=3, column=0, columnspan=2, sticky="ew",
+                              padx=(12,4), pady=(2,4), ipady=5)
+
+        self.lbl_margen_info = lbl(self.frame_precio, "", variante="suave")
+        self.lbl_margen_info.grid(row=4, column=0, columnspan=2, sticky="w",
+                                  padx=12, pady=(0, 4))
 
         self.var_peso = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -347,7 +357,15 @@ class IngresoUI(ttk.Frame):
             text="Vendido por peso (admite cantidad decimal, ej: 0,500 kg)",
             variable=self.var_peso, bg=C.superficie, fg=C.texto,
             selectcolor=C.superficie, font=F.normal, anchor="w"
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=(12,4), pady=(4,6))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=(12,4), pady=(4,0))
+
+        self.var_fracc = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            self.frame_precio,
+            text="Fraccionable (admite cantidad decimal, ej: 0,5 media caja)",
+            variable=self.var_fracc, bg=C.superficie, fg=C.texto,
+            selectcolor=C.superficie, font=F.normal, anchor="w"
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=(12,4), pady=(0,6))
 
         # Foto del producto nuevo — buscador embebido, mismo que en
         # Editar producto. Ya NO se busca sola en Open Food Facts al
@@ -665,8 +683,7 @@ class IngresoUI(ttk.Frame):
         if not self._producto_actual:
             self._dialogo_nuevo_producto(
                 self.entry_codigo.get().strip(),
-                desc_inicial=getattr(self, "_desc_nuevo", ""),
-                marca_inicial=getattr(self, "_marca_nueva", ""))
+                desc_inicial=getattr(self, "_desc_nuevo", ""))
             return
 
         from repositorio import get_producto_completo, actualizar_producto
@@ -771,15 +788,18 @@ class IngresoUI(ttk.Frame):
         else:
             self.frame_precio.grid_remove()
 
-    def _dialogo_nuevo_producto(self, codigo, desc_inicial="",
-                                marca_inicial=""):
-        """Pide descripcion (y marca) para un producto nuevo antes de continuar."""
+    def _dialogo_nuevo_producto(self, codigo, desc_inicial=""):
+        """Pide la descripcion para un producto nuevo antes de continuar.
+
+        Sin grab_set(): se puede dejar esta ventana abierta y seguir
+        usando el resto de la aplicacion (ir a Venta, por ejemplo) sin
+        tener que completarla primero.
+        """
         d = tk.Toplevel(self)
         d.title("Producto nuevo")
         d.resizable(True, False)
         d.configure(bg=C.superficie)
-        d.grab_set()
-        _centrar(d, 400, 240)
+        _centrar(d, 400, 180)
 
         lbl(d, f"Codigo: {codigo}", variante="subtitulo",
             bg=C.superficie).pack(pady=(16,4), padx=20, anchor="w")
@@ -788,30 +808,35 @@ class IngresoUI(ttk.Frame):
 
         e = tk.Entry(d, font=F.normal, bg=C.superficie, fg=C.texto,
                      relief="solid", bd=1)
-        e.pack(fill="x", padx=20, pady=(4,10), ipady=6)
+        e.pack(fill="x", padx=20, pady=(4,12), ipady=6)
         if desc_inicial:
             e.insert(0, desc_inicial)
             e.select_range(0, "end")
         e.focus_set()
 
-        lbl(d, "Marca (opcional)", variante="suave",
-            bg=C.superficie).pack(padx=20, anchor="w")
-        e_marca = tk.Entry(d, font=F.normal, bg=C.superficie, fg=C.texto,
-                           relief="solid", bd=1)
-        e_marca.pack(fill="x", padx=20, pady=(4,12), ipady=6)
-        if marca_inicial:
-            e_marca.insert(0, marca_inicial)
+        self._desc_nuevo = desc_inicial
 
-        self._desc_nuevo = ""
-        self._marca_nueva = ""
+        def _sugerir_marca_en_vivo(event=None):
+            # Sugerencia de marca = última palabra del título (ej:
+            # "Fideos Guisero Matarazzo" -> "Matarazzo"), editable
+            # después en el panel de precio. No pisa lo que el
+            # usuario ya haya corregido ahí a mano.
+            palabras = e.get().strip().split()
+            sugerida = palabras[-1] if palabras else ""
+            actual = self.entry_marca.get().strip()
+            if not actual or actual == getattr(
+                    self, "_marca_sugerida_prev", None):
+                self.entry_marca.delete(0, "end")
+                self.entry_marca.insert(0, sugerida)
+                self._marca_sugerida_prev = sugerida
+
+        e.bind("<KeyRelease>", _sugerir_marca_en_vivo)
 
         def ok(event=None):
             self._desc_nuevo = e.get().strip()
-            self._marca_nueva = e_marca.get().strip()
             d.destroy()
 
-        e.bind("<Return>", lambda ev: e_marca.focus_set())
-        e_marca.bind("<Return>", ok)
+        e.bind("<Return>", ok)
         btn(d, "Continuar", variante="primario", comando=ok).pack()
         self.wait_window(d)
 
@@ -968,7 +993,8 @@ class IngresoUI(ttk.Frame):
             cat_id = self._cat_map.get(cat_nombre)
             prod_id = crear_producto(codigo, desc, cat_id, precio, costo,
                                       vendido_por_peso=self.var_peso.get(),
-                                      marca=getattr(self, "_marca_nueva", ""))
+                                      marca=self.entry_marca.get().strip(),
+                                      fraccionable=self.var_fracc.get())
 
         # La foto elegida en "Buscar fotos" se guarda para el producto
         # sea nuevo o ya existente (antes, si el producto ya existía,
@@ -1177,7 +1203,8 @@ class IngresoUI(ttk.Frame):
     def _limpiar(self):
         self._producto_actual = None
         self._desc_nuevo = ""
-        self._marca_nueva = ""
+        self._marca_sugerida_prev = None
+        self.entry_marca.delete(0, "end")
         _fallo = getattr(self, "_foto_fallo", None)
         if _fallo:
             self._foto_fallo = None
@@ -1191,6 +1218,7 @@ class IngresoUI(ttk.Frame):
         self._foto_nueva_url = None
         self.lbl_foto_nueva.config(text="")
         self.var_peso.set(False)
+        self.var_fracc.set(False)
         self.entry_codigo.delete(0, "end")
         self.entry_cantidad.delete(0, "end")
         self.entry_cantidad.insert(0, "1")

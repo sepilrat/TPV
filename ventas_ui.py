@@ -232,6 +232,14 @@ class VentasUI(ttk.Frame):
             p, text="", bg=C.advertencia, fg=C.blanco,
             font=("Segoe UI", 10, "bold"), pady=5)
 
+        # Qué suele llevar el cliente junto con lo que ya tiene. Con
+        # público de paso, subir el ticket promedio es la palanca: el
+        # informe de "se venden juntos" existe hace rato, pero nadie lo
+        # mira mientras cobra.
+        self.lbl_sugerencias = tk.Label(
+            p, text="", bg="#1E3A5F", fg=C.blanco,
+            font=("Segoe UI", 10), pady=6, anchor="w", justify="left")
+
         # Scanner
         scan = card(p)
         scan.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -483,8 +491,12 @@ class VentasUI(ttk.Frame):
                 return
             # Con un diálogo abierto el teclado es de él: ahí se está
             # confirmando un cobro o cargando un peso.
-            if any(isinstance(w, tk.Toplevel) and w.winfo_ismapped()
-                   for w in self.winfo_toplevel().winfo_children()):
+            if self._hay_dialogo_abierto():
+                # Y se corta el escaneo en curso: si el diálogo se abrió
+                # en el medio, la marca quedaba en True para siempre y el
+                # escaneo SIGUIENTE mandaba las teclas a un scanner que
+                # ya no tenía el foco — el producto no se registraba.
+                self._en_scaneo[0] = False
                 return
 
             foco = self.focus_get()
@@ -604,7 +616,9 @@ class VentasUI(ttk.Frame):
         de ahí y se lo registra.
         """
         try:
-            if self.winfo_ismapped():
+            # Con un diálogo abierto no se toca nada: el importe que se
+            # está escribiendo ahí no es un código perdido.
+            if self.winfo_ismapped() and not self._hay_dialogo_abierto():
                 for campo in (self.entry_desc, getattr(self, "entry_recibido",
                                                        None)):
                     if campo is None:
@@ -622,6 +636,54 @@ class VentasUI(ttk.Frame):
         except Exception:
             pass
         self.after(700, self._rescatar_codigo_perdido)
+
+    def _al_cerrar_dialogo(self):
+        """Deja la caja lista después de cualquier diálogo.
+
+        El foco se reclama VARIAS veces con un retardo: al destruir una
+        ventana modal, Tk devuelve el foco por su cuenta un instante
+        después y pisa el focus_set() inmediato. Con un solo intento el
+        scanner queda sin foco y el producto siguiente no se registra.
+        """
+        try:
+            if hasattr(self, "_en_scaneo"):
+                self._en_scaneo[0] = False
+            self.entry_scan.delete(0, "end")
+        except Exception:
+            pass
+
+        def _reclamar(intento=0):
+            try:
+                if not self.winfo_exists() or not self.winfo_ismapped():
+                    return
+                if self._hay_dialogo_abierto():
+                    return          # se abrió otro encima
+                if self.focus_get() is not self.entry_scan:
+                    self.entry_scan.focus_force()
+                    self.entry_scan.icursor("end")
+            except Exception:
+                pass
+            if intento < 4:
+                self.after(80, lambda: _reclamar(intento + 1))
+
+        _reclamar()
+
+    def _hay_dialogo_abierto(self):
+        """¿Hay una ventana encima esperando algo?
+
+        Los diálogos cuelgan de distintos padres: el de peso es hijo de
+        esta pantalla, otros del toplevel. Buscar en un solo lado hacía
+        que el vigilante le robara el foco al diálogo de peso mientras
+        se escribía la cantidad.
+        """
+        try:
+            for padre in (self, self.winfo_toplevel()):
+                for w in padre.winfo_children():
+                    if isinstance(w, tk.Toplevel) and w.winfo_ismapped():
+                        return True
+        except Exception:
+            pass
+        return False
 
     def _vigilar_foco(self):
         """Red de seguridad: devuelve el foco al scanner solo.
@@ -652,8 +714,7 @@ class VentasUI(ttk.Frame):
                         foco, (tk.Entry, tk.Text, tk.Listbox, tk.Spinbox,
                                ttk.Combobox, ttk.Entry, ttk.Treeview)):
                     # Solo si no hay ventana modal encima
-                    if not any(isinstance(w, tk.Toplevel) and w.winfo_ismapped()
-                               for w in self.winfo_toplevel().winfo_children()):
+                    if not self._hay_dialogo_abierto():
                         # Si el scanner tiene texto viejo de un escaneo
                         # que se perdio, se limpia: dejarlo hace que el
                         # proximo codigo se pegue atras y no exista.
@@ -981,6 +1042,7 @@ class VentasUI(ttk.Frame):
         d.bind("<Escape>", lambda e: d.destroy())
         b1.focus_set()
         self.wait_window(d)
+        self._al_cerrar_dialogo()
         return res["seguir"]
 
     def _alertar_precio_cero(self, prod):
@@ -1168,6 +1230,58 @@ class VentasUI(ttk.Frame):
             comando=d.destroy).pack(pady=(14, 0))
         d.bind("<Escape>", lambda e: d.destroy())
 
+    def _mostrar_sugerencias(self):
+        """Ofrece lo que suele acompañar a lo que ya está en el carrito.
+
+        Va en un hilo porque consulta el historial: bloquear la caja
+        medio segundo por una sugerencia no vale la pena.
+        """
+        if not self.carrito:
+            self.lbl_sugerencias.grid_forget()
+            return
+        ids = [i["producto_id"] for i in self.carrito if i.get("producto_id")]
+        if not ids:
+            return
+
+        resultado = {"sug": None}
+
+        def _trabajo():
+            try:
+                from repositorio import sugerencias_para
+                resultado["sug"] = sugerencias_para(ids)
+            except Exception as exc:
+                logging.debug(f"No se pudieron calcular sugerencias: {exc}")
+
+        def _esperar():
+            # after() desde el hilo secundario rompe Tk; se consulta el
+            # resultado desde el hilo principal.
+            if hilo.is_alive():
+                self.after(60, _esperar)
+                return
+            if resultado["sug"] is not None:
+                _pintar(resultado["sug"])
+
+        def _pintar(sug):
+            if not self.winfo_exists() or not self.carrito:
+                return
+            # Menos del 25% no es un patrón, es ruido: sugerir cualquier
+            # cosa hace que el cajero deje de mirar el cartel.
+            fuertes = [x for x in sug if x["pct"] >= 25][:2]
+            if not fuertes:
+                self.lbl_sugerencias.grid_forget()
+                return
+            partes = [f"{x['descripcion'][:26]} (${x['precio']:,.0f})"
+                      for x in fuertes]
+            self.lbl_sugerencias.config(
+                text="  💡  Suelen llevar también:  " + "   ·   ".join(partes))
+            self.lbl_sugerencias.grid(row=5, column=0, sticky="ew",
+                                      pady=(0, 4))
+
+        import threading
+        hilo = threading.Thread(target=_trabajo, daemon=True)
+        hilo.start()
+        self.after(60, _esperar)
+
     def _aplicar_promos_grupo(self):
         """Recalcula las promos combinables sobre todo el carrito."""
         from repositorio import (aplicar_promos_combinables,
@@ -1236,6 +1350,12 @@ class VentasUI(ttk.Frame):
         """
         d = tk.Toplevel(self)
         d.title("Peso")
+        # Al destruirse, el foco vuelve al scanner. Es la red directa:
+        # si algo se cierra por un camino que no pasa por wait_window,
+        # igual queda la caja lista para el proximo producto.
+        d.bind("<Destroy>",
+               lambda e: (e.widget is d) and self.after(60,
+                                                        self._al_cerrar_dialogo))
         d.configure(bg=C.superficie)
         d.transient(self.winfo_toplevel())
         d.grab_set()
@@ -1422,6 +1542,7 @@ class VentasUI(ttk.Frame):
             comando=d.destroy).pack(side="left")
 
         self.wait_window(d)
+        self._al_cerrar_dialogo()
         return resultado[0], resultado[1]
 
     def _elegir_producto(self, candidatos, texto_buscado):
@@ -1526,6 +1647,10 @@ class VentasUI(ttk.Frame):
         kids = self.tree.get_children()
         if kids:
             self.tree.see(kids[-1])
+        # Acá y no al agregar: así también se recalcula al quitar un
+        # item o cambiar una cantidad. Si no, queda sugiriendo algo por
+        # un producto que ya no está en el carrito.
+        self._mostrar_sugerencias()
 
     def _texto_descuento(self, desc_pct):
         """El descuento tal como se cargó: en $ o en %."""
@@ -2082,6 +2207,7 @@ class VentasUI(ttk.Frame):
 
         d.bind("<Return>", lambda e: confirmar())
         self.wait_window(d)
+        self._al_cerrar_dialogo()
         return result[0]
 
 
@@ -2141,6 +2267,7 @@ class VentasUI(ttk.Frame):
         btn(fb, "Cancelar",  variante="neutro", comando=d.destroy).pack(side="left", padx=8)
 
         self.wait_window(d)
+        self._al_cerrar_dialogo()
         return result[0]
 
     def _dialogo_parte_y_fia(self, total: float) -> dict | None:
@@ -2254,6 +2381,7 @@ class VentasUI(ttk.Frame):
             comando=d.destroy).pack(side="left", padx=4)
 
         self.wait_window(d)
+        self._al_cerrar_dialogo()
         return res[0]
 
     def _dialogo_cuenta_corriente(self, total: float) -> dict | None:
@@ -2395,6 +2523,7 @@ class VentasUI(ttk.Frame):
         # btn_alta se muestra solo cuando el cliente no existe
 
         self.wait_window(d)
+        self._al_cerrar_dialogo()
         return result[0]
 
     def _imprimir_post_venta(self, venta_id: int):
@@ -2494,6 +2623,10 @@ class VentasUI(ttk.Frame):
         # un producto que ya se cobro.
         # El cartel de promo se va con la venta: si queda, la venta
         # siguiente arranca ofreciendo algo que ya no esta en el carrito.
+        # La sugerencia también se va con la venta: si queda, la próxima
+        # arranca ofreciendo algo por un carrito que ya no existe.
+        if hasattr(self, "lbl_sugerencias"):
+            self.lbl_sugerencias.grid_forget()
         if hasattr(self, "lbl_promo_grupo"):
             self.lbl_promo_grupo.config(text="")
             self.lbl_promo_grupo.grid_forget()

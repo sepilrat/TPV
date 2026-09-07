@@ -16,7 +16,9 @@ librería de Python):
   Windows: instalador de UB-Mannheim
            https://github.com/UB-Mannheim/tesseract/wiki
            (marcar el idioma "Spanish" al instalar)
-  pip install pytesseract
+
+Y estas librerías de Python (todas necesarias, no solo pytesseract):
+  pip install pytesseract pillow numpy
 """
 
 import os
@@ -182,13 +184,23 @@ def _agrupar_filas(datos_ocr, tol_y=14):
 
 _RE_NUMERO = re.compile(r"^-?\d[\d.,]*$")
 
+# El OCR a veces pega un caracter de borde de tabla al número sin
+# espacio ("14648|", "|14648"): sin limpiar esto, el token entero deja
+# de "parecer" un número y se cuela dentro de la descripción en vez de
+# reconocerse como precio.
+_RUIDO_BORDE = "|¦!;:_•»«°~`'\"()[]{}"
+
+
+def _limpiar_extremos(txt: str) -> str:
+    return txt.strip().strip(_RUIDO_BORDE)
+
 
 def _es_numero(txt: str) -> bool:
-    return bool(_RE_NUMERO.match(txt.strip()))
+    return bool(_RE_NUMERO.match(_limpiar_extremos(txt)))
 
 
 def _a_float(txt: str):
-    t = txt.strip()
+    t = _limpiar_extremos(txt)
     if "," in t and "." in t:
         t = t.replace(".", "").replace(",", ".")   # formato AR: miles con punto, decimales con coma
     elif "," in t:
@@ -199,34 +211,83 @@ def _a_float(txt: str):
         return None
 
 
-def _parsear_filas(filas) -> list[dict]:
+FORMATOS_FACTURA = {
+    "cant_prod_precio_total": "Cantidad, Producto, Precio unitario, Total",
+    "prod_cant_precio_total": "Producto, Cantidad, Precio unitario, Total",
+}
+
+
+def _es_ruido(t: str) -> bool:
+    """Basura típica del OCR en los bordes de una celda de tabla: una
+    barra, guion o separador suelto que no es ni número ni texto útil
+    ('|', '/', '-', etc.). Sin filtrar esto queda pegado adelante o
+    atrás de la descripción."""
+    return not any(ch.isalnum() for ch in t)
+
+
+def _parsear_filas(filas, formato: str = "cant_prod_precio_total") -> list[dict]:
     """
     Intenta separar cada fila en cantidad / descripción / precio
     unitario / subtotal. Una fila "parece" una línea de producto si
     tiene al menos 2 números (cantidad + al menos un precio) — las
     filas de encabezado, totales sueltos, o datos del proveedor
     normalmente no cumplen esto y quedan afuera solas.
+
+    `formato` dice en qué orden vienen las columnas en ESTA factura
+    (no todos los proveedores las imprimen igual — ver
+    FORMATOS_FACTURA). Por defecto: cantidad primero, después el
+    producto, después precio y total.
     """
     items = []
     for fila in filas:
         textos = [p["texto"] for p in fila]
-        idx_num = [i for i, t in enumerate(textos) if _es_numero(t)]
+        n = len(textos)
+
+        def _es_empaque(i):
+            """True si el número en la posición i es parte de una
+            notación de empaque tipo "600 x 20u" (pegado a una x/×),
+            no un precio. Sin esto, ese número se cuela como si fuera
+            el precio y corta la descripción justo ahí."""
+            izq = textos[i - 1].lower() if i > 0 else ""
+            der = textos[i + 1].lower() if i + 1 < n else ""
+            return izq in ("x", "×") or der in ("x", "×")
+
+        idx_num = [i for i, t in enumerate(textos)
+                  if _es_numero(t) and not _es_empaque(i)]
         if len(idx_num) < 2:
             continue
 
-        cant_idx = idx_num[0]
-        precio_idx = idx_num[-2]
-        subtotal_idx = idx_num[-1]
-        if precio_idx <= cant_idx:
-            continue
+        if formato == "prod_cant_precio_total":
+            # El producto viene ANTES del primer número: todo lo que
+            # esta a la izquierda de la cantidad es la descripción.
+            cant_idx = idx_num[0]
+            precio_idx = idx_num[1] if len(idx_num) >= 2 else None
+            subtotal_idx = idx_num[2] if len(idx_num) >= 3 else None
+            if precio_idx is None:
+                continue
+            descripcion = " ".join(
+                t for t in textos[:cant_idx] if not _es_ruido(t)
+            ).strip()
+        else:
+            # Formato fijo: cantidad, producto, precio unitario, total.
+            # Se toman los primeros 3 números en ese orden — cualquier
+            # otro numero que aparezca despues (codigo, IVA, etc.) se
+            # ignora.
+            cant_idx = idx_num[0]
+            precio_idx = idx_num[1]
+            subtotal_idx = idx_num[2] if len(idx_num) >= 3 else None
+            if precio_idx <= cant_idx:
+                continue
+            descripcion = " ".join(
+                t for t in textos[cant_idx + 1:precio_idx] if not _es_ruido(t)
+            ).strip()
 
-        descripcion = " ".join(textos[cant_idx + 1:precio_idx]).strip()
         if not descripcion:
             continue
 
         cantidad = _a_float(textos[cant_idx])
         precio_unitario = _a_float(textos[precio_idx])
-        subtotal = _a_float(textos[subtotal_idx]) if subtotal_idx != precio_idx else None
+        subtotal = _a_float(textos[subtotal_idx]) if subtotal_idx is not None else None
 
         if not cantidad or cantidad <= 0:
             continue
@@ -240,7 +301,8 @@ def _parsear_filas(filas) -> list[dict]:
     return items
 
 
-def extraer_lineas_factura(ruta_imagen: str) -> list[dict]:
+def extraer_lineas_factura(ruta_imagen: str,
+                           formato: str = "cant_prod_precio_total") -> list[dict]:
     """
     Punto de entrada principal: recibe la ruta de la foto de la
     factura, devuelve una lista de posibles líneas de producto
@@ -248,6 +310,9 @@ def extraer_lineas_factura(ruta_imagen: str) -> list[dict]:
     confirmar contra el catálogo todavía, eso lo hace factura_ui.py.
     Puede devolver líneas mal separadas o vacío si el OCR no
     encuentra nada parecido a una tabla — siempre hay que revisar.
+
+    `formato`: en qué orden vienen las columnas en esta factura, ver
+    FORMATOS_FACTURA. factura_ui.py lo recuerda por proveedor.
     """
     ok, detalle = _tesseract_disponible()
     if not ok:
@@ -259,4 +324,4 @@ def extraer_lineas_factura(ruta_imagen: str) -> list[dict]:
     datos = pytesseract.image_to_data(
         img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT)
     filas = _agrupar_filas(datos)
-    return _parsear_filas(filas)
+    return _parsear_filas(filas, formato)

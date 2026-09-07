@@ -441,5 +441,61 @@ class AppTPV(tk.Tk):
             logging.debug(f"No se pudo saltar a la pestana Stock: {e}")
 
 
+def _instancia_unica():
+    """Impide abrir el TPV dos veces sobre la misma base.
+
+    Dos instancias sobre el mismo archivo pueden pisarse una venta o
+    dejar el stock mal descontado, y el problema aparece despues, sin
+    que nadie relacione la causa.
+
+    Se usa un archivo de bloqueo con el PID adentro: si el proceso que
+    lo dejo ya no existe (se corto la luz, cerro mal), se ignora y se
+    sigue — un candado que no se puede sacar es peor que no tenerlo.
+    """
+    import os
+    lock = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        ".tpv.lock")
+    try:
+        if os.path.exists(lock):
+            with open(lock, encoding="utf-8") as f:
+                pid = int((f.read() or "0").strip() or 0)
+            vivo = False
+            if pid:
+                if os.name == "nt":
+                    import subprocess
+                    r = subprocess.run(
+                        ["tasklist", "/fi", f"pid eq {pid}"],
+                        capture_output=True, text=True)
+                    vivo = str(pid) in (r.stdout or "")
+                else:
+                    try:
+                        os.kill(pid, 0)
+                        vivo = True
+                    except OSError:
+                        vivo = False
+            if vivo:
+                import tkinter as tk
+                from tkinter import messagebox
+                raiz = tk.Tk()
+                raiz.withdraw()
+                messagebox.showwarning(
+                    "El TPV ya está abierto",
+                    "Ya hay una ventana del TPV funcionando.\n\n"
+                    "Buscala en la barra de tareas.\n\n"
+                    "Abrir dos veces sobre la misma base puede hacer "
+                    "que se pierdan ventas o que el stock quede mal.")
+                raiz.destroy()
+                return False
+        with open(lock, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        import atexit
+        atexit.register(lambda: os.path.exists(lock) and os.remove(lock))
+    except Exception as exc:
+        # Un fallo del candado no puede impedir trabajar
+        logging.debug(f"No se pudo verificar la instancia única: {exc}")
+    return True
+
+
 if __name__ == "__main__":
-    AppTPV().mainloop()
+    if _instancia_unica():
+        AppTPV().mainloop()
