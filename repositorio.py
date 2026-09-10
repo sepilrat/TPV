@@ -201,7 +201,7 @@ def get_productos(filtro="", categoria_id=None, solo_activos=True) -> list:
 
 
 def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
-                   vendido_por_peso=0, marca=None, fraccionable=0) -> int:
+                   vendido_por_peso=0, marca=None, fraccionable=None) -> int:
     """Crea el producto. Sin codigo escaneable, le genera uno propio.
 
     Un producto que nace sin codigo hay que buscarlo por nombre en cada
@@ -256,7 +256,7 @@ def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
 def actualizar_producto(pid, descripcion, codigo, categoria_id,
                         precio_base, costo_ultimo=None, margen_pct=None,
                         vendido_por_peso=0, imagen_url=None, marca=None,
-                        fraccionable=0, alerta_stock_umbral=None):
+                        fraccionable=None, alerta_stock_umbral=None):
     # El redondeo es una regla del negocio, no una accion aparte: si
     # se aplica solo en algunas pantallas, el catalogo termina mitad
     # redondeado y mitad con decimales.
@@ -282,14 +282,14 @@ def actualizar_producto(pid, descripcion, codigo, categoria_id,
             UPDATE productos
             SET descripcion=?, codigo=?, categoria_id=?, precio_base=?,
                 costo_ultimo=COALESCE(?, costo_ultimo), margen_pct=?,
-                vendido_por_peso=?, imagen_url=?, marca=?, fraccionable=?,
-                alerta_stock_umbral=?,
+                vendido_por_peso=?, imagen_url=?, marca=?,
+                fraccionable=?, alerta_stock_umbral=?,
                 modificado_en=datetime('now','localtime')
             WHERE id=?
         """, (descripcion, codigo, categoria_id, precio_base, costo_ultimo,
               margen_pct, int(bool(vendido_por_peso)), imagen_url,
-              (marca or "").strip() or None, int(bool(fraccionable)),
-              alerta_stock_umbral, pid))
+              (marca or "").strip() or None,
+              int(bool(fraccionable)), alerta_stock_umbral, pid))
         conn.commit()
 
 
@@ -773,9 +773,7 @@ def get_informe_stock(solo_criticos=False, umbral=None) -> list:
     """
     Devuelve el stock de productos activos, ordenado de MENOR a MAYOR
     stock (los más urgentes primero). Si solo_criticos=True, filtra
-    solo los que están por debajo de SU umbral (el propio del
-    producto, si no tiene el de su categoría, si no tiene el general
-    configurado en Ajustes).
+    solo los que están por debajo del umbral configurado.
     """
     if umbral is None:
         try:
@@ -787,24 +785,24 @@ def get_informe_stock(solo_criticos=False, umbral=None) -> list:
     q = """
         SELECT p.id, p.codigo, p.descripcion, c.nombre as categoria,
                p.vendido_por_peso,
-               COALESCE(p.alerta_stock_umbral, c.alerta_stock_umbral, ?) as umbral_aplicado,
                COALESCE(SUM(l.cantidad_restante), 0) as stock
         FROM productos p
         LEFT JOIN categorias c ON p.categoria_id = c.id
         LEFT JOIN lotes l ON l.producto_id = p.id
         WHERE p.activo = 1
     """
-    params = [umbral]
     if solo_criticos:
-        q += " AND p.ignorar_alerta = 0 GROUP BY p.id HAVING stock < umbral_aplicado"
+        q += " AND p.ignorar_alerta = 0 GROUP BY p.id HAVING stock < ?"
+        params = (umbral,)
     else:
         q += " GROUP BY p.id"
+        params = ()
     q += " ORDER BY stock ASC, p.descripcion ASC"
 
     with get_connection() as conn:
         filas = [dict(r) for r in conn.execute(q, params).fetchall()]
     for f in filas:
-        f["critico"] = f["stock"] < f["umbral_aplicado"]
+        f["critico"] = f["stock"] < umbral
     return filas
 
 
@@ -894,14 +892,12 @@ def get_stock_critico(umbral=None) -> list:
         return [dict(r) for r in conn.execute("""
             SELECT p.id, p.descripcion, p.codigo,
                    COALESCE(SUM(l.cantidad_restante), 0) as stock,
-                   p.precio_base, p.ignorar_alerta,
-                   COALESCE(p.alerta_stock_umbral, c.alerta_stock_umbral, ?) as umbral_aplicado
+                   p.precio_base, p.ignorar_alerta
             FROM productos p
-            LEFT JOIN categorias c ON p.categoria_id = c.id
             LEFT JOIN lotes l ON l.producto_id = p.id
             WHERE p.activo = 1 AND p.ignorar_alerta = 0
             GROUP BY p.id
-            HAVING stock < umbral_aplicado
+            HAVING stock < ?
             ORDER BY stock ASC
         """, (umbral,)).fetchall()]
 
@@ -1224,8 +1220,7 @@ def eliminar_categoria(cid):
 def get_proveedores() -> list:
     with get_connection() as conn:
         return [dict(r) for r in conn.execute(
-            "SELECT id, nombre, formato_factura FROM proveedores "
-            "WHERE activo=1 ORDER BY nombre"
+            "SELECT id, nombre FROM proveedores WHERE activo=1 ORDER BY nombre"
         ).fetchall()]
 
 
@@ -1235,16 +1230,6 @@ def crear_proveedor(nombre: str) -> int:
             "INSERT INTO proveedores (nombre) VALUES (?)", (nombre,))
         conn.commit()
         return cur.lastrowid
-
-
-def set_formato_factura_proveedor(proveedor_id: int, formato: str):
-    """Recuerda cómo vienen ordenadas las columnas en las facturas de
-    este proveedor, para que el OCR no tenga que adivinar cada vez."""
-    with get_connection() as conn:
-        conn.execute(
-            "UPDATE proveedores SET formato_factura=? WHERE id=?",
-            (formato, proveedor_id))
-        conn.commit()
 
 
 def resumen_cobranzas(desde, hasta) -> dict:
@@ -1960,16 +1945,24 @@ def get_precio_con_promo(producto_id: int, cantidad: float) -> tuple[float, bool
                 precio_promo = round(precio_base * (1 - pr["porcentaje_descuento"] / 100), 2)
             else:
                 precio_promo = pr["precio_unitario"]
+            # Piso de seguridad: una promo con precio en $0 (o negativo,
+            # o vacío) no es un descuento, es un dato mal cargado. Sin
+            # este chequeo, esa fila "ganaba" siempre por ser la más
+            # barata y la venta salía regalada.
+            if not precio_promo or precio_promo <= 0:
+                continue
             if mejor_precio is None or precio_promo < mejor_precio:
                 mejor_precio = precio_promo
 
+        if mejor_precio is None:
+            return precio_base, False
         return mejor_precio, True
 
 
 def get_promociones() -> list:
     with get_connection() as conn:
         return [dict(r) for r in conn.execute("""
-            SELECT pr.id, p.descripcion, p.codigo,
+            SELECT pr.id, pr.producto_id, p.descripcion, p.codigo,
                    pr.cantidad_minima, pr.precio_unitario,
                    pr.tipo_descuento, pr.porcentaje_descuento,
                    pr.descripcion as detalle,
@@ -2022,6 +2015,59 @@ def eliminar_promocion(pid):
     with get_connection() as conn:
         conn.execute("DELETE FROM promociones WHERE id=?", (pid,))
         conn.commit()
+
+
+def modificar_promociones_bulk(ids: list, modo: str, valor: float) -> int:
+    """
+    Modifica en masa promociones YA existentes (no crea nuevas). Pensado
+    para cuando hay muchas promos y hay que ajustarlas todas juntas en
+    vez de una por una.
+
+    modo:
+      "sumar_pct"    → suma `valor` puntos al porcentaje_descuento.
+                       Solo toca promos de tipo "porcentaje"; las de
+                       precio_fijo se ignoran (no tiene sentido "sumar
+                       puntos" a un precio).
+      "nuevo_pct"    → fija porcentaje_descuento = valor para todas las
+                       seleccionadas, y las pasa a tipo "porcentaje" si
+                       no lo eran ya.
+      "precio_fijo"  → fija precio_unitario = valor para todas las
+                       seleccionadas, y las pasa a tipo "precio_fijo".
+
+    Devuelve la cantidad de promociones efectivamente modificadas.
+    """
+    if not ids:
+        return 0
+    with get_connection() as conn:
+        if modo == "sumar_pct":
+            cur = conn.execute(f"""
+                UPDATE promociones
+                SET porcentaje_descuento = MAX(0, porcentaje_descuento + ?)
+                WHERE id IN ({','.join('?' * len(ids))})
+                  AND tipo_descuento = 'porcentaje'
+            """, [valor] + ids)
+        elif modo == "nuevo_pct":
+            cur = conn.execute(f"""
+                UPDATE promociones
+                SET tipo_descuento = 'porcentaje',
+                    porcentaje_descuento = ?
+                WHERE id IN ({','.join('?' * len(ids))})
+            """, [valor] + ids)
+        elif modo == "precio_fijo":
+            valor = redondear_precio(valor)
+            if valor <= 0:
+                raise ValueError(
+                    "El precio fijo tiene que ser mayor a $0.")
+            cur = conn.execute(f"""
+                UPDATE promociones
+                SET tipo_descuento = 'precio_fijo',
+                    precio_unitario = ?
+                WHERE id IN ({','.join('?' * len(ids))})
+            """, [valor] + ids)
+        else:
+            raise ValueError(f"modo desconocido: {modo}")
+        conn.commit()
+        return cur.rowcount or 0
 
 
 def actualizar_precio(pid, nuevo_precio):
@@ -2947,6 +2993,11 @@ def aplicar_promocion_bulk(ids: list, escalas: list[tuple[int, float]],
             for cant_min, pct in escalas:
                 cant_min = int(cant_min)
                 precio_promo = round(f["precio_base"] * (1 - pct / 100.0), 2)
+                # Igual que en aplicar_promocion_bulk_tipo: nunca <= 0
+                # ni por encima del precio de lista, o quedaria vendida
+                # gratis o "en promo" a un precio mas caro.
+                if precio_promo <= 0 or precio_promo >= f["precio_base"]:
+                    continue
                 desc_final = descripcion or f"Llevando {cant_min}"
                 promo_id = existentes.get((f["id"], cant_min))
                 if promo_id:

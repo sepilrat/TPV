@@ -220,26 +220,37 @@ class TicketsUI(ttk.Frame):
 
         res = tk.Frame(d, bg=C.acento, padx=16, pady=10)
         res.pack(fill="x", padx=18)
-        lineas = []
-        if v.get("descuento_pct"):
-            lineas.append(f"Descuento aplicado: {v['descuento_pct']:g}%")
-        # Cómo se pagó. En un pago repartido esto es lo que importa.
-        pagos = [f"{n}: $ {v.get(k) or 0:,.2f}"
-                 for n, k in (("Efectivo", "monto_efectivo"),
-                              ("Tarjeta", "monto_tarjeta"),
-                              ("QR", "monto_qr"),
-                              ("Quedó fiado", "monto_cta_cte"))
-                 if (v.get(k) or 0) > 0]
-        lineas.append("   ·   ".join(pagos) if pagos
-                      else METODOS.get(v["metodo_pago"], v["metodo_pago"]))
-        lineas.append(f"Costo: $ {v['costo_total']:,.2f}   ·   "
-                      f"Ganancia: $ {v['ganancia']:,.2f}")
-        for txt in lineas:
-            tk.Label(res, text=txt, bg=C.acento, fg=C.texto, font=F.normal,
-                     anchor="w").pack(anchor="w")
-        tk.Label(res, text=f"TOTAL:  $ {v['total']:,.2f}", bg=C.acento,
-                 fg=C.texto, font=F.subtitulo, anchor="w").pack(
-            anchor="w", pady=(4, 0))
+        try:
+            lineas = []
+            if v.get("descuento_pct"):
+                lineas.append(f"Descuento aplicado: {v['descuento_pct']:g}%")
+            # Cómo se pagó. En un pago repartido esto es lo que importa.
+            pagos = [f"{n}: $ {v.get(k) or 0:,.2f}"
+                     for n, k in (("Efectivo", "monto_efectivo"),
+                                  ("Tarjeta", "monto_tarjeta"),
+                                  ("QR", "monto_qr"),
+                                  ("Quedó fiado", "monto_cta_cte"))
+                     if (v.get(k) or 0) > 0]
+            lineas.append("   ·   ".join(pagos) if pagos
+                          else METODOS.get(v["metodo_pago"], v["metodo_pago"]))
+            lineas.append(f"Costo: $ {v['costo_total']:,.2f}   ·   "
+                          f"Ganancia: $ {v['ganancia']:,.2f}")
+            for txt in lineas:
+                tk.Label(res, text=txt, bg=C.acento, fg=C.texto, font=F.normal,
+                         anchor="w").pack(anchor="w")
+            tk.Label(res, text=f"TOTAL:  $ {v['total']:,.2f}", bg=C.acento,
+                     fg=C.texto, font=F.subtitulo, anchor="w").pack(
+                anchor="w", pady=(4, 0))
+        except Exception as exc:
+            # Antes, si algo de acá arriba fallaba, el panel quedaba
+            # vacío sin ningún aviso — parecía que faltaba informacion
+            # en vez de un error real. Mejor mostrar el motivo.
+            import logging
+            logging.exception("Error armando el resumen del ticket #%s", venta_id)
+            tk.Label(res, text=f"No se pudo armar el resumen: {exc}",
+                     bg=C.acento, fg=C.peligro, font=F.normal,
+                     anchor="w", wraplength=560, justify="left").pack(
+                anchor="w")
 
         if v["devoluciones"]:
             dev = tk.Frame(d, bg=C.err_flash, padx=16, pady=8)

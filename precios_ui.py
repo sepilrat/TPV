@@ -11,7 +11,8 @@ from repositorio import (get_productos, get_categorias, get_promociones,
                          guardar_promocion, toggle_promocion, eliminar_promocion,
                          actualizar_precio, aplicar_aumento_bulk,
                          aplicar_margen_nuevo_bulk,
-                         aplicar_margen_bulk, get_promocion_por_id, get_codigo_producto)
+                         aplicar_margen_bulk, get_promocion_por_id, get_codigo_producto,
+                         modificar_promociones_bulk)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers DB
@@ -28,8 +29,9 @@ COLS_PRECIOS = [
 ]
 
 COLS_PROMOS = [
-    ("desc",    "Producto",     200, "w"),
-    ("detalle", "Descripcion",  140, "w"),
+    ("sel",     "",              30,  "center"),
+    ("desc",    "Producto",     190, "w"),
+    ("detalle", "Descripcion",  130, "w"),
     ("cant",    "Desde cant.",   80, "e"),
     ("precio",  "Precio/Desc.",  85, "e"),
     ("desde",   "Desde",         80, "w"),
@@ -54,8 +56,10 @@ class PreciosUI(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._cat_map = {}
-        self._seleccionados = set()   # ids seleccionados para bulk
+        self._seleccionados = set()   # ids seleccionados para bulk (precios)
         self._promo_sel_id = None
+        self._promos_seleccionadas = set()   # ids seleccionados para bulk (promos)
+        self._promos_filas = {}              # iid -> promo dict (para filtrar)
         self._build()
         self._refrescar()
 
@@ -144,12 +148,38 @@ class PreciosUI(ttk.Frame):
 
     def _build_promos(self, parent):
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        # Filtros — mismo patron que la pestaña de Precios: buscar +
+        # selec./desel. todo, para no tener que ir clickeando promo por
+        # promo cuando hay muchas.
+        bar = tk.Frame(parent, bg=C.bg)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        lbl(bar, "Buscar:").pack(side="left", padx=(0, 6))
+        self.entry_buscar_promo = tk.Entry(bar, font=F.normal, width=24,
+                                           bg=C.superficie, fg=C.texto,
+                                           insertbackground=C.primario,
+                                           relief="solid", bd=1)
+        self.entry_buscar_promo.pack(side="left", ipady=5)
+        self.entry_buscar_promo.bind(
+            "<KeyRelease>", lambda e: self._refrescar_promos())
+
+        btn(bar, "Selec. todo", variante="neutro",
+            comando=self._promos_sel_todo).pack(side="left", padx=(12, 0))
+        btn(bar, "Desel. todo", variante="neutro",
+            comando=self._promos_desel_todo).pack(side="left", padx=6)
+
+        lbl(bar, "Seleccionadas:", variante="suave").pack(
+            side="left", padx=(12, 4))
+        self.lbl_sel_promo = lbl(bar, "0", variante="badge")
+        self.lbl_sel_promo.pack(side="left")
 
         # Tabla
         frame_t, self.tree_pr = tabla(parent, COLS_PROMOS)
-        frame_t.grid(row=0, column=0, sticky="nsew", pady=(0,8))
-        self.tree_pr.bind("<<TreeviewSelect>>", self._on_sel_promo)
+        frame_t.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+        self.tree_pr.bind("<ButtonRelease-1>", self._on_click_tabla_promo)
+        self.tree_pr.bind("<Double-1>", lambda e: self._editar_promo())
 
         # Acciones
         # DOS filas: ocho botones en una sola no entraban a lo ancho y
@@ -158,7 +188,7 @@ class PreciosUI(ttk.Frame):
         # Arriba lo que opera sobre las promociones; abajo, lo que
         # exporta hacia afuera.
         ac = tk.Frame(parent, bg=C.bg)
-        ac.grid(row=1, column=0, sticky="ew")
+        ac.grid(row=2, column=0, sticky="ew")
 
         btn(ac, "➕  Nueva promocion",  variante="exito",   comando=self._nueva_promo).pack(side="left")
         btn(ac, "✏️  Editar",           variante="primario", comando=self._editar_promo).pack(side="left", padx=6)
@@ -168,8 +198,38 @@ class PreciosUI(ttk.Frame):
         btn(ac, "🗑  Eliminar",         variante="peligro",  comando=self._eliminar_promo).pack(side="left", padx=6)
         btn(ac, "🔄  Actualizar",       variante="neutro",   comando=self._refrescar_promos).pack(side="right")
 
+        # Panel de modificacion masiva: pensado para cuando ya hay
+        # muchas promos cargadas y hay que ajustarlas a todas juntas
+        # (por ejemplo, subir un 5% mas de descuento a las que ya
+        # tenian, o poner el mismo precio fijo a varias a la vez).
+        bulk_pr = card(parent)
+        bulk_pr.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        bulk_pr.columnconfigure(6, weight=1)
+
+        lbl(bulk_pr, "Sobre las seleccionadas:", variante="suave",
+            bg=C.superficie).grid(row=0, column=0, padx=(16, 8), pady=12, sticky="w")
+
+        lbl(bulk_pr, "Sumar puntos % de desc.", variante="suave",
+            bg=C.superficie).grid(row=0, column=1, padx=(0, 4))
+        self.entry_promo_sumar = tk.Entry(bulk_pr, width=6, justify="center",
+                                          font=F.normal, bg=C.superficie,
+                                          fg=C.texto, relief="solid", bd=1)
+        self.entry_promo_sumar.insert(0, "5")
+        self.entry_promo_sumar.grid(row=0, column=2, ipady=5)
+        btn(bulk_pr, "Aplicar", variante="primario",
+            comando=self._promos_sumar_pct).grid(row=0, column=3, padx=(4, 12))
+
+        lbl(bulk_pr, "Fijar precio $", variante="suave",
+            bg=C.superficie).grid(row=0, column=4, padx=(0, 4))
+        self.entry_promo_precio = tk.Entry(bulk_pr, width=9, justify="center",
+                                           font=F.normal, bg=C.superficie,
+                                           fg=C.texto, relief="solid", bd=1)
+        self.entry_promo_precio.grid(row=0, column=5, ipady=5)
+        btn(bulk_pr, "Aplicar", variante="primario",
+            comando=self._promos_fijar_precio).grid(row=0, column=6, padx=(4, 8), sticky="w")
+
         ac2 = tk.Frame(parent, bg=C.bg)
-        ac2.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ac2.grid(row=4, column=0, sticky="ew", pady=(6, 0))
         lbl(ac2, "Exportar:", variante="suave").pack(side="left", padx=(0, 8))
         btn(ac2, "📄  Lista de precios", variante="neutro",
             comando=self._exportar_lista_precios).pack(side="left", padx=(0, 6))
@@ -255,14 +315,24 @@ class PreciosUI(ttk.Frame):
             self._filas[iid] = dict(p)
 
     def _refrescar_promos(self):
+        filtro = self.entry_buscar_promo.get().strip().lower()
+        self._promos_seleccionadas.clear()
+        self.lbl_sel_promo.config(text="0")
         for r in self.tree_pr.get_children():
             self.tree_pr.delete(r)
+        self._promos_filas = {}
         for pr in get_promociones():
+            if filtro and filtro not in (
+                    f"{pr['descripcion']} {pr['codigo']} "
+                    f"{pr['detalle'] or ''}").lower():
+                continue
             if pr.get("tipo_descuento") == "porcentaje":
                 col_precio = f"-{pr.get('porcentaje_descuento') or 0:.1f}%"
             else:
                 col_precio = f"$ {pr['precio_unitario']:,.2f}"
-            self.tree_pr.insert("", "end", iid=str(pr["id"]), values=(
+            iid = str(pr["id"])
+            self.tree_pr.insert("", "end", iid=iid, values=(
+                "",
                 pr["descripcion"],
                 pr["detalle"] or "—",
                 f"x {pr['cantidad_minima']}",
@@ -271,6 +341,7 @@ class PreciosUI(ttk.Frame):
                 pr["fecha_hasta"] or "—",
                 "Si" if pr["activa"] else "No",
             ), tags=("activa",) if pr["activa"] else ("inactiva",))
+            self._promos_filas[iid] = pr
         self.tree_pr.tag_configure("activa",   foreground=C.exito)
         self.tree_pr.tag_configure("inactiva", foreground=C.texto_suave)
 
@@ -767,9 +838,98 @@ class PreciosUI(ttk.Frame):
 
     # ── Acciones promociones ──────────────────────────────────────────────────
 
-    def _on_sel_promo(self, event):
-        sel = self.tree_pr.selection()
-        self._promo_sel_id = int(sel[0]) if sel else None
+    def _on_click_tabla_promo(self, event):
+        iid = self.tree_pr.identify_row(event.y)
+        if not iid:
+            return
+        col = self.tree_pr.identify_column(event.x)
+        if col == "#1":   # columna checkbox
+            if iid in self._promos_seleccionadas:
+                self._promos_seleccionadas.discard(iid)
+                self.tree_pr.set(iid, "sel", "")
+            else:
+                self._promos_seleccionadas.add(iid)
+                self.tree_pr.set(iid, "sel", "x")
+            self.lbl_sel_promo.config(text=str(len(self._promos_seleccionadas)))
+        else:
+            # Click fuera del checkbox: selecciona esa fila sola, para
+            # que Editar / Pausar / Eliminar sigan operando de a una
+            # como antes.
+            self._promo_sel_id = int(iid)
+
+    def _promos_sel_todo(self):
+        self._promos_seleccionadas = set(self.tree_pr.get_children())
+        for iid in self._promos_seleccionadas:
+            self.tree_pr.set(iid, "sel", "x")
+        self.lbl_sel_promo.config(text=str(len(self._promos_seleccionadas)))
+
+    def _promos_desel_todo(self):
+        for iid in self._promos_seleccionadas:
+            self.tree_pr.set(iid, "sel", "")
+        self._promos_seleccionadas.clear()
+        self.lbl_sel_promo.config(text="0")
+
+    def _promos_sumar_pct(self):
+        if not self._promos_seleccionadas:
+            messagebox.showinfo("Atención", "Selecciona promociones con la columna de la izquierda.", parent=self)
+            return
+        try:
+            pts = float(self.entry_promo_sumar.get().replace(",", "."))
+        except ValueError:
+            messagebox.showwarning("Error", "El valor no es un número.", parent=self)
+            return
+        ids = [int(i) for i in self._promos_seleccionadas]
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            self, f"Sumar {pts:+g} pts a {len(ids)} promoción(es).")
+        if not responsable:
+            return
+        if not messagebox.askyesno(
+                "Confirmar",
+                f"Sumar {pts:+g} puntos de descuento a {len(ids)} "
+                "promoción(es)?\n\nSolo afecta a las que son por "
+                "porcentaje; las de precio fijo no se tocan.",
+                parent=self):
+            return
+        n = modificar_promociones_bulk(ids, "sumar_pct", pts)
+        from repositorio import registrar_bitacora
+        registrar_bitacora("Modificación masiva de promociones",
+                           responsable, f"{pts:+g} pts sobre {n} promoción(es)")
+        toast(self, f"{n} promoción(es) actualizada(s)")
+        self._refrescar_promos()
+
+    def _promos_fijar_precio(self):
+        if not self._promos_seleccionadas:
+            messagebox.showinfo("Atención", "Selecciona promociones con la columna de la izquierda.", parent=self)
+            return
+        try:
+            precio = float(self.entry_promo_precio.get().replace(",", "."))
+            if precio <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning(
+                "Error", "El precio tiene que ser un número mayor a $0.",
+                parent=self)
+            return
+        ids = [int(i) for i in self._promos_seleccionadas]
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            self, f"Fijar $ {precio:,.2f} en {len(ids)} promoción(es).")
+        if not responsable:
+            return
+        if not messagebox.askyesno(
+                "Confirmar",
+                f"Fijar el precio promocional en $ {precio:,.2f} para "
+                f"{len(ids)} promoción(es)?\n\nLas que eran por "
+                "porcentaje pasan a ser de precio fijo.",
+                parent=self):
+            return
+        n = modificar_promociones_bulk(ids, "precio_fijo", precio)
+        from repositorio import registrar_bitacora
+        registrar_bitacora("Modificación masiva de promociones",
+                           responsable, f"precio fijo $ {precio:,.2f} sobre {n} promoción(es)")
+        toast(self, f"{n} promoción(es) actualizada(s)")
+        self._refrescar_promos()
 
     def _nueva_promo(self):
         self._dialogo_promo(None)

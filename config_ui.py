@@ -85,6 +85,12 @@ SECCIONES = [
         ("aviso_top_dias",     "Lo más vendido: de cuántos días (0 = histórico completo)", "int"),
         ("aviso_top_cantidad", "Lo más vendido: cuántos productos mostrar",  "int"),
     ]),
+    ("Ingreso por celular", [
+        ("movil_ingreso_activo", "Activar carga de stock desde el celular", "bool"),
+        ("movil_ingreso_puerto", "Puerto (dejar el que viene salvo que se use para otra cosa)", "int"),
+        ("movil_ingreso_pin",    "PIN de acceso (recomendado)",              "password"),
+        ("_info_movil",          "Desde el celular, entrar a:",              "info"),
+    ]),
     ("Fotos de productos", [
         ("buscador_fotos", "Buscador (bing / duckduckgo / google)", "text"),
     ]),
@@ -343,6 +349,24 @@ class ConfigUI(ttk.Frame):
                                 padx=(0, 16), pady=(6, 2))
                     self._entries[clave] = ("hora", var)
 
+                elif tipo == "info":
+                    if clave == "_info_movil":
+                        try:
+                            import movil_ingreso
+                            puerto = cfg_mod.cargar().get(
+                                "movil_ingreso_puerto", 8642)
+                            texto = movil_ingreso.url_servidor(puerto)
+                        except Exception:
+                            texto = "(se calcula al guardar la configuración)"
+                    else:
+                        texto = ""
+                    tk.Label(c, text=texto, font=F.normal, bg=C.superficie,
+                             fg=C.primario, anchor="w").grid(
+                        row=j+2, column=1, sticky="w",
+                        padx=(0, 16), pady=(6, 2))
+                    # No se agrega a self._entries: es solo informativo,
+                    # no se carga ni se guarda como el resto de los campos.
+
                 elif tipo == "password":
                     e = tk.Entry(c, font=F.normal, bg=C.superficie,
                                   fg=C.texto, relief="solid", bd=1,
@@ -392,6 +416,8 @@ class ConfigUI(ttk.Frame):
             comando=self._probar_emails).pack(side="left", padx=(0, 6))
         btn(fb2, "🌐 Sincronizar catálogo web", variante="primario",
             comando=self._sincronizar_catalogo).pack(side="left", padx=(0, 6))
+        btn(fb2, "📱 Servidor celular", variante="primario",
+            comando=self._probar_servidor_movil).pack(side="left", padx=(0, 6))
 
         self.lbl_sync = tk.Label(fb.master, text="", bg=fb.cget("bg"),
                                  fg=C.texto_suave, font=F.pequeña, anchor="w")
@@ -711,6 +737,37 @@ class ConfigUI(ttk.Frame):
         messagebox.showinfo(
             "Ticket de ejemplo",
             f"{'OK' if ok else 'Error'}: {msg}",
+            parent=self)
+
+    def _probar_servidor_movil(self):
+        """Arranca el servidor ahora mismo (si no estaba corriendo ya) y
+        muestra la URL para escribir en el celular — así se puede probar
+        sin cerrar y volver a abrir el TPV después de tildar "Activar"."""
+        import movil_ingreso
+        puerto = 8642
+        try:
+            puerto = int(self._entries["movil_ingreso_puerto"][1].get().strip())
+        except (ValueError, KeyError):
+            pass
+        movil_ingreso.iniciar_servidor(puerto)
+        url = movil_ingreso.url_servidor(puerto)
+        aviso_cert = (
+            "\n\nSi es la primera vez en ese celular, dentro de la "
+            "página hay un botón para descargar e instalar el "
+            "certificado — sin eso, el navegador va a mostrar un "
+            "aviso de sitio no seguro y la cámara no va a andar."
+            if url.startswith("https") else
+            "\n\n⚠ Arrancó sin HTTPS (revisá que 'cryptography' esté "
+            "instalado: pip install cryptography). Sin HTTPS la cámara "
+            "no funciona en iPhone, pero el resto de la página sí.")
+        messagebox.showinfo(
+            "Servidor de ingreso por celular",
+            f"Servidor activo en:\n\n{url}\n\n"
+            f"Entrá a esa dirección desde el navegador del celular "
+            f"(tiene que estar conectado a la misma WiFi que esta PC)."
+            f"{aviso_cert}\n\n"
+            f"Recordá guardar la configuración para que el PIN que "
+            f"escribiste arriba quede aplicado.",
             parent=self)
 
     def _probar_balanza(self):

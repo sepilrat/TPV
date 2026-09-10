@@ -176,6 +176,33 @@ def incorporar_imagen(producto_id: int, origen: str) -> tuple[str, str]:
     return guardar_imagen_local(producto_id, ruta), "copiada"
 
 
+def validar_url_imagen(url: str) -> None:
+    """Como guardar_imagen_desde_url, pero para cuando TODAVIA no existe
+    el producto (por eso no hay producto_id para nombrar el archivo).
+
+    Descarga y verifica que sea una imagen abrible, sin guardar nada en
+    disco. Pensado para avisar al elegir la foto — antes de llegar a
+    "Guardar" — en vez de recién enterarse después de crear el
+    producto, cuando ya es tarde para elegir otra sin repetir todo el
+    alta. Lanza excepción con el mismo tipo de mensaje que
+    guardar_imagen_desde_url si la foto no sirve.
+    """
+    if url.strip().lower().split("?")[0].endswith(".svg"):
+        raise ValueError("Esa foto es un SVG y no se puede usar. "
+                         "Probá con otra imagen.")
+
+    global PERMITIR_DESCARGA_URL
+    _antes = PERMITIR_DESCARGA_URL
+    PERMITIR_DESCARGA_URL = True
+    try:
+        data = _resolver_bytes(url)
+        if not data:
+            raise ValueError("No se pudo descargar la imagen de esa URL.")
+        Image.open(io.BytesIO(data)).convert("RGB")
+    finally:
+        PERMITIR_DESCARGA_URL = _antes
+
+
 def guardar_imagen_desde_url(producto_id: int, url: str) -> str:
     """
     Descarga una imagen desde una URL (ej: la que trajo Open Food

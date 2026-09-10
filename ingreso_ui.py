@@ -1169,6 +1169,19 @@ class IngresoUI(ttk.Frame):
             except Exception as e:
                 error = str(e)
 
+            foto_error = None
+            if not error and url and imagenes.es_url(url):
+                # Se valida ACÁ, apenas se elige la foto — todavía
+                # estamos en el hilo de fondo, así que la descarga no
+                # traba la ventana. Antes esto recién se intentaba al
+                # crear el producto, y si fallaba el aviso llegaba
+                # cuando ya no quedaba forma simple de elegir otra foto
+                # sin repetir el alta entera.
+                try:
+                    imagenes.validar_url_imagen(url)
+                except Exception as e:
+                    foto_error = str(e)
+
             def _aplicar():
                 if not self.winfo_exists():
                     return
@@ -1179,10 +1192,20 @@ class IngresoUI(ttk.Frame):
                         f"No se pudo abrir la ventana de búsqueda ({error}).\n\n"
                         f"Probá instalando: pip install pywebview", parent=self)
                     return
-                if url and imagenes.es_url(url):
+                if url and imagenes.es_url(url) and not foto_error:
                     self._foto_nueva_url = url
                     self.lbl_foto_nueva.config(text="✅  Foto elegida",
                                                fg=C.exito)
+                elif foto_error:
+                    # La URL era válida pero la foto en sí no se pudo
+                    # bajar/abrir — se avisa YA, no se guarda como
+                    # imagen del producto para no repetir el problema
+                    # de antes (foto elegida que después no se ve).
+                    self.lbl_foto_nueva.config(
+                        text=f"⚠ Esa foto no se pudo usar: {foto_error[:60]} "
+                             f"— probá con otra",
+                        fg=C.peligro)
+                    logging.warning(f"Foto descartada al elegirla: {foto_error} ({url[:80]})")
                 else:
                     # Antes se descartaba en silencio: uno elegia una foto,
                     # no pasaba nada visible, y al guardar el producto
