@@ -440,6 +440,18 @@ class VentasUI(ttk.Frame):
     # ── Scanner ───────────────────────────────────────────────────────────────
 
     def foco_scanner(self):
+        # No alcanza con entry_scan.focus_set(): eso le dice a Tkinter
+        # QUE widget debe recibir el foco, pero si Windows no le
+        # devolvió el foco real a esta ventana (pasa seguido justo
+        # después de cerrar un diálogo, como el de pedir el peso), el
+        # lector de códigos igual le manda las teclas a otra ventana y
+        # el escaneo se pierde en el aire — parece que "no hace nada".
+        toplevel = self.winfo_toplevel()
+        try:
+            toplevel.lift()
+            toplevel.focus_force()
+        except Exception:
+            pass
         self.entry_scan.focus_set()
         # El cursor al final: si quedo texto a medias, lo que se escanee
         # despues se pega atras y el codigo sale mal.
