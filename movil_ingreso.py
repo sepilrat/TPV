@@ -82,6 +82,16 @@ def generar_certificado(ip: str) -> tuple[str, str]:
     un certificado "de verdad" firmado por una entidad reconocida —
     esas solo se emiten para dominios de internet. Sin esto, ningun
     navegador (y mucho menos Safari) va a habilitar la camara.
+
+    OJO con dos reglas de Apple que si no se cumplen, Safari ni
+    siquiera ofrece "continuar de todas formas" — directamente no
+    conecta, sin ningun aviso claro de por que:
+      - La validez no puede superar 398 dias (se usan 397 por las dudas).
+      - Tiene que tener keyUsage / extendedKeyUsage(serverAuth) /
+        basicConstraints(CA:FALSE) — un certificado autofirmado
+        "pelado" sin estas extensiones no alcanza.
+    Como la validez es corta a proposito, _certificado_sirve_para()
+    se encarga de renovarlo solo cuando haga falta.
     """
     import ipaddress
     from cryptography import x509
@@ -112,10 +122,23 @@ def generar_certificado(ip: str) -> tuple[str, str]:
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(ahora - timedelta(days=1))
-        .not_valid_after(ahora + timedelta(days=3650))
+        .not_valid_after(ahora + timedelta(days=395))
         .add_extension(
             x509.SubjectAlternativeName(
                 ip_obj + [x509.DNSName("localhost")]),
+            critical=False)
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None),
+            critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True, key_encipherment=True,
+                content_commitment=False, data_encipherment=False,
+                key_agreement=False, key_cert_sign=False, crl_sign=False,
+                encipher_only=False, decipher_only=False),
+            critical=True)
+        .add_extension(
+            x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]),
             critical=False)
         .sign(key, hashes.SHA256())
     )
