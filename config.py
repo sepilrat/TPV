@@ -98,6 +98,11 @@ DEFAULTS = {
     "catalogo_sync_cada_horas":     6,
     "_catalogo_sync_ultima":        "",
 
+    # Ingreso de stock desde el celular (misma WiFi que esta PC)
+    "movil_ingreso_activo":         False,
+    "movil_ingreso_puerto":         8642,
+    "movil_ingreso_pin":            "",   # vacío = sin PIN (no recomendado)
+
     "aviso_diario_a_las":           True,
     "aviso_diario_hora":            21,
     "_aviso_diario_ultimo_envio":   "",
@@ -185,6 +190,7 @@ DEFAULTS = {
     # formulario de pedidos de clientes)
     "catalogo_web_activo":  False,
     "catalogo_web_url":     "",  # URL de la Apps Script Web App (ver apps_script_catalogo.gs)
+    "catalogo_clave_interna": "",  # misma clave que CLAVE_INTERNA en el script — para traer ediciones del panel interno
 }
 
 

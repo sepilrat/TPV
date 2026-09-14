@@ -156,7 +156,7 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
         ]
         # Solo los publicables van al catalogo del cliente
         if publico:
-            productos.append({
+            fila = {
                 "codigo": p["codigo"],
                 "descripcion": p["descripcion"],
                 "marca": p.get("marca") or "",
@@ -166,7 +166,17 @@ def sincronizar(url: str = None) -> tuple[bool, str]:
                 "promos": (json.dumps(promos_compactas)
                            if promos_compactas else ""),
                 "imagen": imagen_final,
-            })
+            }
+            # Precio "por fraccion" SOLO para mostrar en la web — el
+            # precio real de venta (el de arriba) no se toca. Pensado
+            # para fiambres/quesos: precio de lista por kilo, pero al
+            # cliente le sirve más ver cuánto sale una porción chica.
+            gramos = p.get("web_fraccion_gramos")
+            if gramos and p.get("vendido_por_peso"):
+                fila["precio_mostrar"] = round(
+                    p["precio_base"] * gramos / 1000, 2)
+                fila["unidad_mostrar"] = f"{gramos:g} g"
+            productos.append(fila)
         productos_interno.append({
             "codigo": p["codigo"],
             "descripcion": p["descripcion"],
@@ -387,6 +397,142 @@ def obtener_resumen_vendedores(url: str = None) -> tuple[bool, list | str]:
     if data.get("ok"):
         return True, data.get("resumen", [])
     return False, f"El servicio devolvió un error: {data.get('error', '(sin detalle)')}"
+
+
+def traer_cambios_web(url: str = None, clave: str = None) -> tuple[bool, str]:
+    """
+    Trae del panel interno (interno.html) las ediciones pendientes —
+    descripción, marca, categoría, precio, foto — y las aplica en la
+    base local. Se llama desde Config (botón manual) o desde la
+    sincronización periódica, antes de mandar (así lo que se manda
+    de vuelta a la Sheet ya incluye lo último).
+
+    Regla de conflicto: gana el cambio más reciente. Se compara la
+    hora de la edición web contra el "modificado_en" del producto en
+    la base local — si el TPV cambió ese mismo producto más tarde que
+    la edición web, se descarta la edición web (la próxima
+    sincronización normal la va a pisar de todos modos).
+    """
+    from config import cfg
+    if url is None:
+        url = cfg().get("catalogo_web_url", "")
+    if clave is None:
+        clave = cfg().get("catalogo_clave_interna", "")
+    url = (url or "").strip()
+    if not url:
+        return False, "No hay una URL de sincronización configurada."
+    if not (clave or "").strip():
+        return False, ("Falta la clave interna en Config > Catálogo web "
+                       "(la misma que CLAVE_INTERNA en el script).")
+
+    import urllib.parse
+    qs = urllib.parse.urlencode({"cambios": "1", "clave": clave})
+    try:
+        with urllib.request.urlopen(f"{url}?{qs}", timeout=TIMEOUT) as resp:
+            cuerpo = resp.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        return False, f"No se pudo consultar los cambios: {e}"
+
+    try:
+        data = json.loads(cuerpo)
+    except ValueError:
+        return False, f"Respuesta inesperada del servicio: {cuerpo[:200]}"
+
+    if data.get("error"):
+        return False, "Clave interna incorrecta (revisá Config > Catálogo web)."
+
+    cambios = data.get("cambios") or []
+    if not cambios:
+        return True, "No había cambios pendientes desde el panel interno."
+
+    from repositorio import (get_producto_por_codigo, actualizar_producto,
+                             get_categorias, crear_categoria)
+
+    categorias = {c["nombre"].strip().lower(): c["id"] for c in get_categorias()}
+
+    aplicados, saltados, sin_producto = [], [], []
+    for c in cambios:
+        codigo = str(c.get("codigo") or "").strip()
+        if not codigo:
+            continue
+        prod = get_producto_por_codigo(codigo)
+        if not prod:
+            sin_producto.append(codigo)
+            continue
+
+        # Conflicto: el mas nuevo gana. Comparacion como texto anda
+        # bien porque los dos lados usan el mismo formato
+        # "AAAA-MM-DD HH:MM:SS".
+        modif_local = prod.get("modificado_en") or ""
+        modif_web = str(c.get("modificado_en") or "")
+        if modif_local and modif_web and modif_local >= modif_web:
+            saltados.append(codigo)
+            continue
+
+        categoria_id = prod.get("categoria_id")
+        cat_txt = str(c.get("categoria") or "").strip()
+        if cat_txt:
+            clave_cat = cat_txt.lower()
+            if clave_cat in categorias:
+                categoria_id = categorias[clave_cat]
+            else:
+                # Categoria nueva, escrita desde el panel: se crea en
+                # vez de perder el dato o mezclarla con otra existente.
+                categoria_id = crear_categoria(cat_txt)
+                categorias[clave_cat] = categoria_id
+
+        descripcion = str(c.get("descripcion") or "").strip() or prod["descripcion"]
+        marca = str(c.get("marca") or "").strip() or prod.get("marca")
+        precio = c.get("precio")
+        precio_final = (float(precio) if precio not in (None, "", 0)
+                        else prod["precio_base"])
+        imagen = str(c.get("imagen") or "").strip() or prod.get("imagen_url")
+
+        try:
+            actualizar_producto(
+                prod["id"], descripcion, prod["codigo"], categoria_id,
+                precio_final,
+                vendido_por_peso=prod.get("vendido_por_peso"),
+                imagen_url=imagen,
+                marca=marca,
+                fraccionable=prod.get("fraccionable"),
+                alerta_stock_umbral=prod.get("alerta_stock_umbral"),
+                web_fraccion_gramos=prod.get("web_fraccion_gramos"),
+            )
+            aplicados.append(codigo)
+        except Exception as e:
+            logging.warning(f"No se pudo aplicar la edición web de "
+                            f"{codigo}: {e}")
+            saltados.append(codigo)
+
+    # Confirmar: se borran de la cola las que sí se aplicaron. Las
+    # saltadas por conflicto quedan — si el usuario vuelve a tocar ese
+    # producto en el TPV la próxima sync normal las pisa; si no,
+    # convendría revisarlas a mano.
+    if aplicados:
+        try:
+            payload = json.dumps({
+                "accion": "confirmar_cambios",
+                "clave": clave,
+                "codigos": aplicados,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=payload, method="POST",
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=TIMEOUT)
+        except Exception as e:
+            logging.warning(f"Se aplicaron los cambios pero no se pudo "
+                            f"avisarle al script para que los saque de "
+                            f"la cola: {e}")
+
+    partes = [f"{len(aplicados)} producto(s) actualizado(s) desde la web."]
+    if saltados:
+        partes.append(f"{len(saltados)} se dejaron como están (el TPV "
+                      f"tenía un cambio más reciente).")
+    if sin_producto:
+        partes.append(f"{len(sin_producto)} código(s) no se encontraron "
+                      f"en el catálogo: {', '.join(sin_producto[:5])}.")
+    return True, " ".join(partes)
 
 
 def sincronizar_stock_en_segundo_plano():

@@ -592,6 +592,10 @@ def inicializar_db():
         # pedía este campo y lo mandaba a guardar, pero la columna
         # nunca se había creado.
         "ALTER TABLE categorias ADD COLUMN alerta_stock_umbral INTEGER DEFAULT NULL",
+        # Mostrar en la web un precio "por fraccion" (ej: jamon feteado
+        # a $20.000 el kilo -> mostrar $2.000 los 100g) SIN tocar el
+        # precio real de venta ni nada de lo que pasa en el mostrador.
+        "ALTER TABLE productos ADD COLUMN web_fraccion_gramos INTEGER DEFAULT NULL",
     ]
     for sql in migraciones:
         try:

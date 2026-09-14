@@ -97,6 +97,7 @@ SECCIONES = [
     ("Catálogo web", [
         ("catalogo_web_activo",      "Sincronización activa",                "bool"),
         ("catalogo_web_url",         "URL de la Apps Script Web App",        "text"),
+        ("catalogo_clave_interna",   "Clave del panel interno (CLAVE_INTERNA)", "password"),
         ("catalogo_sync_auto",       "Sincronizar solo, cada tantas horas",  "bool"),
         ("catalogo_sync_cada_horas", "¿Cada cuántas horas?",                 "int"),
         ("web_solo_con_stock",       "Publicar solo lo que tiene stock",     "bool"),
@@ -416,6 +417,8 @@ class ConfigUI(ttk.Frame):
             comando=self._probar_emails).pack(side="left", padx=(0, 6))
         btn(fb2, "🌐 Sincronizar catálogo web", variante="primario",
             comando=self._sincronizar_catalogo).pack(side="left", padx=(0, 6))
+        btn(fb2, "⬇️ Traer cambios de la web", variante="primario",
+            comando=self._traer_cambios_web).pack(side="left", padx=(0, 6))
         btn(fb2, "📱 Servidor celular", variante="primario",
             comando=self._probar_servidor_movil).pack(side="left", padx=(0, 6))
 
@@ -751,15 +754,21 @@ class ConfigUI(ttk.Frame):
             pass
         movil_ingreso.iniciar_servidor(puerto)
         url = movil_ingreso.url_servidor(puerto)
-        aviso_cert = (
-            "\n\nSi es la primera vez en ese celular, dentro de la "
-            "página hay un botón para descargar e instalar el "
-            "certificado — sin eso, el navegador va a mostrar un "
-            "aviso de sitio no seguro y la cámara no va a andar."
-            if url.startswith("https") else
-            "\n\n⚠ Arrancó sin HTTPS (revisá que 'cryptography' esté "
-            "instalado: pip install cryptography). Sin HTTPS la cámara "
-            "no funciona en iPhone, pero el resto de la página sí.")
+        url_cert = movil_ingreso.url_certificado(puerto)
+        if url.startswith("https") and url_cert:
+            aviso_cert = (
+                f"\n\nSi es la primera vez en ese celular (sobre todo en "
+                f"iPhone), ANTES de entrar a la de arriba, visitá esta "
+                f"otra dirección para instalar el certificado — es sin "
+                f"candadito a propósito, para no toparte con el aviso de "
+                f"'sitio no seguro' de entrada:\n\n{url_cert}")
+        elif url.startswith("https"):
+            aviso_cert = ""
+        else:
+            aviso_cert = (
+                "\n\n⚠ Arrancó sin HTTPS (revisá que 'cryptography' esté "
+                "instalado: pip install cryptography). Sin HTTPS la cámara "
+                "no funciona en iPhone, pero el resto de la página sí.")
         messagebox.showinfo(
             "Servidor de ingreso por celular",
             f"Servidor activo en:\n\n{url}\n\n"
@@ -848,3 +857,18 @@ class ConfigUI(ttk.Frame):
             messagebox.showinfo("Catálogo web", msg, parent=self)
         else:
             messagebox.showwarning("Catálogo web", msg, parent=self)
+
+    def _traer_cambios_web(self):
+        """Trae del panel interno las ediciones pendientes (descripción,
+        marca, categoría, precio, foto) y las aplica en la base local.
+        Conviene traerlas ANTES de sincronizar hacia la web, para que lo
+        que se manda de vuelta ya incluya lo último."""
+        c = cfg_mod.cargar()
+        import catalogo_web
+        ok, msg = catalogo_web.traer_cambios_web(
+            c.get("catalogo_web_url"), c.get("catalogo_clave_interna"))
+        if ok:
+            messagebox.showinfo("Cambios desde la web", msg, parent=self)
+        else:
+            messagebox.showwarning("Cambios desde la web", msg, parent=self)
+

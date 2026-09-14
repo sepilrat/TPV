@@ -38,6 +38,7 @@ COLS_PROD = [
     ("venta",     "Venta",        60, "center"),
     ("stock",     "Stock",        60, "e"),
     ("alerta",    "Alerta",       55, "center"),
+    ("web",       "Web",          50, "center"),
 ]
 
 COLS_CAT = [
@@ -298,6 +299,7 @@ class ProductosUI(ttk.Frame):
                     "Kg" if p.get("vendido_por_peso") else "Un",
                     _fmt_cant(p['stock']),
                     "OFF" if sin_alerta else "ON",
+                    "Sí" if p.get("publicar_web", 1) else "No",
                 ))
 
     def _refrescar_categorias(self):
@@ -1365,6 +1367,54 @@ class ProductosUI(ttk.Frame):
             selectcolor=C.superficie, font=F.normal, anchor="w")
         chk_peso.pack(fill="x", padx=20, pady=(10,0))
 
+        # Precio "por fraccion" SOLO para la web: no toca el precio real
+        # de venta ni nada de lo que se cobra en el mostrador — es
+        # puramente cómo se muestra en el catálogo online. Pensado para
+        # fiambres/quesos donde el precio de lista es por kilo pero al
+        # cliente le sirve más ver cuánto sale una porción chica.
+        fr_frame = tk.Frame(s, bg=C.superficie)
+        fr_frame.pack(fill="x", padx=20, pady=(8, 0))
+        lbl(fr_frame, "Mostrar en la web cada cuántos gramos "
+                      "(solo para productos por peso; vacío = mostrar "
+                      "el precio por kilo de siempre):",
+            variante="suave", bg=C.superficie, wraplength=460,
+            justify="left").pack(anchor="w")
+        fila_fr = tk.Frame(fr_frame, bg=C.superficie)
+        fila_fr.pack(anchor="w", pady=(4, 0))
+        e_web_fraccion = tk.Entry(fila_fr, font=F.normal, width=8,
+                                  bg=C.superficie, fg=C.texto,
+                                  justify="center", relief="solid", bd=1)
+        if prod.get("web_fraccion_gramos"):
+            e_web_fraccion.insert(0, str(prod["web_fraccion_gramos"]))
+        e_web_fraccion.pack(side="left", ipady=4)
+        lbl(fila_fr, "gramos", variante="suave", bg=C.superficie).pack(
+            side="left", padx=(6, 0))
+        lbl_preview_fraccion = lbl(fr_frame, "", variante="suave",
+                                   bg=C.superficie, fg=C.primario)
+        lbl_preview_fraccion.pack(anchor="w", pady=(2, 0))
+
+        def _preview_fraccion(*_a):
+            txt = e_web_fraccion.get().strip()
+            if not txt:
+                lbl_preview_fraccion.config(text="")
+                return
+            try:
+                gramos = float(txt.replace(",", "."))
+                precio_actual = float(e_precio.get().replace(",", ".") or 0)
+                if gramos > 0 and precio_actual > 0:
+                    precio_fr = round(precio_actual * gramos / 1000, 2)
+                    lbl_preview_fraccion.config(
+                        text=f"En la web se va a ver: $ {precio_fr:,.2f} "
+                             f"los {gramos:g} g")
+                else:
+                    lbl_preview_fraccion.config(text="")
+            except ValueError:
+                lbl_preview_fraccion.config(text="")
+
+        e_web_fraccion.bind("<KeyRelease>", _preview_fraccion)
+        e_precio.bind("<KeyRelease>", _preview_fraccion, add="+")
+        _preview_fraccion()
+
         var_fracc = tk.BooleanVar(value=bool(prod.get("fraccionable")))
         chk_fracc = tk.Checkbutton(
             s, text="Fraccionable (admite cantidad decimal, ej: 0,5 media caja)",
@@ -1710,6 +1760,22 @@ class ProductosUI(ttk.Frame):
                         "unidades (0 o más), o dejarla vacía.", parent=d)
                     return
 
+            web_fraccion_txt = e_web_fraccion.get().strip()
+            web_fraccion_gramos = None
+            if web_fraccion_txt:
+                try:
+                    web_fraccion_gramos = int(float(
+                        web_fraccion_txt.replace(",", ".")))
+                    if web_fraccion_gramos <= 0:
+                        raise ValueError
+                except ValueError:
+                    messagebox.showwarning(
+                        "Error",
+                        "La fracción para la web tiene que ser una "
+                        "cantidad de gramos mayor a 0, o dejarla vacía.",
+                        parent=d)
+                    return
+
             # Si el producto tenía una foto guardada localmente y ahora
             # se está reemplazando por otra cosa (una URL, o se quitó),
             # borramos el archivo viejo para no dejarlo huérfano en
@@ -1733,6 +1799,7 @@ class ProductosUI(ttk.Frame):
                 marca=entries["Marca"].get().strip(),
                 fraccionable=var_fracc.get(),
                 alerta_stock_umbral=alerta_stock,
+                web_fraccion_gramos=web_fraccion_gramos,
             )
             import catalogo_web
             catalogo_web.sincronizar_stock_en_segundo_plano()

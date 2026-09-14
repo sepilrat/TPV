@@ -43,6 +43,7 @@ class AppTPV(tk.Tk):
         self._aviso_diario("apertura del sistema", "aviso_diario_al_abrir_app")
         self._programar_aviso_por_hora()
         self._programar_sync_catalogo()
+        self._iniciar_servidor_movil()
 
         self.sesion_id = self._verificar_sesion()
         self._construir_header()
@@ -50,6 +51,18 @@ class AppTPV(tk.Tk):
         self.after(500, self._mostrar_alertas)
 
     # ── Sesión de caja ────────────────────────────────────────────────────────
+
+    def _iniciar_servidor_movil(self):
+        from config import cfg
+        c = cfg()
+        if not c.get("movil_ingreso_activo"):
+            return
+        try:
+            import movil_ingreso
+            movil_ingreso.iniciar_servidor(c.get("movil_ingreso_puerto", 8642))
+        except Exception as e:
+            logging.warning(f"No se pudo iniciar el servidor de ingreso "
+                            f"por celular: {e}")
 
     def _verificar_sesion(self):
         sesion = get_sesion_abierta()
@@ -122,6 +135,18 @@ class AppTPV(tk.Tk):
 
                     def _correr():
                         try:
+                            # Primero se traen las ediciones que hayan
+                            # quedado hechas desde el panel interno —
+                            # si no, se suben y se pisan sin querer con
+                            # el push de abajo.
+                            try:
+                                ok_c, msg_c = catalogo_web.traer_cambios_web()
+                                if ok_c:
+                                    logging.info(f"Cambios traidos desde "
+                                                f"la web: {msg_c}")
+                            except Exception as exc_c:
+                                logging.debug(f"No se pudieron traer "
+                                             f"cambios de la web: {exc_c}")
                             ok, msg = catalogo_web.sincronizar()
                             logging.info(f"Sync automatica del catalogo: {msg}")
                             if ok:

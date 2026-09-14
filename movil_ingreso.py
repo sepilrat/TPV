@@ -18,10 +18,27 @@ Esto es la UNICA parte del sistema que necesita una libreria de
 terceros (pip install cryptography): Python no trae de fabrica ninguna
 forma de generar certificados.
 
+Segundo servidor auxiliar (sin TLS, puerto+1): la primera vez que un
+celular entra, Safari no confia todavia en el certificado autofirmado
+y corta la conexion con "conexion no privada" ANTES de dejar cargar
+nada — ni siquiera ofrece "continuar de todas formas". Para poder
+bajar igual el certificado en ese caso, iniciar_servidor() levanta
+ademas un mini-servidor HTTP plano en el puerto siguiente, que sirve
+UNICAMENTE /certificado.pem (ver _HandlerCert). url_certificado()
+devuelve esa direccion "sin candadito" para mostrarla aparte (por
+ejemplo en el dialogo de "Probar servidor" de Config).
+
 El resto sigue con la biblioteca estandar nada mas (nada de Flask). El
-escaneo de codigo de barras en el celular usa BarcodeDetector, nativo
-del navegador (Chrome/Edge en Android, y Safari en iOS ya con HTTPS) —
-si el celular no lo soporta (Android muy viejo), el campo de codigo
+escaneo de codigo de barras en el celular usa la libreria JS ZXing
+(@zxing/library), servida por este mismo servidor desde zxing.min.js
+(archivo local en la carpeta del proyecto, bajado una vez del paquete
+oficial de npm) — NO desde un CDN, para que ande sin internet, solo
+con wifi local. NO se usa el BarcodeDetector nativo del navegador: esa
+API nunca la implemento WebKit, asi que en iPhone no funciona ni en
+Safari ni en Chrome-para-iOS (todos los navegadores de iOS corren
+sobre WebKit). ZXing decodifica el video frame a frame por su cuenta,
+sin depender de esa API, y por eso si funciona en Safari.
+Si el celular no tiene camara o falla el acceso, el campo de codigo
 sigue andando escribiendo a mano, igual que en la pantalla de
 escritorio.
 """
@@ -37,10 +54,35 @@ from urllib.parse import urlparse, parse_qs
 
 _servidor = None
 _hilo = None
+_servidor_cert = None
+_hilo_cert = None
 
 CARPETA_CERT = os.path.join(os.path.dirname(__file__), "certs")
 RUTA_CERT = os.path.join(CARPETA_CERT, "movil_ingreso.crt")
 RUTA_KEY = os.path.join(CARPETA_CERT, "movil_ingreso.key")
+
+RUTA_ZXING = os.path.join(os.path.dirname(__file__), "zxing.min.js")
+
+
+def _cargar_zxing() -> bytes:
+    """Lee zxing.min.js del disco una sola vez (se cachea en _ZXING_JS).
+    Si el archivo no esta (por ej. se borro sin querer), el escaneo con
+    camara simplemente no va a andar y btn-camara avisa con un alert —
+    el resto de la app (escribir el codigo a mano) sigue funcionando
+    igual, asi que no vale la pena que esto tire una excepcion."""
+    try:
+        with open(RUTA_ZXING, "rb") as f:
+            return f.read()
+    except OSError:
+        logging.warning(
+            f"No se encontro {RUTA_ZXING} — el escaneo con camara del "
+            f"celular no va a andar (escribir el codigo a mano sigue "
+            f"funcionando igual). Se puede volver a bajar de "
+            f"https://registry.npmjs.org/@zxing/library")
+        return b""
+
+
+_ZXING_JS = _cargar_zxing()
 
 
 def ip_local() -> str:
@@ -172,6 +214,44 @@ def _pin_valido(handler) -> bool:
     return enviado == pin
 
 
+class _HandlerCert(BaseHTTPRequestHandler):
+    """Handler minimo para el mini-servidor HTTP PLANO (sin TLS) que
+    sirve UNICAMENTE /certificado.pem.
+
+    Por que hace falta un servidor aparte: el servidor principal es
+    HTTPS con un certificado autofirmado que el celular todavia no
+    conoce la primera vez. Safari, ante eso, no ofrece "continuar de
+    todas formas" — corta la conexion de entrada con "conexion no
+    privada" y no deja pasar. La unica forma de que el celular pueda
+    bajar el .pem ANTES de confiar en el, es pedirlo por un puerto sin
+    cifrar: ahi Safari conecta igual (sin candado, pero sin bloqueo).
+    No sirve nada mas que el certificado — nada de datos del negocio
+    viaja nunca por este puerto."""
+
+    def log_message(self, fmt, *args):
+        logging.debug("movil_ingreso(cert-http): " + fmt, *args)
+
+    def do_GET(self):
+        if urlparse(self.path).path != "/certificado.pem":
+            self.send_response(404)
+            self.end_headers()
+            return
+        if not os.path.exists(RUTA_CERT):
+            self.send_response(404)
+            self.end_headers()
+            return
+        with open(RUTA_CERT, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        # Mismo content-type que en la version HTTPS: es lo que hace
+        # que Safari ofrezca "Instalar perfil" en vez de mostrar el
+        # archivo como texto. Sin Content-Disposition a proposito.
+        self.send_header("Content-Type", "application/x-x509-ca-cert")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         logging.debug("movil_ingreso: " + fmt, *args)
@@ -194,6 +274,21 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif ruta == "/zxing.js":
+                # Sin PIN a proposito: es solo la libreria de escaneo,
+                # nada de datos del negocio, y el HTML la pide desde
+                # <head> antes de que el usuario haya podido cargar
+                # ningun PIN todavia.
+                if not _ZXING_JS:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(_ZXING_JS)))
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                self.end_headers()
+                self.wfile.write(_ZXING_JS)
             elif ruta == "/api/producto":
                 if not _pin_valido(self):
                     return _ok(self, {"error": "PIN incorrecto"}, 401)
@@ -218,6 +313,13 @@ class _Handler(BaseHTTPRequestHandler):
                     return _ok(self, {"error": "PIN incorrecto"}, 401)
                 from repositorio import get_categorias
                 _ok(self, {"categorias": get_categorias()})
+            elif ruta == "/api/buscar_producto":
+                if not _pin_valido(self):
+                    return _ok(self, {"error": "PIN incorrecto"}, 401)
+                qs = parse_qs(urlparse(self.path).query)
+                texto = (qs.get("q", [""])[0]).strip()
+                from repositorio import buscar_productos_texto
+                _ok(self, {"resultados": buscar_productos_texto(texto)})
             elif ruta == "/certificado.pem":
                 # Sin PIN a proposito: hace falta poder bajarlo ANTES
                 # de confiar en el sitio. No es informacion sensible,
@@ -343,8 +445,14 @@ def iniciar_servidor(puerto: int = 8642):
     generar el certificado (falta instalar "cryptography", por
     ejemplo), se cae a HTTP plano para que el resto — el formulario,
     el código escrito a mano — siga funcionando igual.
+
+    Si el servidor principal quedo en HTTPS, ademas arranca un
+    segundo mini-servidor sin TLS en el puerto siguiente (puerto+1),
+    solo para poder bajar el certificado sin toparse con el bloqueo
+    de Safari (ver _HandlerCert). Si el principal ya quedo en HTTP
+    plano, no hace falta: no hay certificado que instalar.
     """
-    global _servidor, _hilo
+    global _servidor, _hilo, _servidor_cert, _hilo_cert
     if _servidor is not None:
         return  # ya esta corriendo
 
@@ -380,6 +488,24 @@ def iniciar_servidor(puerto: int = 8642):
     logging.info(f"Servidor de ingreso por celular activo en "
                 f"{esquema}://{ip}:{puerto}")
 
+    if contexto:
+        try:
+            _servidor_cert = ThreadingHTTPServer(
+                ("0.0.0.0", puerto + 1), _HandlerCert)
+            _hilo_cert = threading.Thread(
+                target=_servidor_cert.serve_forever, daemon=True)
+            _hilo_cert.start()
+            logging.info(f"Servidor auxiliar del certificado (sin TLS) "
+                        f"activo en http://{ip}:{puerto + 1}")
+        except OSError as e:
+            logging.warning(
+                f"No se pudo abrir el puerto {puerto + 1} para el "
+                f"servidor auxiliar del certificado: {e}. El certificado "
+                f"sigue disponible en {esquema}://{ip}:{puerto}"
+                f"/certificado.pem, pero ahi Safari puede bloquear antes "
+                f"de confiar en el.")
+            _servidor_cert = None
+
 
 def url_servidor(puerto: int = None) -> str:
     """URL completa para mostrarle al usuario — con https:// si el
@@ -391,12 +517,31 @@ def url_servidor(puerto: int = None) -> str:
     return f"{esquema}://{ip_local()}:{puerto}"
 
 
+def url_certificado(puerto: int = None) -> str:
+    """URL directa al certificado (.pem) por HTTP PLANO, en el puerto
+    auxiliar (puerto+1) — para instalarlo desde el celular sin pasar
+    por el bloqueo de "conexion no privada" que tira Safari contra el
+    servidor HTTPS principal antes de confiar en el certificado (ver
+    _HandlerCert). Devuelve "" si no hay nada que instalar: el
+    principal no quedo en HTTPS (sin certificado) o el auxiliar no
+    pudo levantar."""
+    if not _servidor_cert:
+        return ""
+    if puerto is None:
+        puerto = _servidor.server_port if _servidor else 8642
+    return f"http://{ip_local()}:{puerto + 1}/certificado.pem"
+
+
 def detener_servidor():
-    global _servidor, _hilo
+    global _servidor, _hilo, _servidor_cert, _hilo_cert
     if _servidor:
         _servidor.shutdown()
         _servidor = None
         _hilo = None
+    if _servidor_cert:
+        _servidor_cert.shutdown()
+        _servidor_cert = None
+        _hilo_cert = None
 
 
 _PAGINA = r"""<!DOCTYPE html>
@@ -405,6 +550,7 @@ _PAGINA = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ingreso de stock</title>
+<script src="/zxing.js" defer></script>
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
@@ -472,6 +618,17 @@ _PAGINA = r"""<!DOCTYPE html>
     </div>
     <button class="btn-secundario" id="btn-camara">📷 Escanear con la cámara</button>
     <video id="video" playsinline></video>
+
+    <label>o buscar por nombre</label>
+    <div style="position:relative">
+      <input id="nombre-busqueda" type="text" placeholder="Escribí parte del nombre"
+             autocomplete="off">
+      <div id="resultados-nombre" class="oculto" style="position:absolute; left:0;
+           right:0; top:100%; background:#fff; border:1px solid #d1d5db;
+           border-top:none; border-radius:0 0 8px 8px; max-height:220px;
+           overflow-y:auto; z-index:10; box-shadow:0 4px 8px rgba(0,0,0,.1)"></div>
+    </div>
+
     <div id="info-producto"></div>
   </div>
 
@@ -573,6 +730,54 @@ async function buscarProducto() {
 }
 
 $("codigo").addEventListener("change", buscarProducto);
+
+// Búsqueda por nombre — alternativa a escanear/escribir el código
+// directo. Con debounce para no pegarle a la API en cada tecla, y
+// cierra el dropdown si se toca afuera.
+let temporizadorBusqueda = null;
+$("nombre-busqueda").addEventListener("input", () => {
+  clearTimeout(temporizadorBusqueda);
+  const texto = $("nombre-busqueda").value.trim();
+  const cont = $("resultados-nombre");
+  if (texto.length < 2) { cont.classList.add("oculto"); cont.innerHTML = ""; return; }
+  temporizadorBusqueda = setTimeout(async () => {
+    try {
+      const r = await api("/api/buscar_producto?q=" + encodeURIComponent(texto));
+      if (!r.resultados.length) {
+        cont.innerHTML = `<div style="padding:10px;color:#6b7280;font-size:.9rem">
+            Sin resultados</div>`;
+        cont.classList.remove("oculto");
+        return;
+      }
+      cont.innerHTML = r.resultados.map(p => `
+        <div class="resultado-item" data-codigo="${p.codigo}"
+             style="padding:10px;border-bottom:1px solid #f3f4f6;cursor:pointer">
+          <div style="font-weight:600">${p.descripcion}</div>
+          <div style="font-size:.8rem;color:#6b7280">
+            $ ${p.precio_base.toFixed(2)}${p.vendido_por_peso ? " /kg" : ""}
+            &nbsp;·&nbsp; ${p.codigo}
+          </div>
+        </div>`).join("");
+      cont.classList.remove("oculto");
+    } catch (e) { /* si falla la busqueda, el campo de código sigue andando igual */ }
+  }, 300);
+});
+
+$("resultados-nombre").addEventListener("click", (e) => {
+  const item = e.target.closest(".resultado-item");
+  if (!item) return;
+  $("codigo").value = item.dataset.codigo;
+  $("nombre-busqueda").value = "";
+  $("resultados-nombre").classList.add("oculto");
+  $("resultados-nombre").innerHTML = "";
+  buscarProducto();
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#nombre-busqueda") && !e.target.closest("#resultados-nombre")) {
+    $("resultados-nombre").classList.add("oculto");
+  }
+});
 $("costo").addEventListener("change", async () => {
   $("cambio-costo").innerHTML = "";
   nuevoPrecioVenta = null;
@@ -649,40 +854,68 @@ $("btn-guardar").addEventListener("click", async () => {
   }
 });
 
-// Escaneo con la cámara — BarcodeDetector nativo del navegador. Si el
-// telefono no lo tiene (iPhone, Android viejo), el boton avisa y queda
-// la opcion de escribir el codigo a mano.
+// Escaneo con la cámara — ZXing-js (@zxing/library, servida local
+// desde /zxing.js, ver el docstring del módulo). No se usa
+// BarcodeDetector nativo porque WebKit (el motor de TODOS los
+// navegadores en iOS, incluido "Chrome" para iPhone) nunca lo
+// implementó — con BarcodeDetector, el escaneo simplemente no anda en
+// ningún iPhone. ZXing decodifica el video frame a frame por su
+// cuenta, así que sí funciona en Safari/iOS.
+let lectorZXing = null;
+let streamCamara = null;
+let yaDetectado = false;   // evita reentradas: la camara sigue mandando
+                           // frames (y puede re-detectar el MISMO codigo
+                           // varias veces) mientras stream/lector todavia
+                           // se estan deteniendo — sin esto, cada frame
+                           // de mas volvia a llamar buscarProducto()
+
+function detenerEscaneo() {
+  if (lectorZXing) { lectorZXing.reset(); lectorZXing = null; }
+  if (streamCamara) { streamCamara.getTracks().forEach(t => t.stop()); streamCamara = null; }
+  $("video").style.display = "none";
+}
+
 $("btn-camara").addEventListener("click", async () => {
-  if (!("BarcodeDetector" in window)) {
-    alert("Este navegador no puede escanear código de barras con la "
-        + "cámara (pasa en iPhone y algunos Android viejos). "
+  if (typeof ZXing === "undefined") {
+    alert("No se pudo cargar la librería de escaneo (zxing.min.js). "
+        + "Puede faltar el archivo en la carpeta del proyecto. "
         + "Escribí el código a mano en el campo de arriba.");
     return;
   }
+  yaDetectado = false;
   const video = $("video");
   video.style.display = "block";
   try {
-    const stream = await navigator.mediaDevices.getUserMedia(
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+      ZXing.BarcodeFormat.CODE_128,
+    ]);
+    lectorZXing = new ZXing.BrowserMultiFormatReader(hints);
+
+    // constraints propios (en vez de dejar que decodeFromVideoDevice
+    // elija cámara) para poder pedir la trasera (environment) también
+    // en iOS, donde a veces devuelve varias "cámaras" virtuales raras.
+    streamCamara = await navigator.mediaDevices.getUserMedia(
       { video: { facingMode: "environment" } });
-    video.srcObject = stream;
+    video.srcObject = streamCamara;
     await video.play();
-    const detector = new BarcodeDetector(
-      { formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128"] });
-    const intervalo = setInterval(async () => {
-      try {
-        const codigos = await detector.detect(video);
-        if (codigos.length) {
-          $("codigo").value = codigos[0].rawValue;
-          clearInterval(intervalo);
-          stream.getTracks().forEach(t => t.stop());
-          video.style.display = "none";
-          buscarProducto();
-        }
-      } catch (e) { /* sigue intentando */ }
-    }, 400);
+
+    lectorZXing.decodeFromStream(streamCamara, video, (resultado, error) => {
+      if (resultado && !yaDetectado) {
+        yaDetectado = true;   // primer hit gana, se ignora el resto
+        $("codigo").value = resultado.getText();
+        detenerEscaneo();
+        buscarProducto();
+      }
+      // si error es NotFoundException simplemente no encontró nada
+      // todavía en ese frame — ZXing sigue intentando solo, no hace
+      // falta hacer nada acá.
+    });
   } catch (e) {
     alert("No se pudo abrir la cámara: " + e.message);
-    video.style.display = "none";
+    detenerEscaneo();
   }
 });
 </script>

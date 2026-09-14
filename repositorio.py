@@ -178,6 +178,7 @@ def get_productos(filtro="", categoria_id=None, solo_activos=True) -> list:
                p.precio_base, p.costo_ultimo, p.margen_pct, p.activo,
                p.ignorar_alerta, p.vendido_por_peso, p.imagen_url, p.marca,
                COALESCE(p.publicar_web, 1) as publicar_web,
+               p.web_fraccion_gramos,
                COALESCE(SUM(l.cantidad_restante), 0) as stock,
                ROUND((p.precio_base - p.costo_ultimo)
                      / NULLIF(p.costo_ultimo, 0) * 100, 1) as margen
@@ -256,7 +257,8 @@ def crear_producto(codigo, descripcion, categoria_id, precio_base, costo,
 def actualizar_producto(pid, descripcion, codigo, categoria_id,
                         precio_base, costo_ultimo=None, margen_pct=None,
                         vendido_por_peso=0, imagen_url=None, marca=None,
-                        fraccionable=None, alerta_stock_umbral=None):
+                        fraccionable=None, alerta_stock_umbral=None,
+                        web_fraccion_gramos=None):
     # El redondeo es una regla del negocio, no una accion aparte: si
     # se aplica solo en algunas pantallas, el catalogo termina mitad
     # redondeado y mitad con decimales.
@@ -283,13 +285,14 @@ def actualizar_producto(pid, descripcion, codigo, categoria_id,
             SET descripcion=?, codigo=?, categoria_id=?, precio_base=?,
                 costo_ultimo=COALESCE(?, costo_ultimo), margen_pct=?,
                 vendido_por_peso=?, imagen_url=?, marca=?,
-                fraccionable=?, alerta_stock_umbral=?,
+                fraccionable=?, alerta_stock_umbral=?, web_fraccion_gramos=?,
                 modificado_en=datetime('now','localtime')
             WHERE id=?
         """, (descripcion, codigo, categoria_id, precio_base, costo_ultimo,
               margen_pct, int(bool(vendido_por_peso)), imagen_url,
               (marca or "").strip() or None,
-              int(bool(fraccionable)), alerta_stock_umbral, pid))
+              int(bool(fraccionable)), alerta_stock_umbral,
+              web_fraccion_gramos or None, pid))
         conn.commit()
 
 
@@ -1188,6 +1191,24 @@ def get_categorias() -> list:
             "SELECT id, nombre, margen_pct, alerta_stock_umbral "
             "FROM categorias ORDER BY nombre"
         ).fetchall()]
+
+
+def crear_categoria(nombre: str) -> int:
+    """Como guardar_categoria() pero devuelve el id — hace falta para
+    poder asociarla al toque a un producto (ver traer_cambios_web en
+    catalogo_web.py, cuando llega una categoría escrita a mano desde
+    el panel interno que todavía no existe acá)."""
+    nombre = (nombre or "").strip()
+    with get_connection() as conn:
+        existente = conn.execute(
+            "SELECT id FROM categorias WHERE LOWER(nombre)=LOWER(?)",
+            (nombre,)).fetchone()
+        if existente:
+            return existente["id"]
+        cur = conn.execute(
+            "INSERT INTO categorias (nombre) VALUES (?)", (nombre,))
+        conn.commit()
+        return cur.lastrowid
 
 
 def guardar_categoria(cid, nombre, margen, alerta_stock_umbral=None):
