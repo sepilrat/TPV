@@ -58,8 +58,17 @@ _servidor_cert = None
 _hilo_cert = None
 
 CARPETA_CERT = os.path.join(os.path.dirname(__file__), "certs")
+# Certificado de servidor ("hoja"): es el que usa el servidor HTTPS.
+# Vale poco tiempo y se rehace solo cuando cambia la IP o vence.
 RUTA_CERT = os.path.join(CARPETA_CERT, "movil_ingreso.crt")
 RUTA_KEY = os.path.join(CARPETA_CERT, "movil_ingreso.key")
+# CA propia: es la que se instala UNA VEZ en el celular. Firma al
+# certificado de servidor de arriba, asi que mientras la CA siga
+# siendo la misma, el celular confia en cualquier cert que ella
+# firme — aunque cambie la IP de la PC. Por eso no hay que volver a
+# instalar nada nunca mas.
+RUTA_CA_CERT = os.path.join(CARPETA_CERT, "movil_ca.crt")
+RUTA_CA_KEY = os.path.join(CARPETA_CERT, "movil_ca.key")
 
 RUTA_ZXING = os.path.join(os.path.dirname(__file__), "zxing.min.js")
 
@@ -117,25 +126,38 @@ def _certificado_sirve_para(ruta_cert: str, ip: str) -> bool:
         return False
 
 
-def generar_certificado(ip: str) -> tuple[str, str]:
-    """Genera (o reutiliza) un certificado autofirmado para esta IP.
+def _ca_sirve() -> bool:
+    """True si la CA guardada existe y no esta vencida (no depende de
+    la IP: una CA no tiene SAN, firma para cualquier IP)."""
+    try:
+        from cryptography import x509
+        with open(RUTA_CA_CERT, "rb") as f:
+            ca = x509.load_pem_x509_certificate(f.read())
+        ahora = datetime.now(timezone.utc)
+        return (ca.not_valid_before_utc < ahora < ca.not_valid_after_utc
+                and os.path.exists(RUTA_CA_KEY))
+    except Exception:
+        return False
 
-    Necesario porque una IP de red local (192.168.x.x) no puede tener
-    un certificado "de verdad" firmado por una entidad reconocida —
-    esas solo se emiten para dominios de internet. Sin esto, ningun
-    navegador (y mucho menos Safari) va a habilitar la camara.
 
-    OJO con dos reglas de Apple que si no se cumplen, Safari ni
-    siquiera ofrece "continuar de todas formas" — directamente no
-    conecta, sin ningun aviso claro de por que:
-      - La validez no puede superar 398 dias (se usan 397 por las dudas).
-      - Tiene que tener keyUsage / extendedKeyUsage(serverAuth) /
-        basicConstraints(CA:FALSE) — un certificado autofirmado
-        "pelado" sin estas extensiones no alcanza.
-    Como la validez es corta a proposito, _certificado_sirve_para()
-    se encarga de renovarlo solo cuando haga falta.
+def generar_ca():
+    """Genera (o reutiliza) la CA propia: el certificado que se instala
+    UNA SOLA VEZ en cada celular.
+
+    Por que una CA y no un certificado autofirmado suelto: en iOS, la
+    pantalla Ajustes > General > Informacion > Confianza de
+    certificados solo lista certificados RAIZ (ca=True). Un cert hoja
+    autofirmado se instala como perfil pero no aparece ahi para
+    activarle la confianza — y sin ese paso Safari lo sigue marcando
+    como no confiable, con lo cual la camara nunca se habilita y el
+    cartel de "primera vez" no se va mas.
+
+    Ademas, como el celular confia en la CA (y no en una IP puntual),
+    si mañana cambia la IP de la PC se rehace solo el certificado de
+    servidor y el celular lo acepta sin tocar nada. Por eso la CA vale
+    10 años: el limite de 398 dias de Apple aplica a los certificados
+    de SERVIDOR, no a una raiz instalada a mano.
     """
-    import ipaddress
     from cryptography import x509
     from cryptography.x509.oid import NameOID
     from cryptography.hazmat.primitives import hashes, serialization
@@ -143,10 +165,91 @@ def generar_certificado(ip: str) -> tuple[str, str]:
 
     os.makedirs(CARPETA_CERT, exist_ok=True)
 
+    if _ca_sirve():
+        with open(RUTA_CA_CERT, "rb") as f:
+            ca_cert = x509.load_pem_x509_certificate(f.read())
+        with open(RUTA_CA_KEY, "rb") as f:
+            ca_key = serialization.load_pem_private_key(f.read(), password=None)
+        return ca_cert, ca_key
+
+    logging.info("Generando CA propia para el ingreso por celular "
+                 "(se instala una sola vez en cada telefono)")
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    nombre = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "TPV Arai - Ingreso movil"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TPV Arai"),
+    ])
+    ahora = datetime.now(timezone.utc)
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(nombre)
+        .issuer_name(nombre)          # autofirmada: es la raiz
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(ahora - timedelta(days=1))
+        .not_valid_after(ahora + timedelta(days=3650))
+        .add_extension(
+            x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True, key_cert_sign=True, crl_sign=True,
+                key_encipherment=False, content_commitment=False,
+                data_encipherment=False, key_agreement=False,
+                encipher_only=False, decipher_only=False),
+            critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+
+    with open(RUTA_CA_CERT, "wb") as f:
+        f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
+    with open(RUTA_CA_KEY, "wb") as f:
+        f.write(ca_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()))
+    # Si se rehace la CA, el cert de servidor viejo quedo firmado por
+    # una CA que ya no existe — hay que rehacerlo tambien.
+    for ruta in (RUTA_CERT, RUTA_KEY):
+        if os.path.exists(ruta):
+            os.remove(ruta)
+    return ca_cert, ca_key
+
+
+def generar_certificado(ip: str) -> tuple[str, str]:
+    """Genera (o reutiliza) el certificado de SERVIDOR para esta IP,
+    firmado por la CA propia (ver generar_ca()).
+
+    Necesario porque una IP de red local (192.168.x.x) no puede tener
+    un certificado "de verdad" firmado por una entidad reconocida —
+    esas solo se emiten para dominios de internet. Sin esto, ningun
+    navegador (y mucho menos Safari) va a habilitar la camara.
+
+    OJO con las reglas de Apple que si no se cumplen, Safari ni
+    siquiera ofrece "continuar de todas formas" — directamente no
+    conecta, sin ningun aviso claro de por que:
+      - La validez no puede superar 398 dias (se usan 395 por las dudas).
+      - Tiene que tener keyUsage / extendedKeyUsage(serverAuth) /
+        basicConstraints(CA:FALSE) y la IP en el SAN.
+    Como la validez es corta a proposito, _certificado_sirve_para()
+    se encarga de renovarlo solo cuando haga falta — y al estar
+    firmado por la CA ya instalada, renovarlo NO obliga a tocar el
+    celular de nuevo.
+    """
+    import ipaddress
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    ca_cert, ca_key = generar_ca()
+
     if os.path.exists(RUTA_CERT) and _certificado_sirve_para(RUTA_CERT, ip):
         return RUTA_CERT, RUTA_KEY
 
-    logging.info(f"Generando certificado nuevo para {ip} "
+    logging.info(f"Generando certificado de servidor para {ip} "
                 f"(no había uno, venció, o cambió la IP de la PC)")
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     nombre = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, ip)])
@@ -160,7 +263,7 @@ def generar_certificado(ip: str) -> tuple[str, str]:
     cert = (
         x509.CertificateBuilder()
         .subject_name(nombre)
-        .issuer_name(nombre)
+        .issuer_name(ca_cert.subject)     # firmado POR la CA
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(ahora - timedelta(days=1))
@@ -182,7 +285,11 @@ def generar_certificado(ip: str) -> tuple[str, str]:
         .add_extension(
             x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]),
             critical=False)
-        .sign(key, hashes.SHA256())
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                ca_key.public_key()),
+            critical=False)
+        .sign(ca_key, hashes.SHA256())    # <- firma la CA, no el propio cert
     )
 
     with open(RUTA_CERT, "wb") as f:
@@ -236,11 +343,16 @@ class _HandlerCert(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        if not os.path.exists(RUTA_CERT):
+        # Se sirve la CA, NO el certificado de servidor: la CA es lo
+        # que iOS deja marcar como confiable en Ajustes (ver
+        # generar_ca()), y al confiar en ella el celular acepta
+        # cualquier cert de servidor que ella firme — tambien despues
+        # de que cambie la IP. Por eso se instala una sola vez.
+        if not os.path.exists(RUTA_CA_CERT):
             self.send_response(404)
             self.end_headers()
             return
-        with open(RUTA_CERT, "rb") as f:
+        with open(RUTA_CA_CERT, "rb") as f:
             body = f.read()
         self.send_response(200)
         # Mismo content-type que en la version HTTPS: es lo que hace
@@ -313,6 +425,11 @@ class _Handler(BaseHTTPRequestHandler):
                     return _ok(self, {"error": "PIN incorrecto"}, 401)
                 from repositorio import get_categorias
                 _ok(self, {"categorias": get_categorias()})
+            elif ruta == "/api/proveedores":
+                if not _pin_valido(self):
+                    return _ok(self, {"error": "PIN incorrecto"}, 401)
+                from repositorio import get_proveedores
+                _ok(self, {"proveedores": get_proveedores()})
             elif ruta == "/api/buscar_producto":
                 if not _pin_valido(self):
                     return _ok(self, {"error": "PIN incorrecto"}, 401)
@@ -323,12 +440,14 @@ class _Handler(BaseHTTPRequestHandler):
             elif ruta == "/certificado.pem":
                 # Sin PIN a proposito: hace falta poder bajarlo ANTES
                 # de confiar en el sitio. No es informacion sensible,
-                # es la parte publica del certificado.
-                if not os.path.exists(RUTA_CERT):
+                # es la parte publica de la CA (nunca su clave privada).
+                # Se sirve la CA y no el cert de servidor: ver
+                # generar_ca() y el comentario en _HandlerCert.
+                if not os.path.exists(RUTA_CA_CERT):
                     self.send_response(404)
                     self.end_headers()
                     return
-                with open(RUTA_CERT, "rb") as f:
+                with open(RUTA_CA_CERT, "rb") as f:
                     body = f.read()
                 self.send_response(200)
                 # Este content-type es el que hace que Safari, al
@@ -360,6 +479,14 @@ class _Handler(BaseHTTPRequestHandler):
                 info = evaluar_cambio_costo(
                     int(datos["producto_id"]), float(datos["costo"]))
                 return _ok(self, info)
+
+            if ruta == "/api/proveedor":
+                nombre = (datos.get("nombre") or "").strip()
+                if not nombre:
+                    return _ok(self, {"error": "Falta el nombre."}, 400)
+                from repositorio import crear_proveedor
+                pid = crear_proveedor(nombre)
+                return _ok(self, {"id": pid, "nombre": nombre})
 
             if ruta == "/api/ingreso":
                 return self._registrar_ingreso(datos)
@@ -570,7 +697,8 @@ _PAGINA = r"""<!DOCTYPE html>
   .btn-primario { background: #2451B0; color: #fff; }
   .btn-secundario { background: #e5e7eb; color: #1f2937; }
   .btn-exito { background: #16a34a; color: #fff; }
-  #video { width: 100%; border-radius: 8px; display: none; background: #000; }
+  #video { width: 100%; max-height: 240px; object-fit: cover;
+           border-radius: 8px; display: none; background: #000; }
   .producto-info { background: #eef2ff; border-radius: 8px; padding: 10px;
                     margin-top: 10px; font-size: .95rem; }
   .aviso { background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px;
@@ -590,15 +718,17 @@ _PAGINA = r"""<!DOCTYPE html>
     <b>¿Primera vez en este celular?</b>
     <p style="font-size:.88rem;margin:6px 0">
       Para que la cámara funcione hace falta instalar y confiar en el
-      certificado de este servidor (una sola vez).
+      certificado (una sola vez por celular — después no lo pide más,
+      ni aunque cambie la IP de la PC).
       <b>En iPhone:</b> tocá el link de abajo — tiene que aparecer
       directo un cartel de "Perfil descargado" o "Instalar perfil"
       (no hace falta ir a buscar nada en Ajustes/Configuración antes).
       Tocá Instalar, poné tu código del celular si lo pide, y confirmá
       de nuevo. Recién <b>al final</b>, andá a Ajustes/Configuración →
       General → Información (Acerca de) → Confianza de certificados,
-      y activá el certificado ahí — ese último paso es el que más se
-      salta y sin él Safari lo sigue marcando como no confiable.
+      y activá ahí <b>"TPV Arai - Ingreso movil"</b> — ese último paso
+      es el que más se saltea y sin él Safari lo sigue marcando como
+      no confiable.
     </p>
     <a href="/certificado.pem" style="display:block;text-align:center;
        background:#2451B0;color:#fff;padding:10px;border-radius:8px;
@@ -611,23 +741,18 @@ _PAGINA = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <label>Código de barras</label>
-    <div class="fila">
-      <div><input id="codigo" type="text" placeholder="Escaneá o escribí el código"
-                  inputmode="numeric"></div>
-    </div>
-    <button class="btn-secundario" id="btn-camara">📷 Escanear con la cámara</button>
-    <video id="video" playsinline></video>
-
-    <label>o buscar por nombre</label>
+    <label>Código o nombre del producto</label>
     <div style="position:relative">
-      <input id="nombre-busqueda" type="text" placeholder="Escribí parte del nombre"
+      <input id="codigo" type="text"
+             placeholder="Escaneá, escribí el código o el nombre"
              autocomplete="off">
       <div id="resultados-nombre" class="oculto" style="position:absolute; left:0;
            right:0; top:100%; background:#fff; border:1px solid #d1d5db;
            border-top:none; border-radius:0 0 8px 8px; max-height:220px;
            overflow-y:auto; z-index:10; box-shadow:0 4px 8px rgba(0,0,0,.1)"></div>
     </div>
+    <button class="btn-secundario" id="btn-camara">📷 Escanear con la cámara</button>
+    <video id="video" playsinline></video>
 
     <div id="info-producto"></div>
   </div>
@@ -645,6 +770,14 @@ _PAGINA = r"""<!DOCTYPE html>
     </div>
     <label>Vencimiento (opcional)</label>
     <input id="vencimiento" type="text" placeholder="DD/MM/AAAA">
+    <label>Proveedor (opcional)</label>
+    <div class="fila">
+      <div><select id="proveedor"><option value="">— sin proveedor —</option></select></div>
+      <div style="flex:0 0 44px">
+        <button type="button" class="btn-secundario" id="btn-nuevo-proveedor"
+                style="margin-top:0;padding:10px">+</button>
+      </div>
+    </div>
     <label>Notas (opcional)</label>
     <input id="notas" type="text">
 
@@ -669,6 +802,17 @@ _PAGINA = r"""<!DOCTYPE html>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
+
+// Si "isSecureContext" da true, el navegador YA considera esta conexión
+// plenamente segura — o sea, el certificado ya está instalado/confiado
+// (si no lo estuviera, en iPhone Safari directamente no habría dejado
+// cargar esta página, y en otros navegadores getUserMedia tampoco
+// andaría). En ese caso no hace falta seguir mostrando el cartel de
+// "primera vez", que es solo para el momento en que TODAVÍA no se
+// instaló nada.
+if (window.isSecureContext) {
+  $("card-certificado").classList.add("oculto");
+}
 let productoActual = null;   // {existe, id, ...} de /api/producto
 let nuevoPrecioVenta = null;
 
@@ -695,11 +839,42 @@ async function cargarCategorias() {
   } catch (e) { /* se reintenta cuando haga falta */ }
 }
 
+async function cargarProveedores(seleccionarId) {
+  try {
+    const r = await api("/api/proveedores");
+    const sel = $("proveedor");
+    sel.innerHTML = '<option value="">— sin proveedor —</option>';
+    for (const p of r.proveedores) {
+      const o = document.createElement("option");
+      o.value = p.id; o.textContent = p.nombre;
+      sel.appendChild(o);
+    }
+    if (seleccionarId) sel.value = seleccionarId;
+  } catch (e) { /* se reintenta cuando haga falta */ }
+}
+
+$("btn-nuevo-proveedor").addEventListener("click", async () => {
+  const nombre = (prompt("Nombre del proveedor:") || "").trim();
+  if (!nombre) return;
+  try {
+    const r = await api("/api/proveedor", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({nombre}),
+    });
+    await cargarProveedores(r.id);
+  } catch (e) {
+    alert("No se pudo crear el proveedor: " + e.message);
+  }
+});
+
 async function buscarProducto() {
   const codigo = $("codigo").value.trim();
   const info = $("info-producto");
   const cardDatos = $("card-datos");
   const altaProducto = $("alta-producto");
+  $("resultados-nombre").classList.add("oculto");
+  $("resultados-nombre").innerHTML = "";
   info.innerHTML = "";
   nuevoPrecioVenta = null;
   $("cambio-costo").innerHTML = "";
@@ -713,6 +888,7 @@ async function buscarProducto() {
   }
 
   cardDatos.classList.remove("oculto");
+  if ($("proveedor").options.length <= 1) cargarProveedores();
   if (productoActual.existe) {
     altaProducto.classList.add("oculto");
     info.innerHTML = `<div class="producto-info">
@@ -731,13 +907,15 @@ async function buscarProducto() {
 
 $("codigo").addEventListener("change", buscarProducto);
 
-// Búsqueda por nombre — alternativa a escanear/escribir el código
-// directo. Con debounce para no pegarle a la API en cada tecla, y
-// cierra el dropdown si se toca afuera.
+// Búsqueda con el MISMO campo que el código: escanear, escribir el
+// código exacto o escribir (parte de) el nombre. En cada tecla se
+// pide un listado de sugerencias (con debounce); si en cambio se
+// pega/escanea un código exacto y el campo pierde foco, dispara
+// buscarProducto() directo (listener de arriba, "change").
 let temporizadorBusqueda = null;
-$("nombre-busqueda").addEventListener("input", () => {
+$("codigo").addEventListener("input", () => {
   clearTimeout(temporizadorBusqueda);
-  const texto = $("nombre-busqueda").value.trim();
+  const texto = $("codigo").value.trim();
   const cont = $("resultados-nombre");
   if (texto.length < 2) { cont.classList.add("oculto"); cont.innerHTML = ""; return; }
   temporizadorBusqueda = setTimeout(async () => {
@@ -759,7 +937,11 @@ $("nombre-busqueda").addEventListener("input", () => {
           </div>
         </div>`).join("");
       cont.classList.remove("oculto");
-    } catch (e) { /* si falla la busqueda, el campo de código sigue andando igual */ }
+    } catch (e) {
+      cont.innerHTML = `<div style="padding:10px;color:#991b1b;font-size:.85rem">
+          ${e.message}</div>`;
+      cont.classList.remove("oculto");
+    }
   }, 300);
 });
 
@@ -767,14 +949,13 @@ $("resultados-nombre").addEventListener("click", (e) => {
   const item = e.target.closest(".resultado-item");
   if (!item) return;
   $("codigo").value = item.dataset.codigo;
-  $("nombre-busqueda").value = "";
   $("resultados-nombre").classList.add("oculto");
   $("resultados-nombre").innerHTML = "";
   buscarProducto();
 });
 
 document.addEventListener("click", (e) => {
-  if (!e.target.closest("#nombre-busqueda") && !e.target.closest("#resultados-nombre")) {
+  if (!e.target.closest("#codigo") && !e.target.closest("#resultados-nombre")) {
     $("resultados-nombre").classList.add("oculto");
   }
 });
@@ -792,12 +973,16 @@ $("costo").addEventListener("change", async () => {
     });
     if (info.direccion === "igual") return;
     const div = $("cambio-costo");
+    const fmt = (n) => n.toLocaleString("es-AR", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
     if (info.direccion === "subio" &&
         Math.round(info.precio_sugerido*100) !== Math.round(info.precio_actual*100)) {
+      const margenAct = costo ? ((info.precio_actual - costo) / costo * 100) : 0;
       div.innerHTML = `<div class="aviso">
-          El costo pasó de $ ${info.costo_anterior.toFixed(2)} a $ ${costo.toFixed(2)}.<br>
-          Precio actual: $ ${info.precio_actual.toFixed(2)} ·
-          Precio sugerido: $ ${info.precio_sugerido.toFixed(2)}<br>
+          <b>El costo subió</b><br>
+          $ ${fmt(info.costo_anterior)} → $ ${fmt(costo)}<br><br>
+          Precio actual: $ ${fmt(info.precio_actual)} (margen ${margenAct.toFixed(0)}%)<br>
+          Precio sugerido: $ ${fmt(info.precio_sugerido)}<br>
           <label style="margin-top:8px"><input type="checkbox" id="chk-precio" checked>
           Actualizar el precio de venta</label>
         </div>`;
@@ -806,12 +991,35 @@ $("costo").addEventListener("change", async () => {
       });
       nuevoPrecioVenta = info.precio_sugerido;
     } else if (info.direccion === "bajo") {
-      div.innerHTML = `<div class="aviso">
-          El costo bajó a $ ${costo.toFixed(2)}. Precio sugerido:
-          $ ${info.precio_sugerido.toFixed(2)} (queda igual si no lo tildás).<br>
-          <label style="margin-top:8px"><input type="checkbox" id="chk-precio">
-          Actualizar el precio de venta</label>
+      // El sugerido sale del margen del rubro, no de "bajar lo mismo que
+      // bajó el costo" — puede terminar siendo MAYOR que el actual.
+      // Mismo criterio que en la PC: se avisa "subir" o "bajar" según
+      // corresponda de verdad, no se asume.
+      const verbo = info.precio_sugerido > info.precio_actual ? "Subir" : "Bajar";
+      let html = `<div class="aviso">
+          <b>El costo bajó</b><br>
+          $ ${fmt(info.costo_anterior)} → $ ${fmt(costo)}<br><br>
+          Dejarlo como está: $ ${fmt(info.precio_actual)}
+          (margen ${info.margen_si_no_toca.toFixed(0)}%)<br>
+          ${verbo}lo a: $ ${fmt(info.precio_sugerido)}
+          (margen ${info.margen_sugerido.toFixed(0)}%)`;
+      if (info.stock_viejo > 0) {
+        html += `<br><br>Te quedan ${info.stock_viejo} unidad(es) compradas
+          al costo viejo ($ ${fmt(info.costo_anterior)}).`;
+        if (info.bajo_costo_viejo) {
+          const total = info.perdida_por_unidad * info.stock_viejo;
+          html += `<br>⚠ El precio nuevo queda POR DEBAJO de ese costo viejo:
+            perderías $ ${fmt(info.perdida_por_unidad)} por unidad hasta
+            agotarlo ($ ${fmt(total)} en total).`;
+        } else {
+          html += `<br>Esas unidades se venderían con el margen nuevo,
+            no con el que tenían.`;
+        }
+      }
+      html += `<br><br><label><input type="checkbox" id="chk-precio">
+          ${verbo} el precio a $ ${fmt(info.precio_sugerido)}</label>
         </div>`;
+      div.innerHTML = html;
       $("chk-precio").addEventListener("change", (e) => {
         nuevoPrecioVenta = e.target.checked ? info.precio_sugerido : null;
       });
@@ -820,6 +1028,9 @@ $("costo").addEventListener("change", async () => {
 });
 
 $("btn-guardar").addEventListener("click", async () => {
+  const boton = $("btn-guardar");
+  if (boton.disabled) return;   // evita doble envio con doble tap
+  boton.disabled = true;
   const resultado = $("resultado");
   resultado.innerHTML = "";
   const payload = {
@@ -827,6 +1038,7 @@ $("btn-guardar").addEventListener("click", async () => {
     cantidad: $("cantidad").value,
     costo: $("costo").value,
     vencimiento: $("vencimiento").value.trim(),
+    proveedor_id: $("proveedor").value || null,
     notas: $("notas").value.trim(),
     nuevo_precio_venta: nuevoPrecioVenta,
   };
@@ -843,7 +1055,9 @@ $("btn-guardar").addEventListener("click", async () => {
     });
     resultado.innerHTML = `<div class="card" style="background:#dcfce7">
         ✅ Ingreso registrado.</div>`;
-    // Limpiar para cargar el siguiente producto
+    // Limpiar para cargar el siguiente producto (el proveedor queda
+    // como estaba: si entran varios productos del mismo remito seguido,
+    // no tiene sentido hacerte elegirlo de nuevo cada vez)
     ["codigo","cantidad","costo","vencimiento","notas","descripcion","precio"]
       .forEach(id => $(id).value = "");
     $("card-datos").classList.add("oculto");
@@ -851,6 +1065,8 @@ $("btn-guardar").addEventListener("click", async () => {
     $("codigo").focus();
   } catch (e) {
     resultado.innerHTML = `<div class="error">${e.message}</div>`;
+  } finally {
+    boton.disabled = false;
   }
 });
 

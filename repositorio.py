@@ -1798,6 +1798,49 @@ def borrar_promo_grupo(gid):
         conn.commit()
 
 
+def margen_promo_grupo(producto_ids: list, cantidad_minima: int,
+                       valor: float, tipo: str = "precio_total") -> dict:
+    """Rango de costo/margen de un combo, para mostrarlo ANTES de guardar.
+
+    Como el cliente puede mezclar cualquier producto del grupo, el costo
+    real de "cantidad_minima" unidades varia segun que se lleve: en el
+    peor caso el combo se arma solo con lo mas caro del grupo, en el
+    mejor caso solo con lo mas barato. Por eso se devuelve un rango
+    (margen_min/margen_max), nunca un numero unico que prometa una
+    precision que no existe.
+
+    Solo tiene sentido para "precio_total" (precio fijo de TODO el combo)
+    y "precio_fijo" (precio fijo por unidad, o sea valor*cantidad_minima
+    el total). Para descuentos en % o en $ no hay un "precio total" fijo
+    independiente de que productos entren, asi que devuelve {}.
+    """
+    costos = [costo_real_producto(pid) for pid in producto_ids]
+    costos = [c for c in costos if c > 0]
+    if not costos:
+        return {}
+    n = int(cantidad_minima)
+
+    if tipo == "precio_total":
+        precio_total = float(valor)
+    elif tipo == "precio_fijo":
+        precio_total = float(valor) * n
+    else:
+        return {}
+
+    costo_total_min = min(costos) * n   # combo armado con lo mas barato
+    costo_total_max = max(costos) * n   # combo armado con lo mas caro
+    return {
+        "costo_min": costo_total_min,
+        "costo_max": costo_total_max,
+        "margen_min": precio_total - costo_total_max,
+        "margen_max": precio_total - costo_total_min,
+        "pct_min": ((precio_total - costo_total_max) / precio_total * 100)
+                   if precio_total else 0.0,
+        "pct_max": ((precio_total - costo_total_min) / precio_total * 100)
+                   if precio_total else 0.0,
+    }
+
+
 def aplicar_promos_combinables(carrito: list) -> list:
     """Aplica las promos de grupo al carrito y devuelve los avisos.
 
@@ -1836,6 +1879,13 @@ def aplicar_promos_combinables(carrito: list) -> list:
                 # grupo mezcla precios distintos: un precio fijo unico
                 # dejaria sin descuento a lo barato y regalaria lo caro.
                 nuevo = max(0.0, base - float(g["valor"]))
+            elif g["tipo"] == "precio_total":
+                # "Llevando el combo pagas $X en total": se reparte como
+                # precio por unidad (valor / cantidad_minima) y se aplica
+                # igual que precio_fijo a las unidades del grupo que haya
+                # en el carrito una vez alcanzado el minimo.
+                nuevo = (float(g["valor"]) / g["cantidad_minima"]
+                         if g["cantidad_minima"] else 0.0)
             else:
                 nuevo = float(g["valor"])
             # Nunca se sube el precio: si el producto ya estaba mas barato
@@ -1874,6 +1924,227 @@ def promo_grupo_faltante(carrito: list) -> list:
         if 0 < falta <= 2 and total > 0:
             out.append({"nombre": g["nombre"], "falta": falta,
                         "cantidad_minima": g["cantidad_minima"]})
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROMOS COMBO POR CATEGORÍAS — "1 de estos jabones + 1 de estos suavizantes"
+# ─────────────────────────────────────────────────────────────────────────────
+
+def guardar_promo_combo(cid, nombre, valor, slots: list,
+                        fecha_desde=None, fecha_hasta=None,
+                        activa=True) -> int:
+    """Crea o edita un combo por pasos.
+
+    `slots` es una lista de {"nombre", "cantidad", "producto_ids"}, uno
+    por cada "paso" del combo (ej: paso 1 = jabones, paso 2 = suavizantes).
+    El orden de la lista es el orden en que se muestra.
+    """
+    if len(slots) < 2:
+        raise ValueError("Un combo necesita al menos 2 pasos "
+                         "(ej: jabones + suavizantes).")
+    for s in slots:
+        if not s["nombre"].strip():
+            raise ValueError("Todos los pasos necesitan un nombre.")
+        if int(s["cantidad"]) < 1:
+            raise ValueError(f"«{s['nombre']}»: la cantidad tiene que ser "
+                             "1 o más.")
+        if len(s["producto_ids"]) < 1:
+            raise ValueError(f"«{s['nombre']}»: elegí al menos 1 producto.")
+    if float(valor) <= 0:
+        raise ValueError("El precio del combo tiene que ser mayor a 0.")
+
+    with get_connection() as conn:
+        if cid:
+            conn.execute("""
+                UPDATE promo_combos
+                   SET nombre=?, valor=?, fecha_desde=?, fecha_hasta=?,
+                       activa=?
+                 WHERE id=?
+            """, (nombre.strip(), float(valor), fecha_desde, fecha_hasta,
+                  int(bool(activa)), cid))
+            # Se recrean los pasos enteros: mas simple y seguro que tratar
+            # de calzar los viejos contra los nuevos (pueden cambiar de
+            # nombre, cantidad Y productos a la vez).
+            conn.execute("""
+                DELETE FROM promo_combo_slots WHERE combo_id=?
+            """, (cid,))
+        else:
+            cur = conn.execute("""
+                INSERT INTO promo_combos
+                    (nombre, valor, fecha_desde, fecha_hasta, activa)
+                VALUES (?,?,?,?,?)
+            """, (nombre.strip(), float(valor), fecha_desde, fecha_hasta,
+                  int(bool(activa))))
+            cid = cur.lastrowid
+
+        for orden, s in enumerate(slots):
+            cur = conn.execute("""
+                INSERT INTO promo_combo_slots (combo_id, orden, nombre, cantidad)
+                VALUES (?,?,?,?)
+            """, (cid, orden, s["nombre"].strip(), int(s["cantidad"])))
+            slot_id = cur.lastrowid
+            for pid in s["producto_ids"]:
+                conn.execute("""
+                    INSERT OR IGNORE INTO promo_combo_slot_items
+                        (slot_id, producto_id) VALUES (?,?)
+                """, (slot_id, int(pid)))
+        conn.commit()
+    return cid
+
+
+def get_promo_combos(solo_activos=False) -> list:
+    cond = "WHERE activa = 1" if solo_activos else ""
+    with get_connection() as conn:
+        combos = [dict(r) for r in conn.execute(
+            f"SELECT * FROM promo_combos {cond} ORDER BY nombre").fetchall()]
+        for c in combos:
+            slots = [dict(r) for r in conn.execute("""
+                SELECT id, nombre, cantidad
+                FROM promo_combo_slots
+                WHERE combo_id = ?
+                ORDER BY orden, id
+            """, (c["id"],)).fetchall()]
+            for s in slots:
+                s["productos"] = [dict(r) for r in conn.execute("""
+                    SELECT p.id, p.descripcion, p.codigo, p.precio_base
+                    FROM promo_combo_slot_items i
+                    JOIN productos p ON p.id = i.producto_id
+                    WHERE i.slot_id = ?
+                    ORDER BY p.descripcion
+                """, (s["id"],)).fetchall()]
+            c["slots"] = slots
+    return combos
+
+
+def borrar_promo_combo(cid):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM promo_combos WHERE id=?", (cid,))
+        conn.commit()
+
+
+def margen_promo_combo(slots: list, valor: float) -> dict:
+    """Rango de costo/margen de un combo por pasos, para el alta.
+
+    Cada paso puede resolverse con cualquiera de sus productos, asi que
+    el costo real depende de que elija el cliente en cada paso: el peor
+    caso toma lo mas caro de CADA paso, el mejor caso lo mas barato de
+    CADA paso. `slots` es la misma lista que recibe guardar_promo_combo
+    (necesita "cantidad" y "producto_ids").
+    """
+    costo_min_total = 0.0
+    costo_max_total = 0.0
+    for s in slots:
+        costos = [costo_real_producto(pid) for pid in s["producto_ids"]]
+        costos = [c for c in costos if c > 0]
+        if not costos:
+            continue
+        cant = int(s["cantidad"])
+        costo_min_total += min(costos) * cant
+        costo_max_total += max(costos) * cant
+    if costo_min_total == 0 and costo_max_total == 0:
+        return {}
+    valor = float(valor)
+    return {
+        "costo_min": costo_min_total, "costo_max": costo_max_total,
+        "margen_min": valor - costo_max_total,
+        "margen_max": valor - costo_min_total,
+        "pct_min": ((valor - costo_max_total) / valor * 100) if valor else 0.0,
+        "pct_max": ((valor - costo_min_total) / valor * 100) if valor else 0.0,
+    }
+
+
+def aplicar_promos_combo(carrito: list) -> list:
+    """Aplica los combos por pasos al carrito. Modifica en el lugar.
+
+    Por cada combo, se fija cuantas veces se completa (el minimo entre
+    todos los pasos de "unidades disponibles / cantidad exigida"). El
+    precio del combo se reparte entre los pasos proporcional al precio
+    de lista de lo que hay puesto en cada paso, para que cada producto
+    se lleve una parte justa.
+
+    Igual que en promo_grupos: una vez que un paso califica, el precio
+    de combo se aplica a TODA la cantidad de los productos de ese paso
+    presentes en el carrito (no solo a la cantidad minima exigida) — es
+    la misma simplificacion ya usada en aplicar_promos_combinables, para
+    no tener que partir renglones del carrito en dos.
+    """
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    combos = [c for c in get_promo_combos(solo_activos=True)
+              if (not c["fecha_desde"] or c["fecha_desde"] <= hoy)
+              and (not c["fecha_hasta"] or c["fecha_hasta"] >= hoy)]
+    if not combos:
+        return []
+
+    avisos = []
+    for c in combos:
+        info_slots = []
+        veces = None
+        for s in c["slots"]:
+            ids = {p["id"] for p in s["productos"]}
+            items = [i for i in carrito
+                     if i.get("producto_id") in ids
+                     and not i.get("_promo_combo")]
+            disponible = sum(i["cantidad"] for i in items)
+            v = int(disponible // s["cantidad"]) if s["cantidad"] else 0
+            info_slots.append((s, items, disponible))
+            veces = v if veces is None else min(veces, v)
+        if not veces:
+            continue
+
+        # Cuanto "pesa" en precio de lista una unidad de cada paso, para
+        # repartir el precio del combo de forma proporcional.
+        peso_slots = []
+        for s, items, disponible in info_slots:
+            valor_lista = sum(float(i["precio_unitario"]) * i["cantidad"]
+                              for i in items)
+            precio_prom = valor_lista / disponible if disponible else 0.0
+            peso_slots.append(precio_prom * s["cantidad"])
+        peso_total = sum(peso_slots)
+        if peso_total <= 0:
+            continue
+
+        ahorro = 0.0
+        valor_combo_total = float(c["valor"]) * veces
+        for (s, items, disponible), peso in zip(info_slots, peso_slots):
+            parte = valor_combo_total * (peso / peso_total)
+            nuevo = parte / (s["cantidad"] * veces)
+            for i in items:
+                base = float(i["precio_unitario"])
+                if nuevo >= base:
+                    continue
+                ahorro += (base - nuevo) * i["cantidad"]
+                i["precio_unitario"] = nuevo
+                i["subtotal"] = nuevo * i["cantidad"]
+                i["promo_aplicada"] = True
+                i["_promo_combo"] = c["id"]
+
+        if ahorro > 0:
+            avisos.append(f"{c['nombre']} x{veces} — ahorra $ {ahorro:,.2f}")
+    return avisos
+
+
+def combo_faltante(carrito: list) -> list:
+    """Combos a los que les falta un paso (o poco de un paso) para entrar."""
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    out = []
+    for c in get_promo_combos(solo_activos=True):
+        if c["fecha_desde"] and c["fecha_desde"] > hoy:
+            continue
+        if c["fecha_hasta"] and c["fecha_hasta"] < hoy:
+            continue
+        faltantes = []
+        algo_en_carrito = False
+        for s in c["slots"]:
+            ids = {p["id"] for p in s["productos"]}
+            total = sum(i["cantidad"] for i in carrito
+                       if i.get("producto_id") in ids)
+            if total > 0:
+                algo_en_carrito = True
+            if total < s["cantidad"]:
+                faltantes.append(s["nombre"])
+        if algo_en_carrito and 0 < len(faltantes) <= 2:
+            out.append({"nombre": c["nombre"], "pasos_faltantes": faltantes})
     return out
 
 

@@ -360,6 +360,7 @@ class AppTPV(tk.Tk):
         from ingreso_ui   import IngresoUI
         from auditoria_ui import AuditoriaUI, OfertasUI
         from promos_grupo_ui import PromosGrupoUI
+        from promos_combo_ui import PromosComboUI
         from revision_ui import RevisionUI
         from reposicion_ui import ReposicionUI
         from compras_ui import ComprasUI
@@ -379,6 +380,7 @@ class AppTPV(tk.Tk):
             ("  Auditoria ",  AuditoriaUI),
             ("  Ofertas   ",  OfertasUI),
             ("  Promos    ",  PromosGrupoUI),
+            ("  Combos    ",  PromosComboUI),
         ]:
             f = ttk.Frame(nb2)
             nb2.add(f, text=nombre)

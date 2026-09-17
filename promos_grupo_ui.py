@@ -13,7 +13,8 @@ from tkinter import ttk, messagebox
 
 from styles import C, F, btn, lbl, tabla, toast
 from repositorio import (guardar_promo_grupo, get_promo_grupos,
-                         borrar_promo_grupo, get_productos, get_categorias)
+                         borrar_promo_grupo, get_productos, get_categorias,
+                         margen_promo_grupo)
 
 
 COLS = [
@@ -86,6 +87,8 @@ class PromosGrupoUI(ttk.Frame):
                 precio = f"-{g['valor']:g}%"
             elif g["tipo"] == "descuento_monto":
                 precio = f"-$ {g['valor']:,.2f} c/u"
+            elif g["tipo"] == "precio_total":
+                precio = f"$ {g['valor']:,.2f} el combo"
             else:
                 precio = f"$ {g['valor']:,.2f} c/u"
 
@@ -195,11 +198,12 @@ class PromosGrupoUI(ttk.Frame):
 
         lbl(f2, "     Precio:", variante="suave",
             bg=C.superficie).pack(side="left")
-        _tipos = {"precio_fijo": "Precio fijo por unidad",
+        _tipos = {"precio_total": "Precio total del combo",
+                  "precio_fijo": "Precio fijo por unidad",
                   "descuento_pct": "Descuento %",
                   "descuento_monto": "Descuento en $ por unidad"}
         v_tipo = tk.StringVar(
-            value=_tipos.get(g["tipo"] if g else "", "Precio fijo por unidad"))
+            value=_tipos.get(g["tipo"] if g else "", "Precio total del combo"))
         cb_tipo = ttk.Combobox(f2, textvariable=v_tipo, width=26,
                                state="readonly",
                                values=tuple(_tipos.values()))
@@ -208,6 +212,58 @@ class PromosGrupoUI(ttk.Frame):
         tk.Entry(f2, textvariable=v_valor, font=F.subtitulo, width=10,
                  justify="center", bg=C.bg, fg=C.texto, relief="solid",
                  bd=1).pack(side="left", ipady=3)
+
+        lbl(f2, "", variante="suave", bg=C.superficie).pack(side="left")
+        lbl_ayuda_valor = lbl(datos, "", variante="suave", bg=C.superficie)
+        lbl_ayuda_valor.pack(anchor="w", pady=(2, 0))
+
+        lbl_margen = lbl(datos, "", variante="suave", bg=C.superficie)
+        lbl_margen.pack(anchor="w", pady=(4, 0))
+
+        def _actualizar_margen(*_a):
+            tipo_actual = {v: k for k, v in _tipos.items()}.get(
+                v_tipo.get(), "precio_total")
+            if tipo_actual == "precio_total":
+                lbl_ayuda_valor.config(
+                    text="Precio total a pagar llevando la cantidad de "
+                         "arriba (mezclando lo que sea del grupo).")
+            elif tipo_actual == "precio_fijo":
+                lbl_ayuda_valor.config(text="Precio por cada unidad.")
+            else:
+                lbl_ayuda_valor.config(text="")
+
+            try:
+                valor = float(v_valor.get().replace(",", "."))
+                minimo = int(v_min.get())
+            except ValueError:
+                lbl_margen.config(text="")
+                return
+            if len(marcados) < 2 or valor <= 0 or minimo < 2:
+                lbl_margen.config(text="")
+                return
+            m = margen_promo_grupo(list(marcados), minimo, valor,
+                                   tipo_actual)
+            if not m:
+                lbl_margen.config(
+                    text="(el margen no se puede estimar para este tipo "
+                         "de descuento, o falta costo cargado en los "
+                         "productos)")
+                return
+            if abs(m["margen_min"] - m["margen_max"]) < 0.01:
+                lbl_margen.config(
+                    text=f"Margen del combo: $ {m['margen_min']:,.2f} "
+                         f"({m['pct_min']:.1f}%)",
+                    fg=(C.exito if m["margen_min"] >= 0 else C.peligro))
+            else:
+                lbl_margen.config(
+                    text=f"Margen del combo (según qué se lleve): de "
+                         f"$ {m['margen_min']:,.2f} ({m['pct_min']:.1f}%) "
+                         f"a $ {m['margen_max']:,.2f} ({m['pct_max']:.1f}%)",
+                    fg=(C.exito if m["margen_min"] >= 0 else C.advertencia))
+
+        v_valor.trace_add("write", lambda *a: _actualizar_margen())
+        v_min.trace_add("write", lambda *a: _actualizar_margen())
+        cb_tipo.bind("<<ComboboxSelected>>", _actualizar_margen)
 
         f3 = tk.Frame(datos, bg=C.superficie)
         f3.pack(fill="x", pady=(10, 0))
@@ -288,6 +344,7 @@ class PromosGrupoUI(ttk.Frame):
                 text=(f"{n} producto(s) en el grupo"
                       if n >= 2
                       else "Elegí al menos 2 productos"))
+            _actualizar_margen()
 
         def _click(ev):
             iid = tv.identify_row(ev.y)
@@ -381,4 +438,5 @@ class PromosGrupoUI(ttk.Frame):
             comando=d.destroy).pack(side="left")
 
         cargar()
+        _actualizar_margen()
         e_nom.focus_set()

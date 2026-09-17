@@ -146,6 +146,52 @@ def inicializar_db():
     """)
 
     # ─────────────────────────────────────────
+    # PROMOS COMBO POR CATEGORÍAS
+    # "1 de estos 5 jabones en polvo + 1 de estos suavizantes = $X".
+    # A diferencia de promo_grupos (unidades intercambiables de UN pool),
+    # acá hay varios "pasos" (slots) y hay que llevar la cantidad exigida
+    # de CADA paso — cada paso tiene su propio pool de productos válidos.
+    # ─────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS promo_combos (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre          TEXT NOT NULL,
+            valor           REAL NOT NULL,
+                            -- precio total del combo completo
+            fecha_desde     TEXT,
+            fecha_hasta     TEXT,
+            activa          INTEGER NOT NULL DEFAULT 1,
+            creado_en       TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS promo_combo_slots (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            combo_id        INTEGER NOT NULL REFERENCES promo_combos(id) ON DELETE CASCADE,
+            orden           INTEGER NOT NULL DEFAULT 0,
+            nombre          TEXT NOT NULL,
+                            -- ej "Jabón en polvo" — lo ve el cajero
+            cantidad        INTEGER NOT NULL DEFAULT 1
+                            -- cuantas unidades de ESTE paso exige el combo
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS promo_combo_slot_items (
+            slot_id     INTEGER NOT NULL REFERENCES promo_combo_slots(id) ON DELETE CASCADE,
+            producto_id INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+            PRIMARY KEY (slot_id, producto_id)
+        )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS ix_promo_combo_slot_items_prod
+            ON promo_combo_slot_items(producto_id)
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS ix_promo_combo_slots_combo
+            ON promo_combo_slots(combo_id)
+    """)
+
+    # ─────────────────────────────────────────
     # LOTES DE STOCK (ingreso con FIFO)
     # ─────────────────────────────────────────
     c.execute("""
