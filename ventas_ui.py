@@ -1181,17 +1181,13 @@ class VentasUI(ttk.Frame):
         d.bind("<Escape>", lambda e: d.destroy())
 
     def _aplicar_promos_grupo(self):
-        """Recalcula las promos combinables Y los combos por pasos sobre
-        todo el carrito."""
+        """Recalcula las promos combinables sobre todo el carrito."""
         from repositorio import (aplicar_promos_combinables,
-                                 promo_grupo_faltante, get_precio_con_promo,
-                                 aplicar_promos_combo, combo_faltante)
+                                 promo_grupo_faltante, get_precio_con_promo)
         # Se vuelve al precio base antes de recalcular: si no, al sacar un
         # producto del carrito los demas quedarian con el precio de promo.
         for i in self.carrito:
-            tenia_promo = i.pop("_promo_grupo", None) is not None
-            tenia_combo = i.pop("_promo_combo", None) is not None
-            if tenia_promo or tenia_combo:
+            if i.pop("_promo_grupo", None) is not None:
                 pid = i.get("producto_id")
                 if pid:
                     precio, promo = get_precio_con_promo(pid, i["cantidad"])
@@ -1200,9 +1196,7 @@ class VentasUI(ttk.Frame):
                     i["promo_aplicada"] = promo
         try:
             avisos = aplicar_promos_combinables(self.carrito)
-            avisos += aplicar_promos_combo(self.carrito)
             faltan = promo_grupo_faltante(self.carrito)
-            faltan_combo = combo_faltante(self.carrito)
         except Exception:
             return
         # "Con una mas entra la promo" es una venta que se pierde solo
@@ -1211,11 +1205,6 @@ class VentasUI(ttk.Frame):
         if faltan:
             f = faltan[0]
             extra = (f"Con {f['falta']:g} más entra «{f['nombre']}»")
-            txt = f"{txt}   ·   {extra}" if txt else extra
-        elif faltan_combo:
-            fc = faltan_combo[0]
-            extra = (f"«{fc['nombre']}»: falta llevar "
-                    f"{', '.join(fc['pasos_faltantes'])}")
             txt = f"{txt}   ·   {extra}" if txt else extra
 
         # Promos del PRODUCTO (no del grupo): "llevando 3 sale $3.200".

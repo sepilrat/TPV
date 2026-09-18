@@ -276,6 +276,43 @@ class AppTPV(tk.Tk):
             bg=C.superficie).pack(side="left")
         lbl(self._header, f"  Caja #{self.sesion_id}  ", variante="badge",
             padx=8, pady=4).pack(side="right", padx=16, pady=10)
+        btn(self._header, "🧾  Venta rápida", variante="neutro",
+            comando=self._abrir_venta_rapida).pack(side="right", pady=10)
+
+    def _abrir_venta_rapida(self):
+        """Segunda ventana de venta, independiente de la principal.
+
+        Para cuando se está cargando un pedido grande y entra otro
+        cliente a comprar algo rápido — sin esto la caja quedaba
+        trabada hasta terminar el pedido grande.
+
+        Se reutiliza la MISMA ventana entre aperturas (no se recrea):
+        si quedó algo cargado sin cobrar, sigue ahí la próxima vez.
+        Comparte self.app (y por lo tanto la sesión de caja) con la
+        ventana principal, pero tiene su propio carrito — son dos
+        instancias separadas de VentasUI.
+        """
+        win = getattr(self, "_venta_rapida_win", None)
+        if win is not None and win.winfo_exists():
+            win.deiconify()
+            win.lift()
+            return
+
+        from ventas_ui import VentasUI
+        win = tk.Toplevel(self)
+        win.title("Venta rápida")
+        win.geometry("1000x650")
+        win.minsize(800, 500)
+        win.configure(bg=C.bg)
+        # withdraw, no destroy: cerrar con la X no debe cancelar los
+        # after() internos de VentasUI (vigilar foco, recargo, etc.) ni
+        # perder lo que haya cargado sin cobrar.
+        win.protocol("WM_DELETE_WINDOW", win.withdraw)
+
+        m = VentasUI(win, self)
+        m.pack(fill="both", expand=True)
+        self._venta_rapida_win = win
+        self._venta_rapida_ui = m
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
 

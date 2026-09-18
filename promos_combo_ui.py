@@ -18,6 +18,20 @@ from repositorio import (guardar_promo_combo, get_promo_combos,
                          margen_promo_combo)
 
 
+def _centrar(d, w, h):
+    """Mismo patrón ya usado en el resto del proyecto (productos_ui.py,
+    precios_ui.py, etc.): clampea el tamaño a la pantalla real y nunca
+    deja x/y negativos, para que la barra de título no quede arriba del
+    área visible (imposible de arrastrar hacia abajo)."""
+    sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+    margen = 40
+    w = min(w, sw - 20)
+    h = min(h, sh - margen)
+    x = max(0, (sw - w) // 2)
+    y = max(0, (sh - h) // 2)
+    d.geometry(f"{w}x{h}+{x}+{y}")
+
+
 COLS = [
     ("nombre", "Combo",        220, "w"),
     ("precio", "Precio",       110, "e"),
@@ -149,10 +163,7 @@ class PromosComboUI(ttk.Frame):
         d.title("Editar combo" if c else "Nuevo combo por pasos")
         d.configure(bg=C.superficie)
         d.grab_set()
-        w = 760
-        h = min(700, d.winfo_screenheight() - 80)
-        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
-        d.geometry(f"{w}x{h}+{(sw-w)//2}+{max(0,(sh-h)//2)}")
+        _centrar(d, 760, 700)
 
         lbl(d, "Combo por pasos", variante="titulo",
             bg=C.superficie).pack(anchor="w", padx=18, pady=(16, 2))
@@ -264,9 +275,7 @@ class PromosComboUI(ttk.Frame):
             e.title(f"Productos — {slot['nombre_var'].get() or 'paso'}")
             e.configure(bg=C.superficie)
             e.grab_set()
-            ew, eh = 640, min(560, e.winfo_screenheight() - 80)
-            esw, esh = e.winfo_screenwidth(), e.winfo_screenheight()
-            e.geometry(f"{ew}x{eh}+{(esw-ew)//2}+{max(0,(esh-eh)//2)}")
+            _centrar(e, 640, 560)
 
             filtro = tk.Frame(e, bg=C.superficie)
             filtro.pack(fill="x", padx=14, pady=(14, 6))
@@ -286,6 +295,14 @@ class PromosComboUI(ttk.Frame):
                     ("desc", "Producto", 280, "w"),
                     ("cat", "Categoría", 130, "w"),
                     ("precio", "Precio", 90, "e")]
+
+            # El pie va ANCLADO ABAJO y ANTES que la tabla en el pack: si
+            # no, con muchos productos la tabla empuja "Listo"/"Cancelar"
+            # fuera de la ventana y quedan invisibles (bug real ya visto
+            # y corregido en el resto del proyecto con este mismo patrón).
+            pie_e = tk.Frame(e, bg=C.superficie)
+            pie_e.pack(side="bottom", fill="x", pady=10)
+
             frame_t, tv = tabla(e, cols, altura=13)
             frame_t.pack(fill="both", expand=True, padx=14)
 
@@ -324,9 +341,6 @@ class PromosComboUI(ttk.Frame):
             tv.bind("<Button-1>", _click)
             cb.bind("<<ComboboxSelected>>", cargar)
             v_busq.trace_add("write", lambda *a: cargar())
-
-            pie_e = tk.Frame(e, bg=C.superficie)
-            pie_e.pack(fill="x", pady=10)
 
             def _guardar_sel():
                 slot["producto_ids"] = marcados
