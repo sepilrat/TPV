@@ -612,7 +612,7 @@ def stock_bajo_umbral(umbral=None) -> list:
 
 
 def get_reposicion(dias_historial=30, dias_cobertura=14,
-                   solo_faltantes=True) -> list:
+                   solo_faltantes=True, categoria_id=None) -> list:
     """Que comprar, calculado por velocidad de venta y no por un umbral fijo.
 
     "Stock bajo" con un numero fijo para todo el catalogo no sirve: 5
@@ -648,7 +648,8 @@ def get_reposicion(dias_historial=30, dias_cobertura=14,
             LEFT JOIN categorias c ON c.id = p.categoria_id
             WHERE COALESCE(p.activo, 1) = 1
               AND COALESCE(p.ignorar_alerta, 0) = 0
-        """, (desde,)).fetchall()]
+              AND (? IS NULL OR p.categoria_id = ?)
+        """, (desde, categoria_id, categoria_id)).fetchall()]
 
     salida = []
     for f in filas:
@@ -1113,7 +1114,7 @@ def registrar_lote(producto_id, proveedor_id, cantidad,
 VENCIDOS_HACIA_ATRAS = 60
 
 
-def get_vencimientos_proximos(dias=None) -> list:
+def get_vencimientos_proximos(dias=None, categoria_id=None) -> list:
     """Lotes por vencer, respetando los dias de aviso de CADA producto.
 
     El anticipo que necesita cada cosa es distinto: un yogur hay que
@@ -1153,9 +1154,10 @@ def get_vencimientos_proximos(dias=None) -> list:
             WHERE l.fecha_vencimiento BETWEEN ? AND ?
               AND l.cantidad_restante > 0
               AND COALESCE(p.activo, 1) = 1
+              AND (? IS NULL OR p.categoria_id = ?)
             GROUP BY p.id, l.fecha_vencimiento
             ORDER BY l.fecha_vencimiento
-        """, (desde, hasta)).fetchall()]
+        """, (desde, hasta, categoria_id, categoria_id)).fetchall()]
 
     hoy_d = datetime.now().date()
     salida = []
@@ -4081,6 +4083,38 @@ def get_ventas_por_dia_semana(desde, hasta) -> list:
     return salida[1:] + salida[:1]
 
 
+def get_ventas_por_dia_mes(desde, hasta) -> list:
+    """Ventas por dia del mes (1 a 31), promediado por jornada.
+
+    Sirve para ver patrones de cobro (fin de mes, quincena, jubilados a
+    principio de mes) que el dia de la semana no muestra. El 29/30/31
+    aparecen menos veces que el resto en cualquier periodo (no todos los
+    meses los tienen), asi que se promedia por jornada igual que en
+    get_ventas_por_dia_semana -- si no, esos dias siempre parecerian
+    los que menos venden solo por aparecer menos veces.
+    """
+    with get_connection() as conn:
+        filas = {int(r["d"]): dict(r) for r in conn.execute("""
+            SELECT CAST(strftime('%d', fecha) AS INTEGER) as d,
+                   COUNT(*) as tickets,
+                   COALESCE(SUM(total), 0) as facturado,
+                   COUNT(DISTINCT date(fecha)) as dias_contados
+            FROM ventas
+            WHERE date(fecha) BETWEEN ? AND ? AND anulada = 0
+            GROUP BY d
+        """, (desde, hasta)).fetchall()}
+    salida = []
+    for d in range(1, 32):
+        f = filas.get(d, {"tickets": 0, "facturado": 0.0, "dias_contados": 0})
+        n = f.get("dias_contados") or 0
+        salida.append({
+            "dia": d, "tickets": f["tickets"],
+            "facturado": f["facturado"], "dias_contados": n,
+            "promedio_dia": (f["facturado"] / n) if n else 0.0,
+        })
+    return salida
+
+
 def productos_que_se_venden_juntos(desde, hasta, minimo_tickets=5,
                                    limite=40) -> dict:
     """Que productos aparecen en el MISMO ticket.
@@ -4309,6 +4343,18 @@ def buscar_clientes(texto: str) -> list:
         """, (f"%{t}%", f"%{solo_num}%")).fetchall()]
 
 
+def get_cliente_por_id(cid: int) -> dict | None:
+    """Busca cliente por id. Retorna dict con saldo incluido o None."""
+    with get_connection() as conn:
+        row = conn.execute("""
+            SELECT c.*, COALESCE(cc.saldo_actual, 0) as saldo_actual
+            FROM clientes c
+            LEFT JOIN cuentas_corrientes cc ON cc.cliente_id = c.id
+            WHERE c.id = ? AND c.activo = 1
+        """, (cid,)).fetchone()
+        return dict(row) if row else None
+
+
 def crear_cliente(dni, nombre, telefono, tope_credito) -> dict:
     """Crea cliente y su cuenta corriente. Retorna el cliente completo."""
     with get_connection() as conn:
@@ -4321,7 +4367,11 @@ def crear_cliente(dni, nombre, telefono, tope_credito) -> dict:
             "INSERT INTO cuentas_corrientes (cliente_id, saldo_actual) VALUES (?,0)",
             (cid,))
         conn.commit()
-    return get_cliente_por_dni(dni)
+    # Se busca por ID, no por DNI: con DNI vacío/opcional, "dni = NULL" no
+    # matchea nunca en SQL (ni con el propio registro recien creado), asi
+    # que devolvia None pese a haberse guardado bien -- la pantalla se
+    # quedaba sin cliente para seguir y parecia que el alta no avanzaba.
+    return get_cliente_por_id(cid)
 
 
 def actualizar_cliente(cid, nombre, telefono, tope_credito):

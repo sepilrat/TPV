@@ -650,6 +650,36 @@ def inicializar_db():
         except Exception:
             pass  # Columna ya existe
 
+    # ── Migración: clientes.dni era NOT NULL, y el alta ya permitía
+    # dejarlo vacío (queda "opcional" en el formulario) ──────────────
+    # SQLite no tiene ALTER COLUMN para sacar un NOT NULL, así que hay
+    # que reconstruir la tabla. Sin esto, dar de alta un cliente sin
+    # DNI tiraba una excepción a nivel base de datos y la pantalla se
+    # quedaba trabada sin avisar nada.
+    dni_col = next((r for r in c.execute("PRAGMA table_info(clientes)")
+                    if r[1] == "dni"), None)
+    if dni_col and dni_col[3]:   # notnull == 1
+        c.execute("ALTER TABLE clientes RENAME TO clientes_old_notnull")
+        c.execute("""
+            CREATE TABLE clientes (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                dni             TEXT UNIQUE,
+                nombre          TEXT NOT NULL,
+                telefono        TEXT,
+                tope_credito    REAL DEFAULT 0.0,
+                activo          INTEGER DEFAULT 1,
+                creado_en       TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        c.execute("""
+            INSERT INTO clientes (id, dni, nombre, telefono, tope_credito,
+                                  activo, creado_en)
+            SELECT id, dni, nombre, telefono, tope_credito, activo, creado_en
+            FROM clientes_old_notnull
+        """)
+        c.execute("DROP TABLE clientes_old_notnull")
+        conn.commit()
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # TRAZABILIDAD LOTE → VENTA
@@ -677,7 +707,11 @@ def inicializar_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            dni             TEXT NOT NULL UNIQUE,
+            dni             TEXT UNIQUE,
+                            -- opcional a proposito: hay clientes de
+                            -- fiado de toda la vida sin DNI a mano.
+                            -- UNIQUE igual sirve: SQLite no choca dos
+                            -- NULL entre si.
             nombre          TEXT NOT NULL,
             telefono        TEXT,
             tope_credito    REAL DEFAULT 0.0,

@@ -11,7 +11,7 @@ Se abre desde Productos, con el producto ENTERO seleccionado.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 from styles import C, F, btn, lbl
 from repositorio import (get_productos, get_stock_producto,
@@ -147,9 +147,17 @@ def dialogo_abrir_horma(parent, producto_entero_id: int, on_ok=None):
             messagebox.showwarning("Abrir horma", "El peso no es un numero.",
                                    parent=d)
             return
+        # Sin esto quedaba SIEMPRE como "sistema" en el historial de
+        # ajustes: no es que lo haga solo, es que nadie decía quién lo
+        # hizo, y después parecía un ajuste automático sin explicación.
+        quien = simpledialog.askstring(
+            "Abrir horma", "¿Quién abre esta horma?", parent=d)
+        if not quien or not quien.strip():
+            return
         dest = _destino()
         try:
-            r = abrir_pieza_entera(producto_entero_id, dest["id"], peso)
+            r = abrir_pieza_entera(producto_entero_id, dest["id"], peso,
+                                   autorizado_por=quien.strip())
         except ValueError as exc:
             messagebox.showwarning("Abrir horma", str(exc), parent=d)
             return

@@ -351,21 +351,36 @@ class InformesUI(ttk.Frame):
     def _build_stock(self, parent):
         parent.columnconfigure(0, weight=1)
         parent.columnconfigure(1, weight=1)
-        parent.rowconfigure(1, weight=1)
+        parent.rowconfigure(2, weight=1)
+
+        # Filtro de categoría: arriba de todo, afecta a las dos tablas
+        # (se está por acabar Y vencimientos) para no tener que repetirlo.
+        f_cat = tk.Frame(parent, bg=C.bg)
+        f_cat.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        lbl(f_cat, "Categoría:", variante="suave").pack(side="left")
+        from repositorio import get_categorias
+        self._stock_cats = [{"id": None, "nombre": "Todas"}] + list(
+            get_categorias())
+        self.v_stock_cat = tk.StringVar(value="Todas")
+        cb_cat = ttk.Combobox(
+            f_cat, textvariable=self.v_stock_cat, width=22, state="readonly",
+            values=[c["nombre"] for c in self._stock_cats])
+        cb_cat.pack(side="left", padx=6)
+        cb_cat.bind("<<ComboboxSelected>>", lambda e: self._refrescar_stock())
 
         # Antes era "< 5 unidades" para todo el catálogo: 5 de algo que
         # sale 20 por día es una urgencia, y 5 de algo que sale uno por
         # mes es sobrestock. Ahora mide cuántos DÍAS dura.
         lbl(parent, "Se está por acabar (por velocidad de venta)",
             variante="subtitulo",
-            fg=C.peligro).grid(row=0, column=0, sticky="w", pady=(0,4))
+            fg=C.peligro).grid(row=1, column=0, sticky="w", pady=(0,4))
         self.lbl_stock_modo = lbl(parent, "", variante="suave")
-        self.lbl_stock_modo.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self.lbl_stock_modo.grid(row=4, column=0, sticky="w", pady=(4, 0))
         lbl(parent, "Vencimientos proximos (30 dias)", variante="subtitulo",
-            fg=C.advertencia).grid(row=0, column=1, sticky="w", pady=(0,4), padx=(8,0))
+            fg=C.advertencia).grid(row=1, column=1, sticky="w", pady=(0,4), padx=(8,0))
 
         frame_sc, self.tree_stock_critico = tabla(parent, COLS_STOCK)
-        frame_sc.grid(row=1, column=0, sticky="nsew", padx=(0,8))
+        frame_sc.grid(row=2, column=0, sticky="nsew", padx=(0,8))
         # Silenciar de a uno con 64 productos en la lista es media hora:
         # se marcan varios con Ctrl o Shift, o todos con Ctrl+A.
         self.tree_stock_critico.configure(selectmode="extended")
@@ -376,14 +391,14 @@ class InformesUI(ttk.Frame):
                                               foreground=C.texto_suave)
 
         frame_vv, self.tree_stock_vence = tabla(parent, COLS_VENCE)
-        frame_vv.grid(row=1, column=1, sticky="nsew")
+        frame_vv.grid(row=2, column=1, sticky="nsew")
         self.tree_stock_vence.tag_configure("urgente", foreground=C.peligro)
 
         # Hay productos que siempre estan "bajos" porque se reponen a
         # diario: sin poder silenciarlos, el aviso se vuelve ruido y se
         # deja de mirar.
         f_acc = tk.Frame(parent, bg=C.bg)
-        f_acc.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        f_acc.grid(row=3, column=0, sticky="w", pady=(8, 0))
         btn(f_acc, "Actualizar", variante="neutro",
             comando=self._refrescar_stock).pack(side="left")
         btn(f_acc, "☑ Seleccionar todo", variante="neutro",
@@ -392,7 +407,7 @@ class InformesUI(ttk.Frame):
             comando=self._silenciar_stock).pack(side="left", padx=6)
         btn(parent, "📧 Enviar informe por email ahora", variante="primario",
             comando=self._enviar_informe_stock).grid(
-            row=2, column=1, sticky="e", pady=(8,0))
+            row=3, column=1, sticky="e", pady=(8,0))
 
     def _enviar_informe_stock(self):
         from impresion import enviar_informe_stock
@@ -847,8 +862,14 @@ class InformesUI(ttk.Frame):
         from repositorio import get_reposicion
         for r in self.tree_stock_critico.get_children():
             self.tree_stock_critico.delete(r)
+        cat_id = None
+        if getattr(self, "v_stock_cat", None) is not None:
+            nombre = self.v_stock_cat.get()
+            cat_id = next((c["id"] for c in self._stock_cats
+                          if c["nombre"] == nombre), None)
         try:
-            todos = get_reposicion(30, 14, solo_faltantes=False)
+            todos = get_reposicion(30, 14, solo_faltantes=False,
+                                   categoria_id=cat_id)
         except Exception:
             todos = []
         try:
@@ -908,7 +929,7 @@ class InformesUI(ttk.Frame):
         for r in self.tree_stock_vence.get_children():
             self.tree_stock_vence.delete(r)
         hoy_dt = datetime.now()
-        for v in get_vencimientos_proximos(30):
+        for v in get_vencimientos_proximos(30, categoria_id=cat_id):
             dias = (datetime.strptime(v["fecha_vencimiento"], "%Y-%m-%d") - hoy_dt).days
             tags = ("urgente",) if dias <= 7 else ()
             self.tree_stock_vence.insert("", "end", values=(
@@ -935,6 +956,7 @@ def _build_cuando(self, parent):
     parent.rowconfigure(0, weight=0)
     parent.rowconfigure(1, weight=0)
     parent.rowconfigure(2, weight=1)
+    parent.rowconfigure(3, weight=0)
 
     bar, self.c_desde, self.c_hasta = self._filtro_fechas(
         parent, self._refrescar_cuando)
@@ -1021,15 +1043,40 @@ def _build_cuando(self, parent):
                             relief="flat", height=8, wrap="none")   # 7 días
     self.txt_dias.pack(fill="both", expand=True, padx=16, pady=(8, 14))
 
+    # ── Por día del mes (1 a 31) ──────────────────────────────────────
+    # Separado del día de la semana: esto es para ver si cobran sueldo o
+    # jubilación a principio/mitad de mes y ahí se vende más, algo que
+    # "qué día vendés más" (lunes a domingo) no puede mostrar.
+    abajo = card(parent)
+    abajo.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    lbl(abajo, "Qué día DEL MES vendés más", variante="subtitulo",
+        bg=C.superficie).pack(anchor="w", padx=16, pady=(12, 2))
+    lbl(abajo, "Promedio por jornada (el 31 no existe en todos los "
+               "meses). Sirve para ver si se vende más al cobrar "
+               "sueldo o jubilación.", variante="suave",
+        bg=C.superficie).pack(anchor="w", padx=16)
+    cont_m = tk.Frame(abajo, bg=C.superficie)
+    cont_m.pack(fill="both", expand=True, padx=16, pady=(8, 14))
+    self.txt_dias_mes = tk.Text(cont_m, font=F.mono, bg=C.superficie,
+                                fg=C.texto, relief="flat", height=12,
+                                wrap="none")
+    sb_m = ttk.Scrollbar(cont_m, orient="vertical",
+                         command=self.txt_dias_mes.yview)
+    self.txt_dias_mes.configure(yscrollcommand=sb_m.set)
+    self.txt_dias_mes.pack(side="left", fill="both", expand=True)
+    sb_m.pack(side="right", fill="y")
+
 
 def _refrescar_cuando(self, desde, hasta):
     from repositorio import (comparar_periodos, get_ventas_por_hora,
-                             get_ventas_por_dia_semana)
+                             get_ventas_por_dia_semana,
+                             get_ventas_por_dia_mes)
     self._cuando_rango = (desde, hasta)
     try:
         cmp_ = comparar_periodos(desde, hasta)
         horas = get_ventas_por_hora(desde, hasta)
         dias = get_ventas_por_dia_semana(desde, hasta)
+        dias_mes = get_ventas_por_dia_mes(desde, hasta)
     except Exception as exc:
         self.lbl_cmp_titulo.config(text=f"No se pudo calcular: {exc}")
         return
@@ -1096,6 +1143,23 @@ def _refrescar_cuando(self, desde, hasta):
         self.txt_dias.insert(
             "end", f"{d['dia'][:9]:<10} $ {d['promedio_dia']:>9,.0f}  {barra}\n")
     self.txt_dias.config(state="disabled")
+
+    self.txt_dias_mes.config(state="normal")
+    self.txt_dias_mes.delete("1.0", "end")
+    con_venta_m = [d for d in dias_mes if d["dias_contados"]]
+    if not con_venta_m:
+        self.txt_dias_mes.insert("end", "Sin ventas en el período.")
+    else:
+        maxm = max(d["promedio_dia"] for d in dias_mes) or 1
+        pico_m = max(con_venta_m, key=lambda x: x["promedio_dia"])
+        for d in dias_mes:
+            barra = "█" * int(d["promedio_dia"] / maxm * 22)
+            marca = "  ← pico" if d["dia"] == pico_m["dia"] else ""
+            sufijo = "" if d["dias_contados"] else "  (no cayó en el período)"
+            self.txt_dias_mes.insert(
+                "end", f"día {d['dia']:>2}   $ {d['promedio_dia']:>9,.0f}  "
+                       f"{barra}{marca}{sufijo}\n")
+    self.txt_dias_mes.config(state="disabled")
 
 
 InformesUI._build_cuando = _build_cuando

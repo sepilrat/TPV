@@ -864,10 +864,12 @@ class VentasUI(ttk.Frame):
                 promo = None
 
         if existente:
+            self.carrito.remove(existente)
             existente.update(cantidad=cant_total, precio_unitario=precio,
                              promo_aplicada=promo, subtotal=cant_total * precio)
+            self.carrito.insert(0, existente)
         else:
-            self.carrito.append(dict(
+            self.carrito.insert(0, dict(
                 producto_id=prod["id"],
                 descripcion=(f"{prod['descripcion']} — {pres['descripcion']}"
                              if pres else prod["descripcion"]),
@@ -882,7 +884,12 @@ class VentasUI(ttk.Frame):
         # agregar la tercera gaseosa, las dos anteriores tambien bajan.
         self._aplicar_promos_grupo()
         self._flash()
-        self._actualizar_tabla()
+        # Lo que se acaba de escanear (nuevo o repetido) va SIEMPRE
+        # arriba de todo: si no, con el carrito más largo que la
+        # pantalla, cada nuevo renglón se perdía más abajo y había que
+        # ir a buscarlo con scroll. Así el más reciente queda siempre a
+        # la vista de entrada, y lo viejo va quedando más abajo.
+        self._actualizar_tabla(0)
         self._actualizar_totales()
         self.foco_scanner()
 
@@ -1181,13 +1188,17 @@ class VentasUI(ttk.Frame):
         d.bind("<Escape>", lambda e: d.destroy())
 
     def _aplicar_promos_grupo(self):
-        """Recalcula las promos combinables sobre todo el carrito."""
+        """Recalcula las promos combinables Y los combos por pasos sobre
+        todo el carrito."""
         from repositorio import (aplicar_promos_combinables,
-                                 promo_grupo_faltante, get_precio_con_promo)
+                                 promo_grupo_faltante, get_precio_con_promo,
+                                 aplicar_promos_combo, combo_faltante)
         # Se vuelve al precio base antes de recalcular: si no, al sacar un
         # producto del carrito los demas quedarian con el precio de promo.
         for i in self.carrito:
-            if i.pop("_promo_grupo", None) is not None:
+            tenia_promo = i.pop("_promo_grupo", None) is not None
+            tenia_combo = i.pop("_promo_combo", None) is not None
+            if tenia_promo or tenia_combo:
                 pid = i.get("producto_id")
                 if pid:
                     precio, promo = get_precio_con_promo(pid, i["cantidad"])
@@ -1196,7 +1207,9 @@ class VentasUI(ttk.Frame):
                     i["promo_aplicada"] = promo
         try:
             avisos = aplicar_promos_combinables(self.carrito)
+            avisos += aplicar_promos_combo(self.carrito)
             faltan = promo_grupo_faltante(self.carrito)
+            faltan_combo = combo_faltante(self.carrito)
         except Exception:
             return
         # "Con una mas entra la promo" es una venta que se pierde solo
@@ -1205,6 +1218,11 @@ class VentasUI(ttk.Frame):
         if faltan:
             f = faltan[0]
             extra = (f"Con {f['falta']:g} más entra «{f['nombre']}»")
+            txt = f"{txt}   ·   {extra}" if txt else extra
+        elif faltan_combo:
+            fc = faltan_combo[0]
+            extra = (f"«{fc['nombre']}»: falta llevar "
+                    f"{', '.join(fc['pasos_faltantes'])}")
             txt = f"{txt}   ·   {extra}" if txt else extra
 
         # Promos del PRODUCTO (no del grupo): "llevando 3 sale $3.200".
@@ -1524,7 +1542,7 @@ class VentasUI(ttk.Frame):
 
     # ── Tabla ─────────────────────────────────────────────────────────────────
 
-    def _actualizar_tabla(self):
+    def _actualizar_tabla(self, foco_idx=None):
         for r in self.tree.get_children():
             self.tree.delete(r)
         # Las imagenes se guardan mientras la fila exista: si se las deja
@@ -1552,7 +1570,13 @@ class VentasUI(ttk.Frame):
             ))
         kids = self.tree.get_children()
         if kids:
-            self.tree.see(kids[-1])
+            if foco_idx is not None and 0 <= foco_idx < len(kids):
+                self.tree.see(kids[foco_idx])
+            else:
+                # Por defecto se vuelve arriba de todo: con el orden
+                # nuevo (lo mas reciente primero), es donde esta la
+                # actividad; abajo queda lo mas viejo.
+                self.tree.see(kids[0])
 
     def _texto_descuento(self, desc_pct):
         """El descuento tal como se cargó: en $ o en %."""
