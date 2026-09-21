@@ -642,6 +642,11 @@ def inicializar_db():
         # a $20.000 el kilo -> mostrar $2.000 los 100g) SIN tocar el
         # precio real de venta ni nada de lo que pasa en el mostrador.
         "ALTER TABLE productos ADD COLUMN web_fraccion_gramos INTEGER DEFAULT NULL",
+        # Para vender sin llevar cantidades (pan del día, fiambre
+        # cortado al momento): con esto en 0, descontar_stock_fifo no
+        # genera el ajuste automático en negativo por "venta sin stock
+        # registrado" — simplemente no controla ese producto.
+        "ALTER TABLE productos ADD COLUMN controla_stock INTEGER DEFAULT 1",
     ]
     for sql in migraciones:
         try:
@@ -650,35 +655,144 @@ def inicializar_db():
         except Exception:
             pass  # Columna ya existe
 
+    # ── Reparación de un intento anterior de la migración de abajo que
+    # quedó a mitad de camino (versión previa de este mismo archivo, que
+    # NO seguía el patrón de 12 pasos de SQLite): puede haber quedado
+    # una tabla "clientes_old_notnull" huérfana con OTRAS tablas
+    # (cuentas_corrientes, movimientos_cuenta, ventas...) todavía
+    # enlazadas a ELLA en vez de a "clientes". Se repara sola, una sola
+    # vez, con el mismo patrón seguro.
+    #
+    # Genérico a propósito: una version anterior de este bloque
+    # arreglaba a mano solo cuentas_corrientes y movimientos_cuenta, y
+    # se olvidó de "ventas" (que TAMBIÉN referencia a clientes) —
+    # rompió el arranque en producción. En vez de volver a adivinar
+    # cuáles son "las tablas que hacen falta", se detectan TODAS las
+    # que de verdad quedaron mal enlazadas, leyendo su propio esquema.
+    tablas_hoy = {r[0] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if "clientes_old_notnull" in tablas_hoy:
+        fk_estaban_on = c.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.commit()
+        c.execute("PRAGMA foreign_keys = OFF")
+        try:
+            c.execute("BEGIN")
+            # Por las dudas: si algun cliente quedo SOLO en la tabla
+            # vieja (no debería, pero por las dudas no se pierde).
+            cols_cli = [r[1] for r in
+                       c.execute("PRAGMA table_info(clientes_old_notnull)")]
+            cols_cli_sql = ", ".join(cols_cli)
+            c.execute(f"""
+                INSERT OR IGNORE INTO clientes ({cols_cli_sql})
+                SELECT {cols_cli_sql} FROM clientes_old_notnull
+            """)
+
+            # Se detectan TODAS las tablas cuyo esquema declarado todavía
+            # menciona "clientes_old_notnull" (no una lista fija), junto
+            # con sus índices, ANTES de tocar nada.
+            afectadas = [
+                (row[0], row[1]) for row in c.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type='table' AND sql LIKE '%clientes_old_notnull%'"
+                ).fetchall()
+                if row[0] != "clientes_old_notnull"
+            ]
+            indices_por_tabla = {}
+            for tabla, _ in afectadas:
+                indices_por_tabla[tabla] = [
+                    r[0] for r in c.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='index' "
+                        "AND tbl_name=? AND sql IS NOT NULL", (tabla,)
+                    ).fetchall()
+                ]
+
+            for tabla, sql_original in afectadas:
+                cols = [r[1] for r in c.execute(f"PRAGMA table_info({tabla})")]
+                cols_sql = ", ".join(cols)
+                sql_corregido = sql_original.replace(
+                    "clientes_old_notnull", "clientes")
+                c.execute(f"ALTER TABLE {tabla} RENAME TO {tabla}_tmp_repar")
+                c.execute(sql_corregido)   # recrea con su propio nombre y schema real
+                c.execute(f"""
+                    INSERT INTO {tabla} ({cols_sql})
+                    SELECT {cols_sql} FROM {tabla}_tmp_repar
+                """)
+                c.execute(f"DROP TABLE {tabla}_tmp_repar")
+                for idx_sql in indices_por_tabla.get(tabla, []):
+                    c.execute(idx_sql)
+
+            c.execute("DROP TABLE clientes_old_notnull")
+            violaciones = c.execute("PRAGMA foreign_key_check").fetchall()
+            if violaciones:
+                raise sqlite3.IntegrityError(
+                    f"foreign_key_check encontró {len(violaciones)} "
+                    "inconsistencias al reparar clientes_old_notnull: "
+                    f"{violaciones[:5]}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if fk_estaban_on:
+                c.execute("PRAGMA foreign_keys = ON")
+
     # ── Migración: clientes.dni era NOT NULL, y el alta ya permitía
     # dejarlo vacío (queda "opcional" en el formulario) ──────────────
     # SQLite no tiene ALTER COLUMN para sacar un NOT NULL, así que hay
-    # que reconstruir la tabla. Sin esto, dar de alta un cliente sin
-    # DNI tiraba una excepción a nivel base de datos y la pantalla se
-    # quedaba trabada sin avisar nada.
+    # que reconstruir la tabla. cuentas_corrientes y movimientos_cuenta
+    # tienen FOREIGN KEY hacia clientes, así que esto sigue AL PIE DE LA
+    # LETRA el procedimiento de 12 pasos que la propia documentación de
+    # SQLite exige para este caso exacto (sqlite.org/lang_altertable.html,
+    # "Making Other Kinds Of Table Schema Changes"). Una version anterior
+    # de esta migracion NO lo seguia -- renombraba "clientes" derecho, lo
+    # que hace que SQLite reescriba solo la referencia de las tablas hijas
+    # hacia el nombre viejo, y al borrar esa tabla vieja la base quedaba
+    # con una referencia rota y la inicializacion fallaba a mitad de
+    # camino con las cuentas corrientes ya creadas pero mal enlazadas.
+    # NUNCA MAS: cualquier migracion futura que toque una tabla con
+    # FOREIGN KEYS apuntandole tiene que usar este mismo patron.
     dni_col = next((r for r in c.execute("PRAGMA table_info(clientes)")
                     if r[1] == "dni"), None)
     if dni_col and dni_col[3]:   # notnull == 1
-        c.execute("ALTER TABLE clientes RENAME TO clientes_old_notnull")
-        c.execute("""
-            CREATE TABLE clientes (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                dni             TEXT UNIQUE,
-                nombre          TEXT NOT NULL,
-                telefono        TEXT,
-                tope_credito    REAL DEFAULT 0.0,
-                activo          INTEGER DEFAULT 1,
-                creado_en       TEXT DEFAULT (datetime('now','localtime'))
-            )
-        """)
-        c.execute("""
-            INSERT INTO clientes (id, dni, nombre, telefono, tope_credito,
-                                  activo, creado_en)
-            SELECT id, dni, nombre, telefono, tope_credito, activo, creado_en
-            FROM clientes_old_notnull
-        """)
-        c.execute("DROP TABLE clientes_old_notnull")
-        conn.commit()
+        fk_estaban_on = c.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.commit()   # no puede haber una transaccion abierta al tocar el pragma
+        c.execute("PRAGMA foreign_keys = OFF")
+        try:
+            c.execute("BEGIN")
+            c.execute("""
+                CREATE TABLE clientes_new (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dni             TEXT UNIQUE,
+                    nombre          TEXT NOT NULL,
+                    telefono        TEXT,
+                    tope_credito    REAL DEFAULT 0.0,
+                    activo          INTEGER DEFAULT 1,
+                    creado_en       TEXT DEFAULT (datetime('now','localtime'))
+                )
+            """)
+            c.execute("""
+                INSERT INTO clientes_new (id, dni, nombre, telefono,
+                                          tope_credito, activo, creado_en)
+                SELECT id, dni, nombre, telefono, tope_credito, activo,
+                      creado_en
+                FROM clientes
+            """)
+            c.execute("DROP TABLE clientes")
+            c.execute("ALTER TABLE clientes_new RENAME TO clientes")
+            # Si algo quedo mal enlazado, esto tira error ANTES del commit
+            # -- se corta a tiempo en vez de guardar una base rota.
+            violaciones = c.execute("PRAGMA foreign_key_check").fetchall()
+            if violaciones:
+                raise sqlite3.IntegrityError(
+                    f"foreign_key_check encontró {len(violaciones)} "
+                    "inconsistencias tras migrar clientes.dni")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if fk_estaban_on:
+                c.execute("PRAGMA foreign_keys = ON")
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -832,6 +946,17 @@ def descontar_stock_fifo(producto_id: int, cantidad: float,
         conn = get_connection()
 
     try:
+        # Productos sin control de stock (pan del día, fiambre cortado al
+        # momento) no generan lotes ni el ajuste automático de faltante:
+        # simplemente no se les lleva la cuenta a propósito.
+        fila_ctrl = conn.execute(
+            "SELECT COALESCE(controla_stock, 1) FROM productos WHERE id = ?",
+            (producto_id,)).fetchone()
+        if fila_ctrl and not fila_ctrl[0]:
+            if cerrar:
+                conn.close()
+            return True
+
         lotes = conn.execute("""
             SELECT id, cantidad_restante
             FROM lotes

@@ -65,6 +65,8 @@ SECCIONES = [
         ("stock_alerta_umbral",      "Umbral de stock critico (unidades)",   "int"),
         ("stock_alerta_dias_vto",    "Días de aviso por vencimiento (se puede pisar por producto)", "int"),
         ("permitir_venta_sin_stock", "Permitir vender sin stock registrado", "bool"),
+        ("ajuste_consumo_personal_sin_autorizacion",
+         "No pedir clave de responsable en ajustes por \"Consumo personal\"", "bool"),
     ]),
     ("Avisos por email", [
         # Un solo destinatario para TODOS los avisos: tenerlo repetido en

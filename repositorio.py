@@ -258,7 +258,7 @@ def actualizar_producto(pid, descripcion, codigo, categoria_id,
                         precio_base, costo_ultimo=None, margen_pct=None,
                         vendido_por_peso=0, imagen_url=None, marca=None,
                         fraccionable=None, alerta_stock_umbral=None,
-                        web_fraccion_gramos=None):
+                        web_fraccion_gramos=None, controla_stock=None):
     # El redondeo es una regla del negocio, no una accion aparte: si
     # se aplica solo en algunas pantallas, el catalogo termina mitad
     # redondeado y mitad con decimales.
@@ -286,13 +286,16 @@ def actualizar_producto(pid, descripcion, codigo, categoria_id,
                 costo_ultimo=COALESCE(?, costo_ultimo), margen_pct=?,
                 vendido_por_peso=?, imagen_url=?, marca=?,
                 fraccionable=?, alerta_stock_umbral=?, web_fraccion_gramos=?,
+                controla_stock=COALESCE(?, controla_stock),
                 modificado_en=datetime('now','localtime')
             WHERE id=?
         """, (descripcion, codigo, categoria_id, precio_base, costo_ultimo,
               margen_pct, int(bool(vendido_por_peso)), imagen_url,
               (marca or "").strip() or None,
               int(bool(fraccionable)), alerta_stock_umbral,
-              web_fraccion_gramos or None, pid))
+              web_fraccion_gramos or None,
+              None if controla_stock is None else int(bool(controla_stock)),
+              pid))
         conn.commit()
 
 

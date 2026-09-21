@@ -4,7 +4,7 @@ productos_ui.py — Gestión de productos y categorías TPV v2.0
 
 import logging
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import threading
 import os
 import sys
@@ -21,7 +21,8 @@ from repositorio import (get_productos, get_categorias, guardar_categoria,
                          diagnostico_recalculo_categoria)
 from fiado_ui import pedir_autorizacion
 
-MOTIVOS_AJUSTE = ["Merma", "Rotura", "Conteo físico", "Error de carga", "Otro"]
+MOTIVOS_AJUSTE = ["Merma", "Rotura", "Conteo físico", "Consumo personal",
+                  "Error de carga", "Otro"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers DB
@@ -442,11 +443,27 @@ class ProductosUI(ttk.Frame):
                     parent=d)
                 return
 
-            responsable = pedir_autorizacion(
-                d, f"Ajustar el stock de \"{prod['descripcion']}\" de "
-                   f"{_fmt_cant(stock_actual)} a {_fmt_cant(nueva)} unidades.")
-            if not responsable:
-                return
+            # "Consumo personal" puede tener la clave salteada desde
+            # Configuración — es un ajuste de bajo riesgo y frecuente,
+            # pedir la clave del responsable cada vez es solo trámite.
+            # El resto de los motivos (Merma, Rotura, etc.) SIEMPRE
+            # piden autorización, sin excepción.
+            from config import get as cfg_get
+            if (combo_motivo.get() == "Consumo personal"
+                    and cfg_get("ajuste_consumo_personal_sin_autorizacion",
+                                False)):
+                responsable = simpledialog.askstring(
+                    "Consumo personal", "¿Quién se lo lleva?", parent=d)
+                if not responsable or not responsable.strip():
+                    return
+                responsable = responsable.strip()
+            else:
+                responsable = pedir_autorizacion(
+                    d, f"Ajustar el stock de \"{prod['descripcion']}\" de "
+                       f"{_fmt_cant(stock_actual)} a {_fmt_cant(nueva)} "
+                       "unidades.")
+                if not responsable:
+                    return
 
             ajustar_stock(pid, nueva, combo_motivo.get(),
                          responsable, e_notas.get().strip())
@@ -1367,6 +1384,23 @@ class ProductosUI(ttk.Frame):
             selectcolor=C.superficie, font=F.normal, anchor="w")
         chk_peso.pack(fill="x", padx=20, pady=(10,0))
 
+        # Para productos que se venden sin llevar stock cargado (pan del
+        # día, fiambre cortado al momento, etc.): sin esto, cada venta sin
+        # lotes disponibles generaba un "ajuste" automático en negativo
+        # para dejar rastro del faltante -- correcto para la mayoría de
+        # los productos, pero ruido puro para el que nunca carga stock
+        # de este a propósito.
+        var_controla_stock = tk.BooleanVar(
+            value=bool(prod.get("controla_stock", True)))
+        chk_controla_stock = tk.Checkbutton(
+            s, text="Controlar stock de este producto (desmarcar para "
+                    "pan del día, fiambre cortado, etc. — se vende sin "
+                    "llevar cantidades)",
+            variable=var_controla_stock, bg=C.superficie, fg=C.texto,
+            selectcolor=C.superficie, font=F.normal, anchor="w",
+            wraplength=460, justify="left")
+        chk_controla_stock.pack(fill="x", padx=20, pady=(4,0))
+
         # Precio "por fraccion" SOLO para la web: no toca el precio real
         # de venta ni nada de lo que se cobra en el mostrador — es
         # puramente cómo se muestra en el catálogo online. Pensado para
@@ -1795,6 +1829,7 @@ class ProductosUI(ttk.Frame):
                 costo_ultimo=costo,
                 margen_pct=margen,
                 vendido_por_peso=var_peso.get(),
+                controla_stock=var_controla_stock.get(),
                 imagen_url=estado_img["url"] or None,
                 marca=entries["Marca"].get().strip(),
                 fraccionable=var_fracc.get(),

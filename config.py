@@ -65,6 +65,14 @@ DEFAULTS = {
     "stock_alerta_umbral":  5,           # unidades mínimas antes de alertar
     "stock_alerta_dias_vto": 7,          # días para alertar vencimientos
 
+    # "Consumo personal" (mercadería que el dueño se lleva para uso propio)
+    # es un ajuste habitual y de bajo riesgo, no una discrepancia a
+    # investigar — pedir la clave del responsable cada vez que se hacen
+    # varios seguidos es solo trámite. Se puede sacar ese paso puntual,
+    # sin afectar los demás motivos (Merma, Rotura, etc. siguen pidiendo
+    # autorización siempre).
+    "ajuste_consumo_personal_sin_autorizacion": False,
+
     # AVISO DIARIO por email: stock critico + vencimientos, todo junto.
     # Se manda UNA vez por dia, disparado por lo primero que ocurra de
     # los eventos tildados. Asi no depende de una tarea programada de

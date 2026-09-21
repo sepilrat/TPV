@@ -1855,7 +1855,17 @@ class VentasUI(ttk.Frame):
 
         # Mixto → popup solo con campo de monto efectivo
         elif metodo == "mixto":
-            resultado = self._dialogo_mixto(total)
+            # Si ya habías cargado el efectivo en el panel de la pantalla
+            # principal, se lo pasamos al popup para no pedírtelo de
+            # nuevo — antes siempre arrancaba vacío y había que
+            # retiparlo.
+            ef_precargado = None
+            try:
+                ef_precargado = float(
+                    self.entry_efectivo_mixto.get().replace(",", "."))
+            except (ValueError, AttributeError):
+                pass
+            resultado = self._dialogo_mixto(total, ef_precargado)
             if not resultado:
                 return self.foco_scanner()
             metodo_db  = "mixto"
@@ -2152,7 +2162,7 @@ class VentasUI(ttk.Frame):
         return result[0]
 
 
-    def _dialogo_mixto(self, total: float) -> dict | None:
+    def _dialogo_mixto(self, total: float, ef_precargado: float = None) -> dict | None:
         """Popup simple: solo pide el monto en efectivo, calcula el resto en tarjeta."""
         d = tk.Toplevel(self)
         d.title("Pago Mixto")
@@ -2188,6 +2198,10 @@ class VentasUI(ttk.Frame):
             except ValueError:
                 lbl_r.config(text="")
         e.bind("<KeyRelease>", _calc)
+        if ef_precargado:
+            e.insert(0, f"{ef_precargado:g}")
+            e.select_range(0, "end")
+            _calc()
         e.focus_set()
 
         result = [None]

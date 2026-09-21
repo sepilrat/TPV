@@ -16,7 +16,8 @@ FiadoUI: pantalla de gestión completa (clientes, cuentas, pagos)
 import tkinter as tk
 from tkinter import ttk, messagebox
 from styles import C, F, btn, lbl, card, tabla, toast, header_seccion
-from repositorio import (get_cliente_por_dni, crear_cliente, actualizar_cliente,
+from repositorio import (get_cliente_por_dni, get_cliente_por_id,
+                         crear_cliente, actualizar_cliente,
                          get_todos_clientes, get_movimientos_cliente,
                          registrar_pago_cuenta_corriente,
                          buscar_clientes_por_nombre, get_detalle_venta)
@@ -870,6 +871,14 @@ class FiadoUI(ttk.Frame):
             return
 
         cliente = self._cliente_sel
+        # Se relee fresco de la base antes de mostrar el saldo: si se
+        # hizo un pago o una venta a cuenta corriente MIENTRAS este
+        # cliente seguia elegido en la pantalla (sin volver a buscarlo),
+        # self._cliente_sel quedaba con el saldo de antes de esa
+        # operacion, aunque la lista de movimientos de abajo sí se leía
+        # de nuevo — el encabezado y la lista mostraban números de
+        # momentos distintos.
+        cliente = get_cliente_por_id(cliente["id"]) or cliente
         movs = get_movimientos_cliente(cliente["id"])
 
         d = tk.Toplevel(self)
