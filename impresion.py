@@ -469,41 +469,52 @@ def enviar_email(venta_id: int, destinatario: str) -> tuple[bool, str]:
 # INFORME DE STOCK POR EMAIL (para verlo desde el celular)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generar_html_informe_stock(productos: list, umbral: int) -> str:
-    """Arma el cuerpo HTML del informe de stock, ordenado de menor a
-    mayor cantidad (los más urgentes primero), con los críticos
-    resaltados en rojo — pensado para leerse cómodo desde el celular."""
+def generar_html_stock_bajo(bajos: list, umbral) -> str:
+    """Arma el cuerpo HTML del informe de stock bajo, agrupado por
+    categoría (un rubro atrás del otro) y, dentro de cada categoría,
+    ordenado de menor a mayor stock. Antes era una sola lista larga sin
+    ningún orden por rubro, difícil de recorrer al reponer."""
     filas = []
-    for p in productos:
-        stock_txt = _fmt_cant(p["stock"])
-        color = "#c0392b" if p["critico"] else "#222"
-        peso = " kg" if p.get("vendido_por_peso") else " u."
+    _sentinel = object()
+    _cat_actual = _sentinel
+    for x in bajos:
+        categoria = x.get("categoria") or "Sin categoría"
+        if categoria != _cat_actual:
+            if _cat_actual is not _sentinel:
+                filas.append("</table>")
+            filas.append(
+                f"<p style='font-size:13px;font-weight:bold;color:#374151;"
+                f"margin:14px 0 2px'>{categoria}</p>"
+                "<table style='border-collapse:collapse;width:100%;"
+                "max-width:500px'>"
+                "<tr style='background:#f5f5f5;text-align:left'>"
+                "<th style='padding:6px 8px'>Producto</th>"
+                "<th style='padding:6px 8px;text-align:right'>Stock</th>"
+                "<th style='padding:6px 8px;text-align:right'>Vendido 30d</th></tr>")
+            _cat_actual = categoria
+        st = x["stock"] or 0
+        color = "#c0392b" if st <= 0 else "#222"
+        peso = " kg" if x.get("vendido_por_peso") else " u."
         filas.append(
-            f'<tr style="border-bottom:1px solid #eee">'
-            f'<td style="padding:6px 8px;color:{color};font-weight:'
-            f'{"bold" if p["critico"] else "normal"}">{p["descripcion"]}</td>'
-            f'<td style="padding:6px 8px;color:#888;font-size:13px">{p["categoria"] or "—"}</td>'
-            f'<td style="padding:6px 8px;text-align:right;color:{color};'
-            f'font-weight:{"bold" if p["critico"] else "normal"}">{stock_txt}{peso}</td>'
-            f'</tr>'
-        )
-    cant_criticos = sum(1 for p in productos if p["critico"])
+            f"<tr style='border-bottom:1px solid #eee'>"
+            f"<td style='padding:6px 8px;color:{color}'>{x['descripcion']}</td>"
+            f"<td style='padding:6px 8px;text-align:right;color:{color};"
+            f"font-weight:bold'>{_fmt_cant(st)}{peso}</td>"
+            f"<td style='padding:6px 8px;text-align:right;color:#888'>"
+            f"{_fmt_cant(x.get('vendido_30d', 0))}</td></tr>")
+    if bajos:
+        filas.append("</table>")
+    cant_sin_stock = sum(1 for x in bajos if (x["stock"] or 0) <= 0)
     return f"""
     <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222">
-        <h2 style="margin-bottom:4px">Informe de stock</h2>
+        <h2 style="margin-bottom:4px">Poco stock</h2>
         <p style="color:#666;margin-top:0">
             {datetime.now().strftime('%d/%m/%Y %H:%M')} —
-            {len(productos)} producto(s), {cant_criticos} por debajo de {umbral} u.
-            (marcados en rojo)
+            {len(bajos)} producto(s) por debajo de {umbral:g} u.
+            {f', {cant_sin_stock} sin nada de stock' if cant_sin_stock else ''}
         </p>
-        <table style="border-collapse:collapse;width:100%;max-width:500px">
-            <tr style="background:#f5f5f5;text-align:left">
-                <th style="padding:6px 8px">Producto</th>
-                <th style="padding:6px 8px">Categoría</th>
-                <th style="padding:6px 8px;text-align:right">Stock</th>
-            </tr>
-            {''.join(filas)}
-        </table>
+        {''.join(filas) if bajos else
+         '<p style="color:#888">No hay productos por debajo del umbral.</p>'}
     </body></html>
     """
 
@@ -524,7 +535,7 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
     from datetime import date
-    from repositorio import get_vencimientos_proximos, get_reposicion
+    from repositorio import get_reposicion
 
     c = cfg()
     if not c.get("aviso_diario_activo"):
@@ -554,7 +565,11 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     if not forzar:
         cfg_set(_clave_envio, hoy)
 
-    vtos = get_vencimientos_proximos()
+    # Vencimientos y "poco stock" (umbral fijo) ahora son mails aparte
+    # (enviar_alerta_vencimientos y enviar_informe_stock, cada uno con
+    # su propio horario de Task Scheduler): ya no se calculan ni se
+    # muestran aca, para no duplicar informacion en dos mails distintos.
+    #
     # Reposicion por velocidad de venta, no por umbral fijo: el listado
     # de "stock bajo" daba 86 productos, la mayoria de rotacion lenta que
     # no urgian. Un mail de 86 lineas se deja de leer a la semana.
@@ -563,17 +578,6 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
     except (TypeError, ValueError):
         cob = 14
     reponer = get_reposicion(30, cob, solo_faltantes=True)
-
-    # Stock bajo por umbral fijo: get_reposicion mide velocidad de venta,
-    # asi que un producto que no se vendio en 30 dias no aparece nunca
-    # aunque tenga 1 unidad. Estos son los que se acaban sin avisar.
-    try:
-        from repositorio import stock_bajo_umbral
-        _ya = {x.get("id") for x in reponer}
-        bajos = [x for x in stock_bajo_umbral() if x["id"] not in _ya]
-    except Exception as _e:
-        logging.warning(f"No se pudo leer el stock bajo: {_e}")
-        bajos = []
 
     # Lo que piden los clientes y nunca se compro: no tiene stock que
     # medir, asi que no sale por ningun otro lado. Es justo lo que uno
@@ -675,30 +679,17 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         pedidos = []
     criticos = [r for r in reponer if r["urgencia"] in ("sin stock", "urgente")]
 
-    # Lo facturado del dia: es el dato que uno quiere ver al cerrar, y
-    # hasta ahora habia que abrir el TPV para saberlo.
-    try:
-        from repositorio import resumen_cobranzas
-        from datetime import date as _date
-        _hoy = _date.today().isoformat()
-        dia = resumen_cobranzas(_hoy, _hoy)
-    except Exception as _e:
-        logging.warning(f"No se pudo calcular lo facturado del dia: {_e}")
-        dia = None
     # El top cuenta como contenido: un mail que resume la semana sirve
     # aunque no haya nada urgente que avisar.
-    if (not vtos and not reponer and not bajos and not pedidos and not top
+    if (not reponer and not pedidos and not top
             and not bajas
-            and not revision and not any(alertas.values())
-            and not (dia and dia.get("tickets"))):
+            and not revision and not any(alertas.values())):
         if not forzar:
             cfg_set(_clave_envio, hoy)
-        return False, "Nada para avisar: sin vencimientos ni stock critico."
+        return False, "Nada para avisar: sin stock critico ni novedades."
 
 
     partes = []
-    if dia and dia.get("facturado"):
-        partes.append(f"$ {dia['facturado']:,.0f} facturado")
     if alertas.get("perdida"):
         partes.append(f"⚠ {len(alertas['perdida'])} a PÉRDIDA")
     if bajas:
@@ -707,68 +698,13 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
         partes.append(f"{len(pedidos)} pedido(s) de clientes")
     if criticos:
         partes.append(f"{len(criticos)} urgente(s) para reponer")
-    if bajos:
-        partes.append(f"{len(bajos)} con poco stock")
     elif reponer:
         partes.append(f"{len(reponer)} para reponer")
-    vencidos = [v for v in vtos if v["dias_restantes"] < 0]
-    if vtos:
-        partes.append(f"{len(vtos)} por vencer"
-                      + (f" ({len(vencidos)} VENCIDO)" if vencidos else ""))
     resumen = " · ".join(partes)
 
     html = [f"""<html><body style="font-family:Segoe UI,Arial,sans-serif">
       <h2>{c.get('negocio_nombre', 'TPV')} — aviso del dia</h2>
       <p>{resumen}</p>"""]
-
-    if vtos:
-        total = sum(v["valor_en_riesgo"] for v in vtos)
-        html.append("<h3>Por vencer</h3>"
-                    f"<p>Valor en riesgo: <b>$ {total:,.2f}</b></p>"
-                    "<table border='0' cellpadding='6' cellspacing='0' "
-                    "style='border-collapse:collapse;font-size:14px'>"
-                    "<tr style='background:#DBEAFE'><th align='left'>Producto</th>"
-                    "<th align='right'>Stock</th><th align='right'>Valor</th>"
-                    "<th align='left'>Vence</th><th align='left'>Cuando</th></tr>")
-        for v in vtos:
-            d = v["dias_restantes"]
-            if d < 0:
-                txt_vence, color = f"VENCIDO hace {-d} d", "#DC2626"
-            elif d == 0:
-                txt_vence, color = "vence HOY", "#DC2626"
-            elif d <= 2:
-                txt_vence, color = f"en {d} d", "#EA580C"
-            else:
-                txt_vence, color = f"en {d} d", "#111827"
-            html.append(f"<tr><td>{v['descripcion']}</td>"
-                        f"<td align='right'>{v['stock']:g}</td>"
-                        f"<td align='right'>$ {v['valor_en_riesgo']:,.2f}</td>"
-                        f"<td>{v['fecha_vencimiento']}</td>"
-                        f"<td style='color:{color};font-weight:bold'>{txt_vence}</td></tr>")
-        html.append("</table>")
-
-    # El resumen del dia va PRIMERO: es lo que uno abre a mirar.
-    if dia and dia.get("tickets"):
-        html.append(
-            f"<h3>Hoy</h3>"
-            f"<table border='0' cellpadding='6' cellspacing='0' "
-            f"style='border-collapse:collapse;font-size:14px'>"
-            f"<tr><td>Facturado</td><td align='right'><b>"
-            f"$ {dia['facturado']:,.2f}</b></td>"
-            f"<td style='padding-left:18px'>{dia['tickets']} ticket(s)</td></tr>"
-            f"<tr><td>Cobrado</td><td align='right'>"
-            f"$ {dia['cobrado']:,.2f}</td><td style='padding-left:18px'>"
-            f"efectivo $ {dia['efectivo']:,.2f} · tarjeta "
-            f"$ {dia['tarjeta']:,.2f} · QR $ {dia['qr']:,.2f}</td></tr>")
-        if dia.get("fiado"):
-            html.append(
-                f"<tr><td>Quedó fiado</td><td align='right' "
-                f"style='color:#B23B2E'>$ {dia['fiado']:,.2f}</td>"
-                f"<td style='padding-left:18px'>deuda total "
-                f"$ {dia['deuda_total']:,.2f}</td></tr>")
-        html.append(
-            f"<tr><td>Ganancia</td><td align='right'>"
-            f"$ {dia['ganancia']:,.2f}</td><td></td></tr></table>")
 
     _perd = alertas.get("perdida", [])
     _costo = alertas.get("al_costo", [])
@@ -1063,32 +999,6 @@ def enviar_aviso_diario(motivo: str = "", forzar: bool = False) -> tuple[bool, s
             html.append(f"<p>…y {len(reponer) - 40} mas. La lista completa "
                         f"esta en Productos → Reposicion.</p>")
 
-    if bajos:
-        _sin = sum(1 for x in bajos if (x["stock"] or 0) <= 0)
-        html.append(
-            f"<h3>Poco stock — {len(bajos)} producto(s)</h3>"
-            "<p style='font-size:13px;color:#6B7280'>Por debajo del umbral, "
-            "aunque no se hayan vendido últimamente. "
-            + (f"{_sin} sin nada de stock." if _sin else "") + "</p>"
-            "<table border='0' cellpadding='6' cellspacing='0' "
-            "style='border-collapse:collapse;font-size:14px'>"
-            "<tr style='background:#FEF3C7'><th align='left'>Producto</th>"
-            "<th align='left'>Categoría</th><th align='right'>Stock</th>"
-            "<th align='right'>Vendido 30d</th></tr>")
-        for x in bajos[:40]:
-            st = x["stock"] or 0
-            estilo = " style='color:#B23B2E'" if st <= 0 else ""
-            html.append(
-                f"<tr{estilo}><td>{x['descripcion']}</td>"
-                f"<td>{x.get('categoria') or '—'}</td>"
-                f"<td align='right'><b>{st:g}</b></td>"
-                f"<td align='right'>{x['vendido_30d']:g}</td></tr>")
-        html.append("</table>")
-        if len(bajos) > 40:
-            html.append(f"<p style='font-size:13px'>…y {len(bajos) - 40} "
-                        f"más. La lista completa está en Productos → "
-                        f"Reposición.</p>")
-
     # Listado de stock, si se pidió. Va al final: es lo mas largo y lo
     # que menos se mira, pero tenerlo evita mandar un segundo mail.
     if c.get("aviso_incluir_stock_completo"):
@@ -1264,37 +1174,38 @@ def enviar_alerta_vencimientos(destinatario: str = None,
 
 def enviar_informe_stock(destinatario: str = None) -> tuple[bool, str]:
     """
-    Genera y envía por email el informe de stock (menor a mayor
-    cantidad). Usa la config informe_stock_email_* — pensado tanto
-    para el botón manual en Informes como para el script automático
-    programado con el Task Scheduler de Windows.
+    Genera y envía por email SOLO los productos con poco stock,
+    agrupados por categoría. Usa la config informe_stock_email_* —
+    pensado tanto para el botón manual como para el script automático
+    programado con el Task Scheduler de Windows (informe_stock_email.py).
+
+    Antes mandaba el catálogo completo ordenado por stock (si
+    informe_stock_email_solo_criticos estaba en False, que es el
+    default): demasiada información para revisar de un vistazo. Ahora es
+    siempre la lista de lo que está por debajo del umbral, por rubro.
     """
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
-    from repositorio import get_informe_stock
+    from repositorio import stock_bajo_umbral
 
     c = cfg()
     if not c["email_activo"]:
         return False, "Email no configurado en Config → Email (SMTP)."
 
-    # Si el informe no tiene su propio destinatario, usa el del aviso
-    # diario: tener que cargar el mismo mail en dos lugares es la razon
-    # por la que uno queda vacio y el envio falla sin explicacion.
     # Un solo destinatario para todo: la clave vieja se sigue leyendo por
     # si quedo cargada, pero el campo unico es aviso_diario_destinatario.
     destinatario = (destinatario
                     or c.get("aviso_diario_destinatario")
                     or c.get("informe_stock_email_destinatario"))
     if not destinatario:
-        return False, "Falta el email destinatario (Config → Informe de stock)."
+        return False, "Falta el email destinatario (Config → Avisos por email)."
 
     umbral = c.get("stock_alerta_umbral", 5)
-    solo_criticos = c.get("informe_stock_email_solo_criticos", False)
-    productos = get_informe_stock(solo_criticos=solo_criticos, umbral=umbral)
+    bajos = stock_bajo_umbral(umbral)
 
-    if not productos:
-        return False, "No hay productos para incluir en el informe."
+    if not bajos:
+        return False, "No hay productos con poco stock: no se manda nada."
 
     try:
         msg = MIMEMultipart("alternative")
@@ -1304,9 +1215,10 @@ def enviar_informe_stock(destinatario: str = None) -> tuple[bool, str]:
             return False, ("No hay destinatario valido configurado. "
                            "Revisa Config → email.")
         msg["To"]      = ", ".join(_dest)
-        msg["Subject"] = f"Informe de stock — {c['negocio_nombre']} — {datetime.now().strftime('%d/%m')}"
+        msg["Subject"] = (f"Poco stock — {c['negocio_nombre']} — "
+                          f"{datetime.now().strftime('%d/%m')}")
         msg.attach(MIMEText(
-            generar_html_informe_stock(productos, umbral), "html", "utf-8"))
+            generar_html_stock_bajo(bajos, umbral), "html", "utf-8"))
 
         with smtplib.SMTP(c["email_smtp_host"], c["email_smtp_port"]) as s:
             s.starttls()
@@ -1314,10 +1226,109 @@ def enviar_informe_stock(destinatario: str = None) -> tuple[bool, str]:
             s.send_message(msg)
 
         logging.info(f"Informe de stock enviado a {destinatario} "
-                     f"({len(productos)} productos)")
+                     f"({len(bajos)} productos)")
         return True, f"Informe enviado a {destinatario}"
     except Exception as e:
         logging.error(f"Error enviando informe de stock: {e}")
+        return False, f"Error de email: {e}"
+
+
+def generar_html_facturacion(r: dict, cobros_qr: list) -> str:
+    """Cuerpo HTML del mail de facturación del día: totales por medio
+    (efectivo, QR, cuenta corriente) y el detalle de cada cobro por QR,
+    para chequearlo contra lo que la app del QR muestra como acreditado."""
+    total = r["efectivo"] + r["qr"] + r["fiado"]
+    filas_qr = []
+    for x in cobros_qr:
+        try:
+            hora = datetime.fromisoformat(str(x["fecha"])).strftime("%H:%M")
+        except ValueError:
+            hora = str(x["fecha"])[11:16]
+        filas_qr.append(
+            f"<tr style='border-bottom:1px solid #eee'>"
+            f"<td style='padding:5px 8px'>{hora}</td>"
+            f"<td style='padding:5px 8px'>#{x['venta_id']}</td>"
+            f"<td style='padding:5px 8px;text-align:right'>"
+            f"$ {x['monto_qr']:,.2f}</td></tr>")
+    sin_qr = ("<tr><td colspan='3' style='padding:6px 8px;color:#888'>"
+              "Sin cobros por QR.</td></tr>")
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+        <h2 style="margin-bottom:4px">Facturación del día</h2>
+        <p style="color:#666;margin-top:0">
+            {r['fecha']} — {r['tickets']} venta(s)</p>
+        <table style="border-collapse:collapse;margin-bottom:18px">
+            <tr><td style="padding:4px 24px 4px 0">Efectivo</td>
+                <td style="text-align:right"><b>$ {r['efectivo']:,.2f}</b></td></tr>
+            <tr><td style="padding:4px 24px 4px 0">QR</td>
+                <td style="text-align:right"><b>$ {r['qr']:,.2f}</b></td></tr>
+            <tr><td style="padding:4px 24px 4px 0">Cuenta corriente</td>
+                <td style="text-align:right"><b>$ {r['fiado']:,.2f}</b></td></tr>
+            <tr style="border-top:2px solid #ccc">
+                <td style="padding:6px 24px 4px 0"><b>Total</b></td>
+                <td style="text-align:right"><b>$ {total:,.2f}</b></td></tr>
+        </table>
+        <h3 style="margin-bottom:2px">Cobros por QR — {len(cobros_qr)}</h3>
+        <p style="color:#666;font-size:13px;margin-top:0">
+            Para chequear contra lo acreditado en la app del QR.</p>
+        <table style="border-collapse:collapse;width:100%;max-width:420px">
+            <tr style="background:#f5f5f5;text-align:left">
+                <th style="padding:5px 8px">Hora</th>
+                <th style="padding:5px 8px">Ticket</th>
+                <th style="padding:5px 8px;text-align:right">Monto</th></tr>
+            {''.join(filas_qr) or sin_qr}
+        </table>
+    </body></html>
+    """
+
+
+def enviar_email_facturacion(destinatario: str = None,
+                             fecha: str = None) -> tuple[bool, str]:
+    """Manda el mail de facturación del día (por defecto, hoy): total en
+    efectivo, QR y cuenta corriente, más la lista de cobros por QR.
+    Pensado para el Task Scheduler (informe_facturacion_email.py) y para
+    el botón "Probar los emails"."""
+    import smtplib
+    from datetime import date
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from repositorio import resumen_cobranzas, cobros_qr_del_dia
+
+    c = cfg()
+    if not c.get("email_activo"):
+        return False, "Email no configurado en Config → Email (SMTP)."
+    destinatario = (destinatario
+                    or c.get("aviso_diario_destinatario")
+                    or c.get("informe_facturacion_destinatario"))
+    if not destinatario:
+        return False, "Falta el email destinatario (Config → Avisos por email)."
+
+    fecha = fecha or date.today().isoformat()
+    r = resumen_cobranzas(fecha, fecha)
+    r["fecha"] = fecha
+    cobros_qr = cobros_qr_del_dia(fecha)
+
+    try:
+        _dest = _destinatarios(destinatario)
+        if not _dest:
+            return False, ("No hay destinatario valido configurado. "
+                           "Revisa Config → email.")
+        msg = MIMEMultipart("alternative")
+        msg["From"]    = f"{c['email_remitente']} <{c['email_usuario']}>"
+        msg["To"]      = ", ".join(_dest)
+        msg["Subject"] = (f"Facturación — {c['negocio_nombre']} — "
+                          f"{datetime.strptime(fecha, '%Y-%m-%d').strftime('%d/%m')}")
+        msg.attach(MIMEText(generar_html_facturacion(r, cobros_qr),
+                            "html", "utf-8"))
+        with smtplib.SMTP(c["email_smtp_host"], c["email_smtp_port"],
+                          timeout=20) as s:
+            s.starttls()
+            s.login(c["email_usuario"], c["email_password"])
+            s.send_message(msg)
+        logging.info(f"Facturacion del {fecha} enviada a {destinatario}")
+        return True, f"Facturación enviada a {destinatario}"
+    except Exception as e:
+        logging.error(f"Error enviando facturacion: {e}")
         return False, f"Error de email: {e}"
 
 

@@ -119,6 +119,7 @@ DEFAULTS = {
     "vto_email_activo":        False,
     "vto_email_destinatario":  "",
     "vto_email_max_por_dia":   1,        # no repetir el aviso en el mismo día
+    "vto_email_hora":          "08:30",  # HH:MM, referencia para el Task Scheduler
 
     # Redondeo de precios de venta. 0 = sin redondeo.
     # 1 = al peso, 10 = a la decena, 50 y 100 = a esos múltiplos.
@@ -147,7 +148,12 @@ DEFAULTS = {
     "informe_stock_email_activo":         False,
     "informe_stock_email_destinatario":   "",
     "informe_stock_email_hora":           "08:00",   # HH:MM, 24hs
-    "informe_stock_email_solo_criticos":  False,      # False = catálogo completo
+    "informe_stock_email_solo_criticos":  False,      # ya no se usa: el mail siempre es solo poco stock
+    # Facturacion del dia (totales por medio + cobros QR). La hora es la
+    # que se carga en el Programador de tareas de Windows.
+    "informe_facturacion_activo":         False,
+    "informe_facturacion_destinatario":   "",
+    "informe_facturacion_hora":           "21:30",
 
     # Caja
     "caja_clave_responsable": "1234",    # clave para operaciones sensibles

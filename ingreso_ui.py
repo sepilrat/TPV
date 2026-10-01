@@ -917,6 +917,74 @@ class IngresoUI(ttk.Frame):
         e.bind("<Return>", ok)
         btn(d, "Guardar", variante="primario", comando=ok).pack()
 
+    def _dialogo_precio_editable(self, titulo, cuerpo, precio_sugerido):
+        """Aviso de cambio de costo, con el precio sugerido en un campo
+        editable: se puede aceptar tal cual, escribir cualquier otro
+        precio, o dejar el que ya tenía. Antes solo daba Sí/No — o el
+        sugerido tal cual, o nada — y no había forma de cargar un
+        tercer precio propio sin cerrar esto e ir a editar el producto
+        aparte.
+
+        Devuelve el precio a aplicar (float) o None si no hay que
+        tocar el precio de venta.
+        """
+        d = tk.Toplevel(self)
+        d.title(titulo)
+        d.transient(self)
+        d.grab_set()
+        d.resizable(False, False)
+        d.configure(bg=C.superficie)
+
+        marco = tk.Frame(d, bg=C.superficie, padx=20, pady=16)
+        marco.pack(fill="both", expand=True)
+        lbl(marco, cuerpo, bg=C.superficie, justify="left").pack(anchor="w")
+
+        fila = tk.Frame(marco, bg=C.superficie)
+        fila.pack(fill="x", pady=(14, 4))
+        lbl(fila, "Precio de venta:", bg=C.superficie).pack(side="left")
+        v_precio = tk.StringVar(value=f"{precio_sugerido:.2f}")
+        e_precio = tk.Entry(fila, textvariable=v_precio, font=F.normal,
+                            width=12, justify="right", relief="solid",
+                            bd=1, bg=C.bg, fg=C.texto)
+        e_precio.pack(side="left", padx=8, ipady=4)
+        e_precio.select_range(0, "end")
+        e_precio.focus_set()
+
+        resultado = {"precio": None}
+
+        def _aplicar():
+            try:
+                p = float(v_precio.get().replace(",", "."))
+                if p <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(
+                    "Precio inválido", "Poné un precio mayor a 0.",
+                    parent=d)
+                return
+            resultado["precio"] = p
+            d.destroy()
+
+        def _no_cambiar():
+            resultado["precio"] = None
+            d.destroy()
+
+        botones = tk.Frame(marco, bg=C.superficie)
+        botones.pack(fill="x", pady=(14, 0))
+        btn(botones, "No cambiar", variante="neutro",
+            comando=_no_cambiar).pack(side="right")
+        btn(botones, "Aplicar este precio", variante="primario",
+            comando=_aplicar).pack(side="right", padx=(0, 8))
+
+        d.bind("<Return>", lambda _e: _aplicar())
+        d.protocol("WM_DELETE_WINDOW", _no_cambiar)
+        d.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - d.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - d.winfo_height()) // 3
+        d.geometry(f"+{max(x,0)}+{max(y,0)}")
+        self.wait_window(d)
+        return resultado["precio"]
+
     def _guardar(self):
         codigo = self.entry_codigo.get().strip()
         if not codigo:
@@ -1025,17 +1093,14 @@ class IngresoUI(ttk.Frame):
                     != round(info["precio_actual"], 2)):
             _margen_act = ((info["precio_actual"] - costo) / costo * 100
                            if costo else 0)
-            if messagebox.askyesno(
-                    "El costo subió",
-                    f"El costo pasó de $ {info['costo_anterior']:,.2f} "
-                    f"a $ {costo:,.2f}.\n\n"
-                    f"Precio actual:    $ {info['precio_actual']:,.2f}   "
-                    f"(margen {_margen_act:.0f}%)\n"
-                    f"Precio sugerido:  $ {info['precio_sugerido']:,.2f}\n\n"
-                    f"¿Actualizo el precio de venta?\n"
-                    f"(si decís que no, se mantiene el actual)",
-                    parent=self, default="yes"):
-                nuevo_precio_venta = info["precio_sugerido"]
+            nuevo_precio_venta = self._dialogo_precio_editable(
+                "El costo subió",
+                f"El costo pasó de $ {info['costo_anterior']:,.2f} "
+                f"a $ {costo:,.2f}.\n\n"
+                f"Precio actual:    $ {info['precio_actual']:,.2f}   "
+                f"(margen {_margen_act:.0f}%)\n"
+                f"Precio sugerido:  $ {info['precio_sugerido']:,.2f}",
+                info["precio_sugerido"])
         elif (info["direccion"] == "bajo"
               and round(info["precio_sugerido"], 2) != round(info["precio_actual"], 2)):
             nuevo_precio_venta = None
@@ -1091,8 +1156,8 @@ class IngresoUI(ttk.Frame):
             titulo = ("El costo bajó — ojo con el stock viejo"
                       if info["bajo_costo_viejo"]
                       else f"El costo bajó — ¿{_verbo} el precio?")
-            if messagebox.askyesno(titulo, "\n".join(texto), parent=self):
-                nuevo_precio_venta = info["precio_sugerido"]
+            nuevo_precio_venta = self._dialogo_precio_editable(
+                titulo, "\n".join(texto[:-2]), info["precio_sugerido"])
 
         _, precio_aplicado = registrar_lote(
             prod_id, prov_id, cantidad, costo, vence, notas,

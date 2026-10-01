@@ -69,23 +69,40 @@ SECCIONES = [
          "No pedir clave de responsable en ajustes por \"Consumo personal\"", "bool"),
     ]),
     ("Avisos por email", [
-        # Un solo destinatario para TODOS los avisos: tenerlo repetido en
-        # tres secciones hacia que uno quedara vacio y el envio fallara.
+        # Un solo destinatario para TODOS los avisos (los 4 mails):
+        # tenerlo repetido en varias secciones hacia que uno quedara
+        # vacio y el envio fallara.
         ("aviso_diario_destinatario",   "Email(s) que reciben los avisos — separar con comas", "text"),
-        ("aviso_diario_activo",         "Activar el aviso diario",              "bool"),
+
+        # Aviso diario: reposicion, margenes, top de ventas, revision de
+        # datos. Se dispara solo, con el TPV abierto.
+        ("aviso_diario_activo",         "Aviso diario (reposición, márgenes, top…): activar", "bool"),
         ("aviso_diario_a_las",          "Mandarlo a una hora fija (recomendado)", "bool"),
         ("aviso_diario_hora",           "¿A qué hora?",                         "hora"),
         ("aviso_diario_dias_cobertura", "Reponer para cuántos días de venta",   "int"),
         ("aviso_diario_al_abrir_app",   "También al abrir el sistema",          "bool"),
         ("aviso_diario_al_abrir_caja",  "También al abrir la caja",             "bool"),
         ("aviso_diario_al_cerrar_caja", "También al cerrar la caja",            "bool"),
-        ("aviso_incluir_stock_completo", "Incluir el listado de stock completo", "bool"),
-        ("aviso_revisar_datos", "Incluir la revisión de datos (productos en $0, stock negativo…)", "bool"),
-        ("aviso_evolucion",      "Incluir cómo viene contra el período anterior", "bool"),
-        ("aviso_evolucion_dias", "Comparar de a cuántos días",             "int"),
-        ("aviso_cuando_vendo", "Incluir qué días y horas se vende más",  "bool"),
-        ("aviso_top_dias",     "Lo más vendido: de cuántos días (0 = histórico completo)", "int"),
-        ("aviso_top_cantidad", "Lo más vendido: cuántos productos mostrar",  "int"),
+        ("aviso_incluir_stock_completo", "Aviso diario: incluir el listado de stock completo", "bool"),
+        ("aviso_revisar_datos", "Aviso diario: incluir la revisión de datos (productos en $0, stock negativo…)", "bool"),
+        ("aviso_evolucion",      "Aviso diario: incluir cómo viene contra el período anterior", "bool"),
+        ("aviso_evolucion_dias", "Aviso diario: comparar de a cuántos días",             "int"),
+        ("aviso_cuando_vendo", "Aviso diario: incluir qué días y horas se vende más",  "bool"),
+        ("aviso_top_dias",     "Aviso diario: lo más vendido, de cuántos días (0 = histórico)", "int"),
+        ("aviso_top_cantidad", "Aviso diario: lo más vendido, cuántos productos mostrar",  "int"),
+
+        # Estos tres son mails aparte del aviso diario, cada uno con su
+        # propia tarea en el Programador de tareas de Windows (funcionan
+        # con el TPV cerrado). La hora de acá es la que hay que poner
+        # como desencadenador de esa tarea: ver el encabezado de
+        # informe_facturacion_email.py / informe_stock_email.py /
+        # informe_vencimientos_email.py.
+        ("informe_facturacion_activo", "Facturación del día: activar (mail aparte, Programador de tareas)", "bool"),
+        ("informe_facturacion_hora",   "Facturación: hora del Programador de tareas", "text"),
+        ("informe_stock_email_activo", "Poco stock por categoría: activar (mail aparte, Programador de tareas)", "bool"),
+        ("informe_stock_email_hora",   "Poco stock: hora del Programador de tareas", "text"),
+        ("vto_email_activo",           "Vencimientos: activar (mail aparte, Programador de tareas)", "bool"),
+        ("vto_email_hora",             "Vencimientos: hora del Programador de tareas", "text"),
     ]),
     ("Ingreso por celular", [
         ("movil_ingreso_activo", "Activar carga de stock desde el celular", "bool"),
@@ -609,7 +626,7 @@ class ConfigUI(ttk.Frame):
         d.title("Probar los emails")
         d.configure(bg=C.superficie)
         d.grab_set()
-        d.geometry("580x430")
+        d.geometry("720x430")
 
         tk.Label(d, text="Probar los emails", bg=C.superficie, fg=C.texto,
                  font=F.titulo, anchor="w").pack(anchor="w", padx=18,
@@ -639,7 +656,7 @@ class ConfigUI(ttk.Frame):
 
         def _aviso():
             from impresion import enviar_aviso_diario
-            _probar("Aviso diario (stock, vencimientos y ventas del día)",
+            _probar("Aviso diario (reposición, márgenes, top de ventas…)",
                     lambda: enviar_aviso_diario("PRUEBA MANUAL", forzar=True))
 
         def _vtos():
@@ -650,24 +667,31 @@ class ConfigUI(ttk.Frame):
 
         def _stock():
             from impresion import enviar_informe_stock
-            _probar("Informe de stock", enviar_informe_stock)
+            _probar("Poco stock", enviar_informe_stock)
+
+        def _factu():
+            from impresion import enviar_email_facturacion
+            _probar("Facturación del día", enviar_email_facturacion)
 
         def _todos():
             salida.delete("1.0", "end")
-            _aviso()
-            _vtos()
+            _factu()
             _stock()
+            _vtos()
+            _aviso()
             _log("\nListo. Si alguno falló, revisá la configuración de "
                  "email más arriba.")
 
         botones = tk.Frame(d, bg=C.superficie)
         botones.pack(fill="x", padx=18)
-        btn(botones, "Aviso diario", variante="neutro",
-            comando=_aviso).pack(side="left", padx=(0, 4))
+        btn(botones, "Facturación", variante="neutro",
+            comando=_factu).pack(side="left", padx=(0, 4))
+        btn(botones, "Poco stock", variante="neutro",
+            comando=_stock).pack(side="left", padx=4)
         btn(botones, "Vencimientos", variante="neutro",
             comando=_vtos).pack(side="left", padx=4)
-        btn(botones, "Informe de stock", variante="neutro",
-            comando=_stock).pack(side="left", padx=4)
+        btn(botones, "Aviso diario", variante="neutro",
+            comando=_aviso).pack(side="left", padx=4)
         btn(botones, "▶  Probar todos", variante="exito",
             comando=_todos).pack(side="left", padx=(12, 0))
 

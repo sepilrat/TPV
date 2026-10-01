@@ -134,6 +134,33 @@ class ProductosUI(ttk.Frame):
                        bg=C.bg, fg=C.texto, font=F.normal,
                        command=self._refrescar_productos).pack(side="left", padx=(16,4))
 
+        lbl(bar, "Alerta:").pack(side="left", padx=(16,6))
+        self.combo_filtro_alerta = ttk.Combobox(
+            bar, font=F.normal, width=11, state="readonly",
+            values=["(Todas)", "Activada", "Desactivada"])
+        self.combo_filtro_alerta.set("(Todas)")
+        self.combo_filtro_alerta.pack(side="left")
+        self.combo_filtro_alerta.bind(
+            "<<ComboboxSelected>>", lambda e: self._refrescar_productos())
+
+        lbl(bar, "Web:").pack(side="left", padx=(10,6))
+        self.combo_filtro_web = ttk.Combobox(
+            bar, font=F.normal, width=8, state="readonly",
+            values=["(Todas)", "Sí", "No"])
+        self.combo_filtro_web.set("(Todas)")
+        self.combo_filtro_web.pack(side="left")
+        self.combo_filtro_web.bind(
+            "<<ComboboxSelected>>", lambda e: self._refrescar_productos())
+
+        lbl(bar, "Foto:").pack(side="left", padx=(10,6))
+        self.combo_filtro_foto = ttk.Combobox(
+            bar, font=F.normal, width=10, state="readonly",
+            values=["(Todas)", "Con foto", "Sin foto"])
+        self.combo_filtro_foto.set("(Todas)")
+        self.combo_filtro_foto.pack(side="left")
+        self.combo_filtro_foto.bind(
+            "<<ComboboxSelected>>", lambda e: self._refrescar_productos())
+
         btn(bar, "Limpiar", variante="neutro",
             comando=self._limpiar_filtros).pack(side="left", padx=8)
         # Va arriba, junto a los filtros: seleccionar todo es una accion
@@ -160,7 +187,6 @@ class ProductosUI(ttk.Frame):
         self.tree_prod.bind("<Control-A>", self._seleccionar_todo_prod)
         frame_t.grid(row=1, column=0, sticky="nsew")
         self.tree_prod.bind("<Double-1>", self._editar_producto)
-        self.tree_prod.tag_configure("sin_alerta", foreground=C.texto_suave, font=("Segoe UI", 10))
         self.tree_prod.tag_configure("inactivo",   foreground=C.texto_suave,
                                      font=("Segoe UI", 10, "overstrike"))
         self.tree_prod.bind("<<TreeviewSelect>>", self._on_sel_prod)
@@ -278,12 +304,33 @@ class ProductosUI(ttk.Frame):
         self.tree_prod._thumbs = []
 
         solo_activos = not self.var_inactivos.get()
+        f_alerta = self.combo_filtro_alerta.get()
+        f_web = self.combo_filtro_web.get()
+        f_foto = self.combo_filtro_foto.get()
         for p in get_productos(filtro, cat_id, solo_activos=solo_activos):
+            sin_alerta = bool(p.get("ignorar_alerta"))
+            tiene_foto = bool(p.get("imagen_url"))
+            es_web = bool(p.get("publicar_web", 1))
+            # Filtros por alerta/web/foto: NO son un estado del producto
+            # que se vea distinto en la lista (eso confundia "esta
+            # desactivada la alerta" con "hay algo mal con este
+            # producto"). Se filtran aparte, se ven todos igual.
+            if f_alerta == "Activada" and sin_alerta:
+                continue
+            if f_alerta == "Desactivada" and not sin_alerta:
+                continue
+            if f_web == "Sí" and not es_web:
+                continue
+            if f_web == "No" and es_web:
+                continue
+            if f_foto == "Con foto" and not tiene_foto:
+                continue
+            if f_foto == "Sin foto" and tiene_foto:
+                continue
             margen = ((p["precio_base"] - p["costo_ultimo"]) / p["costo_ultimo"] * 100
                       if p["costo_ultimo"] else 0)
-            sin_alerta = bool(p.get("ignorar_alerta"))
             inactivo   = not bool(p.get("activo", 1))
-            tag = "inactivo" if inactivo else ("sin_alerta" if sin_alerta else "")
+            tag = "inactivo" if inactivo else ""
             foto = imagenes.cargar_thumbnail(p.get("imagen_url"), size=(48, 48))
             if foto:
                 self.tree_prod._thumbs.append(foto)
@@ -328,6 +375,9 @@ class ProductosUI(ttk.Frame):
     def _limpiar_filtros(self):
         self.entry_buscar.delete(0, "end")
         self.combo_filtro_cat.set("(Todas)")
+        self.combo_filtro_alerta.set("(Todas)")
+        self.combo_filtro_web.set("(Todas)")
+        self.combo_filtro_foto.set("(Todas)")
         self._refrescar_productos()
 
     # ── Selección ─────────────────────────────────────────────────────────────

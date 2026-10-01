@@ -1907,18 +1907,10 @@ class VentasUI(ttk.Frame):
             return
 
         if vid:
-            # Lo que queda fiado va a la cuenta del cliente. En un pago
-            # repartido eso NO es el total: es solo la parte no cubierta.
-            deuda = (desglose or {}).get("cta_cte") if desglose else None
-            if deuda is None and metodo_db == "cuenta_corriente":
-                deuda = total
-            if deuda and cliente_id:
-                from repositorio import actualizar_saldo_cliente
-                actualizar_saldo_cliente(
-                    cliente_id, deuda, venta_id=vid,
-                    concepto=f"Venta #{vid}"
-                            + (f" (pagó $ {total - deuda:,.2f})"
-                               if deuda < total else ""))
+            # La deuda por lo fiado ya se carga adentro de registrar_venta,
+            # en la misma transaccion que la venta, el stock y la caja
+            # (antes se hacia aca, aparte, y si esto fallaba la venta
+            # quedaba firme con el cliente sin nada cargado).
             # Sincro liviana de stock hacia la página de pedidos, en
             # segundo plano — no toca fotos, y si falla (sin internet,
             # sin URL configurada, etc.) no debe afectar la venta que

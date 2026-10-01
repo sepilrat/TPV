@@ -562,13 +562,6 @@ class PreciosUI(ttk.Frame):
         _TIPOS = {"pct": "Descuento %",
                   "monto": "Descuento en $ por unidad",
                   "fijo": "Precio fijo por unidad"}
-        lbl(s, "Desde cuántas unidades *", variante="suave",
-            bg=C.superficie).pack(padx=20, anchor="w")
-        v_cant = tk.StringVar(value="3")
-        tk.Entry(s, textvariable=v_cant, font=F.normal, bg=C.superficie,
-                 fg=C.texto, relief="solid", bd=1).pack(
-            fill="x", padx=20, ipady=5, pady=(2, 10))
-
         lbl(s, "¿Cómo se calcula? *", variante="suave",
             bg=C.superficie).pack(padx=20, anchor="w")
         v_tipo = tk.StringVar(value=_TIPOS["pct"])
@@ -576,23 +569,67 @@ class PreciosUI(ttk.Frame):
                      values=tuple(_TIPOS.values())).pack(
             fill="x", padx=20, pady=(2, 8), ipady=3)
 
-        lbl_valor = lbl(s, "Descuento % *", variante="suave", bg=C.superficie)
-        lbl_valor.pack(padx=20, anchor="w")
-        e_pct = tk.Entry(s, font=F.normal, bg=C.superficie, fg=C.texto,
-                         insertbackground=C.primario, relief="solid", bd=1)
-        e_pct.insert(0, "10")
-        e_pct.pack(fill="x", padx=20, ipady=5, pady=(2,10))
+        # Escalones por cantidad: "llevando 2, precio A; llevando 3,
+        # precio B; llevando 10, precio C" — todos sobre el mismo grupo
+        # de productos, en una sola pasada. Antes solo se podia cargar
+        # un escalon por vez, y para el precio mayorista tipico ("de
+        # lista", "por 2 o 3", "por caja") hacia falta repetir todo el
+        # dialogo una vez por cada cantidad.
+        lbl(s, "Escalones — cantidad y valor *", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w", pady=(4, 0))
+        lbl_valor_col = lbl(s, "", variante="suave", bg=C.superficie)
+        lbl_valor_col.pack(padx=20, anchor="w")
 
-        def _cambio_tipo(*_a):
+        f_escalones = tk.Frame(s, bg=C.superficie)
+        f_escalones.pack(fill="x", padx=20, pady=(2, 2))
+        filas_escalon = []
+
+        def _texto_columna_valor():
             t = v_tipo.get()
             if t == _TIPOS["pct"]:
-                lbl_valor.config(text="Descuento % *")
+                return "Desde cuántas unidades              Descuento %"
             elif t == _TIPOS["monto"]:
-                lbl_valor.config(text="Cuántos $ menos por unidad *")
+                return "Desde cuántas unidades              $ menos por unidad"
             else:
-                lbl_valor.config(text="Precio final por unidad *")
+                return "Desde cuántas unidades              Precio final por unidad"
+
+        def _quitar_escalon(fila):
+            if len(filas_escalon) <= 1:
+                return  # siempre tiene que quedar al menos un escalon
+            filas_escalon.remove(fila)
+            fila["frame"].destroy()
+
+        def _agregar_escalon(cant_ini="", valor_ini=""):
+            fr = tk.Frame(f_escalones, bg=C.superficie)
+            fr.pack(fill="x", pady=2)
+            v_c = tk.StringVar(value=cant_ini)
+            v_v = tk.StringVar(value=valor_ini)
+            e_c = tk.Entry(fr, textvariable=v_c, font=F.normal, width=8,
+                          bg=C.bg, fg=C.texto, relief="solid", bd=1,
+                          justify="center")
+            e_c.pack(side="left", ipady=4)
+            lbl(fr, "→", bg=C.superficie).pack(side="left", padx=8)
+            e_v = tk.Entry(fr, textvariable=v_v, font=F.normal, width=12,
+                          bg=C.bg, fg=C.texto, relief="solid", bd=1,
+                          justify="center")
+            e_v.pack(side="left", ipady=4)
+            fila = {"frame": fr, "v_cant": v_c, "v_valor": v_v}
+            btn(fr, "🗑", variante="neutro",
+                comando=lambda: _quitar_escalon(fila)).pack(
+                side="left", padx=(8, 0))
+            filas_escalon.append(fila)
+
+        _agregar_escalon("3", "10")
+
+        btn(s, "+  Agregar escalón", variante="neutro",
+            comando=lambda: _agregar_escalon()).pack(
+            padx=20, anchor="w", pady=(4, 10))
+
+        def _cambio_tipo(*_a):
+            lbl_valor_col.config(text=_texto_columna_valor())
 
         v_tipo.trace_add("write", _cambio_tipo)
+        _cambio_tipo()
 
         lbl(s, "Descripción (ej: Oferta del mes)", variante="suave",
             bg=C.superficie).pack(padx=20, anchor="w")
@@ -634,18 +671,29 @@ class PreciosUI(ttk.Frame):
                 return
 
             _tipo = {v: k for k, v in _TIPOS.items()}.get(v_tipo.get(), "pct")
-            try:
-                pct = float(e_pct.get().replace(",", "."))
-                if pct <= 0:
-                    raise ValueError
-                if _tipo == "pct" and pct >= 100:
-                    raise ValueError
-            except ValueError:
-                messagebox.showwarning(
-                    "Error",
-                    "El descuento tiene que ser un número entre 0 y 100."
-                    if _tipo == "pct" else "Poné un importe mayor a 0.",
-                    parent=d)
+
+            escalas = []
+            for i, f in enumerate(filas_escalon, start=1):
+                try:
+                    cant = int(f["v_cant"].get())
+                    valor = float(f["v_valor"].get().replace(",", "."))
+                    if cant < 2 or valor <= 0:
+                        raise ValueError
+                    if _tipo == "pct" and valor >= 100:
+                        raise ValueError
+                except ValueError:
+                    messagebox.showwarning(
+                        "Error",
+                        f"Escalón {i}: la cantidad tiene que ser 2 o más "
+                        + ("y el descuento un número entre 0 y 100."
+                           if _tipo == "pct" else
+                           "y el valor tiene que ser mayor a 0."),
+                        parent=d)
+                    return
+                escalas.append((cant, valor))
+            if not escalas:
+                messagebox.showinfo(
+                    "Atención", "Agregá al menos un escalón.", parent=d)
                 return
 
             hasta = e_hasta.get().strip() or None
@@ -657,29 +705,38 @@ class PreciosUI(ttk.Frame):
                         "Error", f"Fecha inválida: {hasta}", parent=d)
                     return
 
-            _txt = ({"pct": f"{pct:g}% de descuento",
-                     "monto": f"$ {pct:,.2f} menos por unidad",
-                     "fijo": f"precio fijo de $ {pct:,.2f}"})[_tipo]
-            desc = e_desc.get().strip() or _txt.capitalize()
+            def _texto_escalon(cant, valor):
+                if _tipo == "pct":
+                    return f"{cant}+: {valor:g}% off"
+                elif _tipo == "monto":
+                    return f"{cant}+: $ {valor:,.2f} menos"
+                else:
+                    return f"{cant}+: $ {valor:,.2f}"
+
+            _txt = " · ".join(_texto_escalon(c, v) for c, v in escalas)
+            desc = e_desc.get().strip() or _txt
 
             if not messagebox.askyesno(
                     "Confirmar",
-                    f"Aplicar {_txt} a {len(ids)} producto(s)?",
+                    f"Aplicar {len(escalas)} escalón(es) — {_txt} — "
+                    f"a {len(ids)} producto(s)?",
                     parent=d):
                 return
 
             from repositorio import aplicar_promocion_bulk_tipo
-            n = aplicar_promocion_bulk_tipo(ids, [(int(v_cant.get() or 1), pct)],
-                                            desc, None, hasta, _tipo)
-            if n < len(ids):
+            n = aplicar_promocion_bulk_tipo(ids, escalas, desc, None, hasta,
+                                            _tipo)
+            if n < len(ids) * len(escalas):
                 messagebox.showinfo(
                     "Promoción",
-                    f"Se aplicó a {n} de {len(ids)} producto(s).\n\n"
-                    f"Los que quedaron afuera ya valen eso o menos: una "
+                    f"Se crearon/actualizaron {n} de "
+                    f"{len(ids) * len(escalas)} combinación(es) posibles "
+                    f"(producto × escalón).\n\n"
+                    f"Las que quedaron afuera ya valen eso o menos: una "
                     f"promo que no baja el precio no se guarda.",
                     parent=d)
             d.destroy()
-            toast(self, f"Promoción aplicada a {n} producto(s)")
+            toast(self, f"Promoción aplicada a {n} combinación(es)")
             import catalogo_web
             catalogo_web.sincronizar_stock_en_segundo_plano()
             self._refrescar_promos()

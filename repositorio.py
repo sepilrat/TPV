@@ -610,7 +610,7 @@ def stock_bajo_umbral(umbral=None) -> list:
               AND COALESCE(p.ignorar_alerta, 0) = 0
               AND COALESCE((SELECT SUM(l.cantidad_restante) FROM lotes l
                             WHERE l.producto_id = p.id), 0) <= ?
-            ORDER BY stock, p.descripcion
+            ORDER BY (c.nombre IS NULL), c.nombre, stock, p.descripcion
         """, (umbral,)).fetchall()]
 
 
@@ -1256,6 +1256,24 @@ def crear_proveedor(nombre: str) -> int:
             "INSERT INTO proveedores (nombre) VALUES (?)", (nombre,))
         conn.commit()
         return cur.lastrowid
+
+
+def cobros_qr_del_dia(fecha: str = None) -> list:
+    """Detalle de cada venta cobrada (parcial o totalmente) por QR en un
+    dia, para poder chequearlo a mano contra lo que la app del QR
+    (Mercado Pago, etc.) muestra como acreditado ese dia.
+
+    fecha: 'YYYY-MM-DD'; por defecto hoy. No incluye ventas anuladas.
+    """
+    from datetime import date
+    fecha = fecha or date.today().isoformat()
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT id as venta_id, fecha, monto_qr
+            FROM ventas
+            WHERE date(fecha) = ? AND anulada = 0 AND monto_qr > 0
+            ORDER BY fecha
+        """, (fecha,)).fetchall()]
 
 
 def resumen_cobranzas(desde, hasta) -> dict:
@@ -3425,6 +3443,22 @@ def registrar_venta(sesion_id, items, metodo_pago,
                     f"UPDATE sesiones_caja SET {_col} = {_col} + ? WHERE id=?",
                     (_monto, sesion_id))
 
+        # Si algo quedo fiado, la deuda se carga ACA, en la misma
+        # transaccion que la venta, el stock y la caja. Antes la
+        # pantalla de ventas hacia esto aparte, despues de que
+        # registrar_venta ya habia confirmado todo: si esa segunda
+        # llamada fallaba (se cerraba la app, se cortaba la luz, un
+        # error de conexion), la venta y el descuento de stock quedaban
+        # firmes pero el cliente no quedaba debiendo nada.
+        _deuda = float(_d.get("cta_cte", 0) or 0)
+        if _deuda and cliente_id:
+            _concepto = f"Venta #{venta_id}"
+            if _deuda < total:
+                _concepto += f" (pagó $ {total - _deuda:,.2f})"
+            actualizar_saldo_cliente(
+                cliente_id, _deuda, venta_id=venta_id,
+                concepto=_concepto, conn=conn)
+
         conn.commit()
         return venta_id
 
@@ -3452,6 +3486,33 @@ def get_ventas_sesion(sesion_id) -> list:
         """, (sesion_id,)).fetchall()]
 
 
+def _desglose_original_venta(v, total: float) -> dict:
+    """Reconstruye cuanto de una venta ya registrada se pago con cada
+    medio (efectivo/tarjeta/qr/cta_cte).
+
+    Las ventas nuevas guardan esto en monto_efectivo/monto_tarjeta/
+    monto_qr/monto_cta_cte. Las ventas viejas, de antes de que existiera
+    ese desglose, no tienen nada cargado ahi: para esas se usa el total
+    entero, en la columna que indique el metodo_pago original.
+
+    v tiene que traer metodo_pago, monto_efectivo, monto_tarjeta,
+    monto_qr y monto_cta_cte (todas las funciones que llaman a esto ya
+    las piden en su SELECT). Antes esta misma logica estaba copiada tal
+    cual en cambiar_metodo_pago y en anular_venta: cualquier ajuste
+    futuro se hacia dos veces o se olvidaba en una de las dos.
+    """
+    _d = {"efectivo": v["monto_efectivo"] or 0,
+          "tarjeta": v["monto_tarjeta"] or 0,
+          "qr": v["monto_qr"] or 0,
+          "cta_cte": v["monto_cta_cte"] or 0}
+    if not any(_d.values()):
+        _clave = {"efectivo": "efectivo", "tarjeta": "tarjeta",
+                  "qr": "qr", "cuenta_corriente": "cta_cte",
+                  "mixto": "efectivo"}.get(v["metodo_pago"], "efectivo")
+        _d = {_clave: total}
+    return _d
+
+
 def cambiar_metodo_pago(venta_id: int, metodo_nuevo: str,
                         cliente_id: int = None,
                         autorizado_por: str = "") -> tuple[bool, str]:
@@ -3466,7 +3527,8 @@ def cambiar_metodo_pago(venta_id: int, metodo_nuevo: str,
     """
     with get_connection() as conn:
         v = conn.execute("""
-            SELECT id, total, metodo_pago, cliente_id,
+            SELECT id, total, metodo_pago, cliente_id, sesion_id,
+                   monto_efectivo, monto_tarjeta, monto_qr, monto_cta_cte,
                    COALESCE(anulada, 0) as anulada
             FROM ventas WHERE id = ?
         """, (venta_id,)).fetchone()
@@ -3486,15 +3548,28 @@ def cambiar_metodo_pago(venta_id: int, metodo_nuevo: str,
             return False, "Para pasar a cuenta corriente hace falta "\
                           "elegir el cliente."
 
-    # Sale de cuenta corriente: se le descuenta la deuda al cliente que
-    # la tenia. Si no, queda debiendo algo que ya pago.
-    if era_cta and v["cliente_id"]:
+        # Cuanto de la venta estaba REALMENTE fiado. En una venta mixta
+        # (parte efectivo, parte cuenta corriente) metodo_pago queda
+        # guardado como "cuenta_corriente" pero monto_cta_cte es solo una
+        # parte del total. Descontarle el total entero al cliente le
+        # dejaba un saldo a favor por la parte que ya habia pagado en
+        # efectivo.
+        _viejo = _desglose_original_venta(v, total)
+        deuda_vieja = _viejo.get("cta_cte", 0.0)
+
+    # Sale de cuenta corriente: se le descuenta SOLO lo que tenia fiado
+    # de esta venta (deuda_vieja), no el total. Si no, una venta mixta
+    # le dejaba un saldo a favor por la parte pagada en efectivo/tarjeta.
+    if era_cta and v["cliente_id"] and deuda_vieja:
         actualizar_saldo_cliente(
-            v["cliente_id"], -total, venta_id=venta_id,
+            v["cliente_id"], -deuda_vieja, venta_id=venta_id,
             concepto=f"Venta #{venta_id}: pasó a "
                      f"{metodo_nuevo.replace('_', ' ')}")
 
-    # Entra a cuenta corriente: se le carga la deuda
+    # Entra a cuenta corriente: se le carga la deuda por el total completo
+    # (la venta pasa a estar fiada entera por este cliente; lo que se
+    # haya reversado arriba es la deuda del cliente ANTERIOR, no una
+    # resta sobre este monto).
     if sera_cta:
         actualizar_saldo_cliente(
             cliente_id, total, venta_id=venta_id,
@@ -3518,6 +3593,34 @@ def cambiar_metodo_pago(venta_id: int, metodo_nuevo: str,
         if col:
             conn.execute(f"UPDATE ventas SET {col} = ? WHERE id = ?",
                          (total, venta_id))
+
+        # Los totales de la sesion de caja (los que leen el arqueo y el
+        # cierre) tambien se mueven: sale de donde estaba cobrada la venta
+        # y entra donde queda ahora. Sin esto, una venta pasada de efectivo
+        # a cuenta corriente seguia contando como efectivo en el cajon, y
+        # al anularla despues se restaba de una columna donde nunca habia
+        # entrado. Se hace en esta misma transaccion que los montos de la
+        # venta, para que no puedan quedar desalineados.
+        _col_sesion = {"efectivo": "total_efectivo",
+                       "tarjeta": "total_tarjeta",
+                       "qr": "total_qr",
+                       "cta_cte": "total_cuenta_corriente"}
+        # _viejo ya se calculo mas arriba, antes de tocar la deuda.
+        _clave_nueva = {"efectivo": "efectivo", "tarjeta": "tarjeta",
+                        "qr": "qr",
+                        "cuenta_corriente": "cta_cte"}.get(metodo_nuevo)
+        if v["sesion_id"]:
+            for _k, _c in _col_sesion.items():
+                if _viejo.get(_k):
+                    conn.execute(
+                        f"UPDATE sesiones_caja SET {_c} = {_c} - ? "
+                        "WHERE id = ?", (_viejo[_k], v["sesion_id"]))
+            if _clave_nueva:
+                conn.execute(
+                    f"UPDATE sesiones_caja "
+                    f"SET {_col_sesion[_clave_nueva]} = "
+                    f"{_col_sesion[_clave_nueva]} + ? WHERE id = ?",
+                    (total, v["sesion_id"]))
         conn.commit()
 
     return True, (f"Venta #{venta_id}: "
@@ -3537,19 +3640,33 @@ def anular_venta(venta_id: int) -> bool:
 
         conn.execute("UPDATE ventas SET anulada=1 WHERE id=?", (venta_id,))
 
+        # Si la venta ya tuvo devoluciones parciales (registrar_devolucion),
+        # esa plata y ese stock YA se movieron. Anular solo tiene que
+        # reversar lo que queda pendiente, o se duplica el credito al
+        # cliente y el stock repuesto. Lo ya reintegrado se agrupa por el
+        # metodo con el que se reintegro (puede no ser el metodo de pago
+        # original, ej: se pago fiado y se devolvio en efectivo).
+        ya_reintegrado = {"efectivo": 0.0, "tarjeta": 0.0, "qr": 0.0,
+                           "cta_cte": 0.0}
+        _col_reintegro = {"efectivo": "efectivo", "tarjeta": "tarjeta",
+                          "qr": "qr", "cuenta_corriente": "cta_cte"}
+        for fila in conn.execute("""
+            SELECT metodo_reintegro, COALESCE(SUM(total),0) as monto
+            FROM devoluciones WHERE venta_id=?
+            GROUP BY metodo_reintegro
+        """, (venta_id,)).fetchall():
+            _k = _col_reintegro.get(fila["metodo_reintegro"])
+            if _k:
+                ya_reintegrado[_k] = fila["monto"] or 0.0
+
         # Se descuenta de la MISMA columna donde entro. Antes todo se
         # restaba de efectivo sin mirar como se habia pagado: anular una
         # venta de cuenta corriente dejaba el efectivo en negativo.
-        _d = {"efectivo": v["monto_efectivo"] or 0,
-              "tarjeta": v["monto_tarjeta"] or 0,
-              "qr": v["monto_qr"] or 0,
-              "cta_cte": v["monto_cta_cte"] or 0}
-        if not any(_d.values()):
-            # Venta vieja, anterior al desglose: se usa el metodo de pago
-            _clave = {"efectivo": "efectivo", "tarjeta": "tarjeta",
-                      "qr": "qr", "cuenta_corriente": "cta_cte",
-                      "mixto": "efectivo"}.get(v["metodo_pago"], "efectivo")
-            _d = {_clave: v["total"]}
+        _d = _desglose_original_venta(v, v["total"] or 0)
+        # Restar lo que ya se reintegro en cada columna: eso es lo unico
+        # que anular todavia tiene pendiente por reversar.
+        _d = {k: max(0.0, _d.get(k, 0) - ya_reintegrado.get(k, 0.0))
+              for k in ("efectivo", "tarjeta", "qr", "cta_cte")}
         for _k, _col in (("efectivo", "total_efectivo"),
                          ("tarjeta", "total_tarjeta"),
                          ("qr", "total_qr"),
@@ -3559,8 +3676,9 @@ def anular_venta(venta_id: int) -> bool:
                     f"UPDATE sesiones_caja SET {_col} = {_col} - ? WHERE id=?",
                     (_d[_k], v["sesion_id"]))
 
-        # Lo que habia quedado fiado deja de deberse
+        # Lo que habia quedado fiado deja de deberse (solo lo pendiente)
         if _d.get("cta_cte") and v["cliente_id"]:
+            _asegurar_cuenta_corriente(conn, v["cliente_id"])
             conn.execute("""
                 UPDATE cuentas_corrientes
                    SET saldo_actual = saldo_actual - ?
@@ -3573,11 +3691,20 @@ def anular_venta(venta_id: int) -> bool:
             """, (v["cliente_id"], -_d["cta_cte"],
                   f"Anulacion de la venta #{venta_id}", venta_id))
 
+        # Solo se repone lo que todavia no se devolvio por
+        # registrar_devolucion (esa funcion ya repuso a los lotes
+        # originales lo que corresponde a cada devolucion parcial).
         items = conn.execute("""
-            SELECT producto_id, cantidad FROM detalle_ventas WHERE venta_id=?
+            SELECT dv.id as detalle_id, dv.producto_id, dv.cantidad,
+                   COALESCE((SELECT SUM(dd.cantidad) FROM devoluciones_detalle dd
+                              WHERE dd.detalle_venta_id = dv.id), 0) as ya_devuelto
+            FROM detalle_ventas dv WHERE dv.venta_id=?
         """, (venta_id,)).fetchall()
 
         for item in items:
+            pendiente = item["cantidad"] - item["ya_devuelto"]
+            if pendiente <= 1e-9:
+                continue
             conn.execute("""
                 INSERT INTO lotes
                     (producto_id, cantidad, cantidad_restante,
@@ -3585,7 +3712,7 @@ def anular_venta(venta_id: int) -> bool:
                 SELECT ?, ?, ?, costo_ultimo,
                        'Devolucion venta #' || ?
                 FROM productos WHERE id=?
-            """, (item["producto_id"], item["cantidad"], item["cantidad"],
+            """, (item["producto_id"], pendiente, pendiente,
                   venta_id, item["producto_id"]))
 
         conn.commit()
@@ -3755,17 +3882,26 @@ def registrar_devolucion(venta_id: int, sesion_id: int, items: list,
             if not v["cliente_id"]:
                 raise ValueError("La venta no tiene cliente: no se puede "
                                  "acreditar en cuenta corriente")
+            _asegurar_cuenta_corriente(conn, v["cliente_id"])
             conn.execute("""
                 UPDATE cuentas_corrientes
                 SET saldo_actual = saldo_actual - ?,
                     ultima_actualizacion = datetime('now','localtime')
                 WHERE cliente_id = ?
             """, (total, v["cliente_id"]))
+            # tipo='ajuste' (no 'pago'): esto es una devolucion, no plata
+            # que entro. Los informes de cobros ("cobros_cta_cte",
+            # "cobros_de_deuda_vieja") suman los movimientos tipo='pago'
+            # como dinero cobrado; si esto quedaba como 'pago', una
+            # devolucion acreditada aparecia ahi como si el cliente
+            # hubiera pagado. El signo negativo sigue la misma
+            # convencion que anular_venta para 'ajuste': negativo baja
+            # la deuda.
             conn.execute("""
                 INSERT INTO movimientos_cuenta
                     (cliente_id, tipo, monto, venta_id, concepto, autorizado_por)
-                VALUES (?,'pago',?,?,?,?)
-            """, (v["cliente_id"], total, venta_id,
+                VALUES (?,'ajuste',?,?,?,?)
+            """, (v["cliente_id"], -total, venta_id,
                   f"Devolucion venta #{venta_id}", autorizado_por))
 
         # Si se devolvio todo, la venta queda anulada.
@@ -3809,14 +3945,22 @@ def efectivo_esperado(sesion_id: int) -> dict:
         """, (sesion_id,)).fetchone()
 
     fondo = s["fondo_inicial"] or 0.0
-    ventas = s["total_efectivo"] or 0.0
+    # total_efectivo YA incluye los ingresos/egresos manuales
+    # (registrar_movimiento) y las devoluciones en efectivo
+    # (registrar_devolucion): ambos lo modifican y ademas dejan su fila en
+    # movimientos_caja. Sumar esas filas de nuevo las contaba dos veces y
+    # el esperado no coincidia con el cajon. Por eso el esperado sale de
+    # fondo + total_efectivo, y "ventas" se reconstruye solo para que el
+    # desglose que se muestra siga sumando.
+    en_cajon = s["total_efectivo"] or 0.0
     ingresos, egresos = movs[0] or 0.0, movs[1] or 0.0
+    ventas = en_cajon - ingresos + egresos
     return {
         "fondo_inicial": fondo,
         "ventas_efectivo": ventas,
         "ingresos_manuales": ingresos,
         "egresos": egresos,
-        "esperado": round(fondo + ventas + ingresos - egresos, 2),
+        "esperado": round(fondo + en_cajon, 2),
     }
 
 
@@ -4358,6 +4502,26 @@ def get_cliente_por_id(cid: int) -> dict | None:
         return dict(row) if row else None
 
 
+def _asegurar_cuenta_corriente(conn, cliente_id: int) -> None:
+    """Crea la fila en cuentas_corrientes si el cliente no la tiene.
+
+    crear_cliente() la crea siempre, pero un cliente cargado por otra via
+    (recuperar_clientes.py, una importacion vieja) puede no tenerla. Sin
+    esto, un UPDATE cuentas_corrientes SET saldo_actual=... WHERE
+    cliente_id=? no actualiza ninguna fila (0 rows afectadas, sin
+    ningun error) mientras que el movimiento igual queda insertado en
+    movimientos_cuenta: el saldo mostrado no refleja la deuda real. Se
+    llama antes de cada UPDATE a cuentas_corrientes.
+    """
+    ya_existe = conn.execute(
+        "SELECT 1 FROM cuentas_corrientes WHERE cliente_id = ? LIMIT 1",
+        (cliente_id,)).fetchone()
+    if not ya_existe:
+        conn.execute(
+            "INSERT INTO cuentas_corrientes (cliente_id, saldo_actual) "
+            "VALUES (?, 0)", (cliente_id,))
+
+
 def crear_cliente(dni, nombre, telefono, tope_credito) -> dict:
     """Crea cliente y su cuenta corriente. Retorna el cliente completo."""
     with get_connection() as conn:
@@ -4388,14 +4552,25 @@ def actualizar_cliente(cid, nombre, telefono, tope_credito):
 
 def actualizar_saldo_cliente(cliente_id: int, monto: float,
                               tipo="cuenta_corriente", venta_id=None,
-                              concepto=None, autorizado_por=None):
+                              concepto=None, autorizado_por=None,
+                              conn=None):
     """
     Actualiza el saldo de la cuenta corriente de un cliente.
     tipo='cuenta_corriente' suma al saldo (debe más).
     tipo='pago'  resta al saldo (pagó).
+
+    Si se pasa conn (una conexion ya abierta, con su propia transaccion
+    en curso), se usa esa y NO se hace commit aca: el llamador decide
+    cuando confirmar. Es lo que permite que registrar_venta cargue la
+    deuda de una venta fiada en la MISMA transaccion que la venta, el
+    stock y la caja, para que no pueda pasar que la venta quede
+    registrada y la deuda no (o al reves).
     """
-    with get_connection() as conn:
+    _propia = conn is None
+    conn = conn or get_connection()
+    try:
         delta = monto if tipo == "cuenta_corriente" else -monto
+        _asegurar_cuenta_corriente(conn, cliente_id)
         conn.execute("""
             UPDATE cuentas_corrientes
             SET saldo_actual = saldo_actual + ?,
@@ -4407,7 +4582,11 @@ def actualizar_saldo_cliente(cliente_id: int, monto: float,
                 (cliente_id, tipo, monto, venta_id, concepto, autorizado_por)
             VALUES (?,?,?,?,?,?)
         """, (cliente_id, tipo, monto, venta_id, concepto, autorizado_por))
-        conn.commit()
+        if _propia:
+            conn.commit()
+    finally:
+        if _propia:
+            conn.close()
 
 
 def get_venta_completa(venta_id: int) -> dict | None:

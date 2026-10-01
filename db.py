@@ -1381,25 +1381,12 @@ def cerrar_sesion_caja(
                 (sesion_id,)
             ).fetchone()
 
-            movs = conn.execute("""
-                SELECT COALESCE(
-                    SUM(
-                        CASE
-                            WHEN tipo='ingreso'
-                            THEN monto
-                            ELSE -monto
-                        END
-                    ),
-                    0
-                )
-                FROM movimientos_caja
-                WHERE sesion_id = ?
-            """, (sesion_id,)).fetchone()[0]
-
+            # total_efectivo ya incluye los movimientos manuales y las
+            # devoluciones en efectivo (ver efectivo_esperado en
+            # repositorio.py, que tiene que dar el mismo numero).
             esperado = (
                 (fila["fondo_inicial"] or 0)
                 + (fila["total_efectivo"] or 0)
-                + (movs or 0)
             )
 
             diferencia = round(
