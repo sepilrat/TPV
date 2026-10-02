@@ -576,22 +576,25 @@ class PreciosUI(ttk.Frame):
         # lista", "por 2 o 3", "por caja") hacia falta repetir todo el
         # dialogo una vez por cada cantidad.
         lbl(s, "Escalones — cantidad y valor *", variante="suave",
-            bg=C.superficie).pack(padx=20, anchor="w", pady=(4, 0))
-        lbl_valor_col = lbl(s, "", variante="suave", bg=C.superficie)
-        lbl_valor_col.pack(padx=20, anchor="w")
+            bg=C.superficie).pack(padx=20, anchor="w", pady=(4, 2))
 
         f_escalones = tk.Frame(s, bg=C.superficie)
-        f_escalones.pack(fill="x", padx=20, pady=(2, 2))
+        f_escalones.pack(fill="x", padx=20, pady=(0, 2))
         filas_escalon = []
 
-        def _texto_columna_valor():
+        def _sufijo_valor():
+            # Antes esto era un encabezado aparte con espacios a mano
+            # para simular dos columnas: en una ventana angosta no
+            # quedaba alineado con los campos y "Descuento %" terminaba
+            # cortado o lejos del campo real, como si no existiera.
+            # Ahora el sufijo va pegado al propio campo, en cada fila.
             t = v_tipo.get()
             if t == _TIPOS["pct"]:
-                return "Desde cuántas unidades              Descuento %"
+                return "% de descuento"
             elif t == _TIPOS["monto"]:
-                return "Desde cuántas unidades              $ menos por unidad"
+                return "$ menos por unidad"
             else:
-                return "Desde cuántas unidades              Precio final por unidad"
+                return "$ precio final"
 
         def _quitar_escalon(fila):
             if len(filas_escalon) <= 1:
@@ -601,22 +604,26 @@ class PreciosUI(ttk.Frame):
 
         def _agregar_escalon(cant_ini="", valor_ini=""):
             fr = tk.Frame(f_escalones, bg=C.superficie)
-            fr.pack(fill="x", pady=2)
+            fr.pack(fill="x", pady=3)
             v_c = tk.StringVar(value=cant_ini)
             v_v = tk.StringVar(value=valor_ini)
-            e_c = tk.Entry(fr, textvariable=v_c, font=F.normal, width=8,
+            lbl(fr, "Desde", bg=C.superficie).pack(side="left")
+            e_c = tk.Entry(fr, textvariable=v_c, font=F.normal, width=5,
                           bg=C.bg, fg=C.texto, relief="solid", bd=1,
                           justify="center")
-            e_c.pack(side="left", ipady=4)
-            lbl(fr, "→", bg=C.superficie).pack(side="left", padx=8)
-            e_v = tk.Entry(fr, textvariable=v_v, font=F.normal, width=12,
+            e_c.pack(side="left", padx=6, ipady=4)
+            lbl(fr, "unidades →", bg=C.superficie).pack(side="left")
+            e_v = tk.Entry(fr, textvariable=v_v, font=F.normal, width=8,
                           bg=C.bg, fg=C.texto, relief="solid", bd=1,
                           justify="center")
-            e_v.pack(side="left", ipady=4)
-            fila = {"frame": fr, "v_cant": v_c, "v_valor": v_v}
+            e_v.pack(side="left", padx=6, ipady=4)
+            lbl_suf = lbl(fr, _sufijo_valor(), bg=C.superficie)
+            lbl_suf.pack(side="left")
+            fila = {"frame": fr, "v_cant": v_c, "v_valor": v_v,
+                   "lbl_sufijo": lbl_suf}
             btn(fr, "🗑", variante="neutro",
                 comando=lambda: _quitar_escalon(fila)).pack(
-                side="left", padx=(8, 0))
+                side="right")
             filas_escalon.append(fila)
 
         _agregar_escalon("3", "10")
@@ -626,7 +633,9 @@ class PreciosUI(ttk.Frame):
             padx=20, anchor="w", pady=(4, 10))
 
         def _cambio_tipo(*_a):
-            lbl_valor_col.config(text=_texto_columna_valor())
+            txt = _sufijo_valor()
+            for f in filas_escalon:
+                f["lbl_sufijo"].config(text=txt)
 
         v_tipo.trace_add("write", _cambio_tipo)
         _cambio_tipo()
