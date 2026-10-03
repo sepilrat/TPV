@@ -395,7 +395,8 @@ class AppTPV(tk.Tk):
         from productos_ui import ProductosUI
         from precios_ui   import PreciosUI
         from ingreso_ui   import IngresoUI
-        from auditoria_ui import AuditoriaUI, OfertasUI
+        from auditoria_ui import AuditoriaUI
+        from ofertas_ui import OfertasUI
         from promos_grupo_ui import PromosGrupoUI
         from promos_combo_ui import PromosComboUI
         from revision_ui import RevisionUI

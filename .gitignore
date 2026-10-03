@@ -14,3 +14,8 @@ logs/
 test_catalogo_arai.py
 notas.txt
 imagenes_productos/
+# Private keys / certificates — never commit
+*.key
+*.pem
+.env
+.env.*

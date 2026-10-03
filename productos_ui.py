@@ -640,8 +640,8 @@ class ProductosUI(ttk.Frame):
 
     def _folleto(self):
         try:
-            from folleto_precios import abrir_selector_folleto
-            abrir_selector_folleto(self)
+            from ofertas_ui import abrir_generador_ofertas
+            abrir_generador_ofertas(self)
         except Exception as exc:
             messagebox.showerror("Folleto", str(exc), parent=self)
 
