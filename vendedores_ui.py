@@ -87,6 +87,8 @@ class VendedoresUI(ttk.Frame):
             comando=self._subir_catalogo).pack(side="left", padx=(0,6))
         btn(bar, "☁️  Sincronizar al Sheet", variante="primario",
             comando=self._sincronizar).pack(side="right")
+        btn(bar, "🔍  Revisar vendedores", variante="neutro",
+            comando=self._revisar_vendedores).pack(side="right", padx=(0, 6))
 
         frame_t, self.tree_v = tabla(parent, COLS_VENDEDORES)
         frame_t.grid(row=1, column=0, sticky="nsew")
@@ -150,7 +152,7 @@ class VendedoresUI(ttk.Frame):
         v = get_vendedor_por_id(self._vend_sel_id)
         if v:
             toggle_vendedor(self._vend_sel_id, 0 if v["activo"] else 1)
-            self._sincronizar(silencioso=True)
+            self._sincronizar_y_avisar("Cambio guardado")
             self._refrescar()
 
     def _eliminar_vendedor(self):
@@ -167,9 +169,8 @@ class VendedoresUI(ttk.Frame):
                 f"esto no los borra.)", parent=self):
             eliminar_vendedor(self._vend_sel_id)
             self._vend_sel_id = None
-            toast(self, "Vendedor eliminado")
-            self._sincronizar(silencioso=True)
             self._refrescar()
+            self._sincronizar_y_avisar("Vendedor eliminado")
 
     def _copiar_link(self):
         if not self._vend_sel_id:
@@ -201,7 +202,8 @@ class VendedoresUI(ttk.Frame):
             else:
                 return
 
-        link = f"{url}?v={v['codigo']}"
+        from urllib.parse import quote
+        link = f"{url}?v={quote(v['codigo'], safe='')}"
         self.clipboard_clear()
         self.clipboard_append(link)
         c = cfg()
@@ -380,12 +382,80 @@ class VendedoresUI(ttk.Frame):
                 set_categorias_vendedor(destino, elegidas)
 
             d.destroy()
-            toast(self, "Vendedor guardado")
-            self._sincronizar(silencioso=True)
             self._refrescar()
+            self._sincronizar_y_avisar("Vendedor guardado")
 
         btn(pie_fijo, "💾  Guardar", variante="exito",
             comando=guardar).pack(pady=12)
+
+    def _revisar_vendedores(self):
+        """Explica por que el link de cada vendedor muestra los precios que muestra."""
+        from repositorio import diagnosticar_vendedores
+        from config import cfg
+        diag = diagnosticar_vendedores()
+        d = tk.Toplevel(self)
+        d.title("Revisar vendedores")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        w, h = min(760, sw - 60), min(640, sh - 80)
+        d.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        txt = tk.Text(d, wrap="word", font=F.normal, bg=C.superficie, fg=C.texto,
+                      relief="flat", padx=14, pady=10)
+        txt.pack(fill="both", expand=True)
+        txt.tag_configure("n", font=(F.normal[0], 12, "bold"), spacing1=10)
+        txt.tag_configure("error", foreground=C.peligro)
+        txt.tag_configure("aviso", foreground=C.advertencia)
+        txt.tag_configure("info", foreground=C.texto_suave)
+        txt.tag_configure("ok", foreground=C.exito)
+        ult = cfg().get("catalogo_web_ultima_sync") or "nunca"
+        txt.insert("end", f"Última subida del catálogo de productos: {ult}\n", "info")
+        for it in diag:
+            v = it["vendedor"]
+            txt.insert("end", f"\n{v['nombre']}  (link ?v={v['codigo']}, "
+                              f"comisión {float(v['comision_pct'] or 0):g}%)\n", "n")
+            if it["ejemplo"]:
+                desc, lista, ve = it["ejemplo"]
+                igual = abs(ve - lista) < 0.005
+                txt.insert("end", f"  Ejemplo «{desc}»: lista $ {lista:,.2f} → ve "
+                                  f"$ {ve:,.2f}" + ("  (IGUAL a la lista)" if igual else "")
+                                  + "\n", "aviso" if igual else "ok")
+            for grav, t in it["problemas"]:
+                marca = {"error": "✖", "aviso": "⚠", "info": "·"}[grav]
+                txt.insert("end", f"  {marca} {t}\n", grav)
+            if not any(g in ("error", "aviso") for g, _ in it["problemas"]):
+                txt.insert("end", "  ✔ Sin problemas en el TPV.\n", "ok")
+        txt.insert("end", "\nSi acá figura bien pero el link sigue mostrando precio de "
+                          "lista, el problema está del lado de la web: usá «Sincronizar "
+                          "al Sheet» y mirá si hay error, y revisá la hoja «Vendedores» "
+                          "del Sheet (la fila del vendedor y su código).", "info")
+        txt.config(state="disabled")
+        btn(d, "Cerrar", variante="neutro", comando=d.destroy).pack(pady=8)
+
+    def _sincronizar_y_avisar(self, que):
+        """Guarda -> sincroniza -> dice la verdad.
+
+        Antes la sincronizacion corria en silencio: si fallaba (sin internet,
+        timeout, URL vencida) el cambio quedaba SOLO en el TPV, el link seguia
+        con los datos viejos y nadie se enteraba.
+        """
+        import catalogo_web
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            ok, msg = catalogo_web.sincronizar_vendedores()
+        finally:
+            self.config(cursor="")
+        if ok:
+            toast(self, f"{que}. {msg}")
+        else:
+            messagebox.showwarning(
+                "No se sincronizó con la web",
+                f"{que} en el TPV, pero NO llegó a la web:\n\n{msg}\n\n"
+                "Hasta que se sincronice, el link del vendedor sigue mostrando "
+                "los datos anteriores. Probá con «Sincronizar al Sheet».",
+                parent=self)
+        return ok
 
     def _sincronizar(self, silencioso=False):
         import catalogo_web
@@ -395,6 +465,7 @@ class VendedoresUI(ttk.Frame):
                 toast(self, msg)
             else:
                 messagebox.showwarning("Sincronización", msg, parent=self)
+        return ok
 
     # ── Lógica — Resumen de pedidos y comisiones ────────────────────────────
 

@@ -1793,6 +1793,53 @@ class VentasUI(ttk.Frame):
         import catalogo_web
         catalogo_web.sincronizar_stock_en_segundo_plano()
 
+    def _confirmar_total_bajo_costo(self, bruto, desc_monto, total) -> bool:
+        """False si la venta pierde plata y el cajero decide no cobrarla.
+
+        Compara el total FINAL (con promos y descuento) contra el costo de
+        lo que se lleva. Los productos sin costo cargado cuentan como costo
+        cero: ante la duda no se da una falsa alarma.
+        """
+        try:
+            from repositorio import costo_real_producto
+        except Exception:
+            return True
+        factor = (1 - desc_monto / bruto) if bruto else 1.0
+        costo_total, bajos = 0.0, []
+        costos = {}
+        for it in self.carrito:
+            pid = it.get("producto_id")
+            if pid not in costos:
+                try:
+                    costos[pid] = float(costo_real_producto(pid) or 0)
+                except Exception:
+                    costos[pid] = 0.0
+            costo = costos[pid]
+            cant = float(it.get("cantidad") or 0)
+            costo_total += costo * cant
+            cobrado = float(it.get("subtotal") or 0) * factor
+            if costo > 0 and cant > 0 and cobrado < costo * cant - 0.005:
+                bajos.append((it.get("descripcion") or "?", cobrado / cant, costo))
+        if costo_total <= 0 or total >= costo_total - 0.005:
+            return True
+
+        perdida = costo_total - total
+        lineas = [f"• {d[:34]}: cobrás $ {p:,.2f} y cuesta $ {c:,.2f}"
+                  for d, p, c in sorted(bajos, key=lambda x: x[1] - x[2])[:5]]
+        detalle = ("\n\n" + "\n".join(lineas)) if lineas else ""
+        try:
+            self.bell()
+        except Exception:
+            pass
+        return messagebox.askyesno(
+            "⚠ Esta venta pierde plata",
+            f"Vas a cobrar $ {total:,.2f} por mercadería que te costó "
+            f"$ {costo_total:,.2f}.\n"
+            f"Perdés $ {perdida:,.2f} en esta venta."
+            + (f" (con el descuento de $ {desc_monto:,.2f})" if desc_monto > 0.005 else "")
+            + detalle + "\n\n¿Cobrar igual?",
+            icon="warning", default="no", parent=self)
+
     def _cobrar(self):
         if not self.carrito:
             toast(self, "El carrito esta vacio", error=True)
@@ -1824,6 +1871,15 @@ class VentasUI(ttk.Frame):
                     "¿Confirmás que la venta es realmente gratis?",
                     parent=self, icon="warning", default="no"):
                 return self.foco_scanner()
+
+        # El aviso de perdida al escanear mira solo el precio de LISTA. No ve
+        # lo que pasa despues: una promo por cantidad bajo costo, un precio
+        # tipeado a mano o un descuento general del 40% pasan sin que nadie
+        # se entere hasta el mail del dia siguiente. Aca se mira lo que de
+        # verdad se va a cobrar contra lo que cuesta lo que se lleva.
+        if bruto > 0 and total > 0 and not self._confirmar_total_bajo_costo(
+                bruto, desc_monto, total):
+            return self.foco_scanner()
 
         # Efectivo / Tarjeta / QR → confirmar directo
         if metodo in ("efectivo", "tarjeta", "qr"):

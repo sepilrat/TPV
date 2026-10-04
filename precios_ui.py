@@ -12,7 +12,9 @@ from repositorio import (get_productos, get_categorias, get_promociones,
                          actualizar_precio, aplicar_aumento_bulk,
                          aplicar_margen_nuevo_bulk,
                          aplicar_margen_bulk, get_promocion_por_id, get_codigo_producto,
-                         modificar_promociones_bulk)
+                         modificar_promociones_bulk,
+                         margen_sobre_costo, margen_promocion, costo_real_producto,
+                         margen_minimo_promo_pct, desactivar_promos_obsoletas)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers DB
@@ -34,6 +36,7 @@ COLS_PROMOS = [
     ("detalle", "Descripcion",  130, "w"),
     ("cant",    "Desde cant.",   80, "e"),
     ("precio",  "Precio/Desc.",  85, "e"),
+    ("margen",  "Margen s/costo", 150, "e"),
     ("desde",   "Desde",         80, "w"),
     ("hasta",   "Hasta",         80, "w"),
     ("activa",  "Activa",        55, "center"),
@@ -175,6 +178,17 @@ class PreciosUI(ttk.Frame):
         self.lbl_sel_promo = lbl(bar, "0", variante="badge")
         self.lbl_sel_promo.pack(side="left")
 
+        self._solo_problemas = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="Solo con problemas de margen",
+                       variable=self._solo_problemas, bg=C.bg, fg=C.texto,
+                       font=F.normal, selectcolor=C.bg, activebackground=C.bg,
+                       command=self._refrescar_promos).pack(side="left", padx=(14, 0))
+        self.lbl_alerta_promos = tk.Label(bar, text="", bg=C.bg, font=F.normal)
+        self.lbl_alerta_promos.pack(side="left", padx=(14, 0))
+        self.btn_apagar_obsoletas = btn(bar, "Apagar las que no convienen",
+                                        variante="peligro",
+                                        comando=self._apagar_promos_obsoletas)
+
         # Tabla
         frame_t, self.tree_pr = tabla(parent, COLS_PROMOS)
         frame_t.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
@@ -227,6 +241,8 @@ class PreciosUI(ttk.Frame):
         self.entry_promo_precio.grid(row=0, column=5, ipady=5)
         btn(bulk_pr, "Aplicar", variante="primario",
             comando=self._promos_fijar_precio).grid(row=0, column=6, padx=(4, 8), sticky="w")
+        btn(bulk_pr, "Pasar a % …", variante="neutro",
+            comando=self._promos_a_porcentaje).grid(row=0, column=7, padx=(8, 12), sticky="e")
 
         ac2 = tk.Frame(parent, bg=C.bg)
         ac2.grid(row=4, column=0, sticky="ew", pady=(6, 0))
@@ -321,22 +337,76 @@ class PreciosUI(ttk.Frame):
             ))
             self._filas[iid] = dict(p)
 
+    @staticmethod
+    def _es_obsoleta(pr):
+        """Precio fijo que ya no mejora el precio de lista (se bajo el precio)."""
+        return (pr.get("tipo_descuento") != "porcentaje"
+                and float(pr["precio_unitario"] or 0) >= float(pr["precio_base"] or 0) - 0.005)
+
+    def _apagar_promos_obsoletas(self):
+        from repositorio import promos_obsoletas
+        obs = promos_obsoletas()
+        if not obs:
+            return
+        lineas = [f"• {o['descripcion'][:34]}: x{o['cantidad_minima']} a "
+                  f"$ {o['precio_promo']:,.2f} (el producto está a $ {o['precio_base']:,.2f})"
+                  for o in obs[:10]]
+        if len(obs) > 10:
+            lineas.append(f"… y {len(obs) - 10} más")
+        if not messagebox.askyesno(
+                "Apagar promociones que no convienen",
+                f"Estas {len(obs)} promociones tienen un precio igual o MÁS ALTO que el "
+                "precio normal del producto:\n\n" + "\n".join(lineas) +
+                "\n\nSe apagan (no se borran): podés editarlas y volver a activarlas "
+                "con el precio correcto.\n\n¿Apagarlas?", parent=self):
+            return
+        n = desactivar_promos_obsoletas([o["id"] for o in obs])
+        toast(self, f"{n} promoción(es) apagada(s)")
+        self._refrescar_promos()
+
+    @staticmethod
+    def _txt_margen(m):
+        if m["nivel"] == "sin_costo":
+            return "sin costo cargado"
+        signo = "-" if m["margen"] < 0 else ""
+        txt = (f"{signo}$ {abs(m['margen']):,.2f}  ({m['pct']:+.1f}%)")
+        return ("⚠ " + txt) if m["nivel"] in ("perdida", "bajo") else txt
+
     def _refrescar_promos(self):
         filtro = self.entry_buscar_promo.get().strip().lower()
+        solo_prob = self._solo_problemas.get()
         self._promos_seleccionadas.clear()
         self.lbl_sel_promo.config(text="0")
         for r in self.tree_pr.get_children():
             self.tree_pr.delete(r)
         self._promos_filas = {}
+        n_perdida = n_bajo = n_obsoletas = 0
         for pr in get_promociones():
             if filtro and filtro not in (
                     f"{pr['descripcion']} {pr['codigo']} "
                     f"{pr['detalle'] or ''}").lower():
                 continue
+            m = margen_promocion(pr)
+            obsoleta = bool(pr["activa"]) and self._es_obsoleta(pr)
+            if obsoleta:
+                n_obsoletas += 1
+            if pr["activa"] and m["nivel"] == "perdida":
+                n_perdida += 1
+            elif pr["activa"] and m["nivel"] == "bajo":
+                n_bajo += 1
+            if solo_prob and not obsoleta and m["nivel"] not in ("perdida", "bajo"):
+                continue
             if pr.get("tipo_descuento") == "porcentaje":
                 col_precio = f"-{pr.get('porcentaje_descuento') or 0:.1f}%"
             else:
                 col_precio = f"$ {pr['precio_unitario']:,.2f}"
+            if not pr["activa"]:
+                tag = "inactiva"
+            elif obsoleta:
+                tag = "obsoleta"
+            else:
+                tag = {"perdida": "perdida", "bajo": "bajo",
+                       "sin_costo": "sin_costo"}.get(m["nivel"], "activa")
             iid = str(pr["id"])
             self.tree_pr.insert("", "end", iid=iid, values=(
                 "",
@@ -344,13 +414,39 @@ class PreciosUI(ttk.Frame):
                 pr["detalle"] or "—",
                 f"x {pr['cantidad_minima']}",
                 col_precio,
+                ("⚠ NO CONVIENE: igual o más cara que el precio normal"
+                 if obsoleta else self._txt_margen(m)),
                 pr["fecha_desde"] or "—",
                 pr["fecha_hasta"] or "—",
                 "Si" if pr["activa"] else "No",
-            ), tags=("activa",) if pr["activa"] else ("inactiva",))
+            ), tags=(tag,))
             self._promos_filas[iid] = pr
-        self.tree_pr.tag_configure("activa",   foreground=C.exito)
-        self.tree_pr.tag_configure("inactiva", foreground=C.texto_suave)
+        self.tree_pr.tag_configure("activa",    foreground=C.exito)
+        self.tree_pr.tag_configure("inactiva",  foreground=C.texto_suave)
+        self.tree_pr.tag_configure("perdida",   foreground=C.peligro)
+        self.tree_pr.tag_configure("obsoleta",  foreground=C.peligro)
+        self.tree_pr.tag_configure("bajo",      foreground=C.advertencia)
+        self.tree_pr.tag_configure("sin_costo", foreground=C.texto_suave)
+        if n_obsoletas:
+            self.lbl_alerta_promos.config(
+                text=f"⚠ {n_obsoletas} promo(s) activa(s) NO CONVIENEN: salen igual o "
+                     "más caras que el precio normal (la caja no las aplica)",
+                fg=C.peligro)
+            self.btn_apagar_obsoletas.pack(side="left", padx=(10, 0))
+        elif n_perdida:
+            self.btn_apagar_obsoletas.pack_forget()
+            self.lbl_alerta_promos.config(
+                text=f"⚠ {n_perdida} promo(s) activa(s) venden BAJO COSTO"
+                     + (f"  ·  {n_bajo} con margen bajo" if n_bajo else ""),
+                fg=C.peligro)
+        elif n_bajo:
+            self.btn_apagar_obsoletas.pack_forget()
+            self.lbl_alerta_promos.config(
+                text=f"⚠ {n_bajo} promo(s) activa(s) con margen bajo "
+                     f"(menos de {margen_minimo_promo_pct():g}%)", fg=C.advertencia)
+        else:
+            self.btn_apagar_obsoletas.pack_forget()
+            self.lbl_alerta_promos.config(text="", fg=C.exito)
 
     # ── Selección bulk ────────────────────────────────────────────────────────
 
@@ -669,9 +765,31 @@ class PreciosUI(ttk.Frame):
                      "fijo": f"precio fijo de $ {pct:,.2f}"})[_tipo]
             desc = e_desc.get().strip() or _txt.capitalize()
 
+            from repositorio import simular_promo_masiva
+            sim = simular_promo_masiva(ids, _tipo, pct)
+            perdidas = sorted((m for m in sim if m["nivel"] == "perdida"),
+                              key=lambda m: m["margen"])
+            bajos = [m for m in sim if m["nivel"] == "bajo"]
+            sin_costo = [m for m in sim if m["nivel"] == "sin_costo"]
+            aviso = ""
+            if perdidas:
+                peor = perdidas[0]
+                aviso += (f"\n\n⚠ {len(perdidas)} producto(s) quedarían POR DEBAJO "
+                          f"DEL COSTO. El peor: «{peor['descripcion']}», a "
+                          f"$ {peor['precio']:,.2f} con costo $ {peor['costo']:,.2f} "
+                          f"(perdés $ {-peor['margen']:,.2f} por unidad).")
+            if bajos:
+                aviso += (f"\n\n⚠ {len(bajos)} con margen bajo (menos de "
+                          f"{margen_minimo_promo_pct():g}% sobre el costo).")
+            if sin_costo:
+                aviso += (f"\n\n{len(sin_costo)} no tienen costo cargado: "
+                          "no se pudo chequear su margen.")
             if not messagebox.askyesno(
-                    "Confirmar",
-                    f"Aplicar {_txt} a {len(ids)} producto(s)?",
+                    "⚠ Confirmar" if perdidas else "Confirmar",
+                    f"Aplicar {_txt} a {len(ids)} producto(s)?" + aviso +
+                    ("\n\n¿Aplicarla igual?" if perdidas else ""),
+                    icon="warning" if (perdidas or bajos) else "question",
+                    default="no" if perdidas else "yes",
                     parent=d):
                 return
 
@@ -876,6 +994,40 @@ class PreciosUI(ttk.Frame):
         self._promos_seleccionadas.clear()
         self.lbl_sel_promo.config(text="0")
 
+    def _confirmar_bajo_costo(self, ids, modo, valor):
+        """Si el cambio deja promos bajo costo, lo avisa y pide confirmar.
+
+        Devuelve True si se puede seguir (no hay problema o el usuario insiste).
+        """
+        perdidas = []
+        for i in ids:
+            pr = self._promos_filas.get(str(i))
+            if not pr:
+                continue
+            if modo == "sumar_pct":
+                if pr.get("tipo_descuento") != "porcentaje":
+                    continue
+                pct = max(0.0, float(pr.get("porcentaje_descuento") or 0) + valor)
+                precio = round(float(pr["precio_base"]) * (1 - pct / 100), 2)
+            else:
+                precio = float(valor)
+            m = margen_sobre_costo(precio, costo_real_producto(pr["producto_id"]))
+            if m["nivel"] == "perdida":
+                perdidas.append((pr["descripcion"], precio, m))
+        if not perdidas:
+            return True
+        lineas = [f"• {desc}: a $ {p:,.2f} (costo $ {m['costo']:,.2f}, "
+                  f"perdés $ {-m['margen']:,.2f} por unidad)"
+                  for desc, p, m in perdidas[:8]]
+        if len(perdidas) > 8:
+            lineas.append(f"… y {len(perdidas) - 8} más")
+        return messagebox.askyesno(
+            "⚠ Quedarían bajo costo",
+            f"Con este cambio {len(perdidas)} promoción(es) venderían POR DEBAJO "
+            "DEL COSTO:\n\n" + "\n".join(lineas) +
+            "\n\n¿Aplicarlo igual?",
+            icon="warning", default="no", parent=self)
+
     def _promos_sumar_pct(self):
         if not self._promos_seleccionadas:
             messagebox.showinfo("Atención", "Selecciona promociones con la columna de la izquierda.", parent=self)
@@ -890,6 +1042,8 @@ class PreciosUI(ttk.Frame):
         responsable = pedir_autorizacion(
             self, f"Sumar {pts:+g} pts a {len(ids)} promoción(es).")
         if not responsable:
+            return
+        if not self._confirmar_bajo_costo(ids, "sumar_pct", pts):
             return
         if not messagebox.askyesno(
                 "Confirmar",
@@ -924,6 +1078,8 @@ class PreciosUI(ttk.Frame):
             self, f"Fijar $ {precio:,.2f} en {len(ids)} promoción(es).")
         if not responsable:
             return
+        if not self._confirmar_bajo_costo(ids, "precio_fijo", precio):
+            return
         if not messagebox.askyesno(
                 "Confirmar",
                 f"Fijar el precio promocional en $ {precio:,.2f} para "
@@ -937,6 +1093,127 @@ class PreciosUI(ttk.Frame):
                            responsable, f"precio fijo $ {precio:,.2f} sobre {n} promoción(es)")
         toast(self, f"{n} promoción(es) actualizada(s)")
         self._refrescar_promos()
+
+    def _promos_a_porcentaje(self):
+        """Pasa promos de precio fijo a porcentaje (con vista previa)."""
+        if not self._promos_seleccionadas:
+            messagebox.showinfo(
+                "Atención", "Seleccioná promociones con la columna de la izquierda "
+                "(o usá «seleccionar todo»).", parent=self)
+            return
+        from repositorio import convertir_promos_a_porcentaje, registrar_bitacora
+        ids = [int(i) for i in self._promos_seleccionadas]
+        previa = convertir_promos_a_porcentaje(ids)
+        if not any(p["estado"] != "ya_es_pct" for p in previa):
+            messagebox.showinfo("Pasar a %", "Todas las elegidas ya son por porcentaje.",
+                                parent=self)
+            return
+
+        d = tk.Toplevel(self)
+        d.title("Pasar promociones a porcentaje")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        _centrar(d, 760, 560)
+        lbl(d, "Pasar a porcentaje", variante="titulo", bg=C.superficie).pack(
+            anchor="w", padx=16, pady=(14, 2))
+        tk.Label(d, bg=C.superficie, fg=C.texto_suave, font=F.normal, justify="left",
+                 wraplength=720, anchor="w",
+                 text="Una promo por % sigue al precio de lista: si bajás o subís el "
+                      "producto, la promo se ajusta sola. Las de precio fijo no. "
+                      "Si dejás el campo vacío, cada promo conserva el descuento que "
+                      "tiene HOY; eso solo es correcto si el producto no cambió de "
+                      "precio desde que la cargaste. Si no estás seguro, poné vos el %."
+                 ).pack(fill="x", padx=16)
+        fila = tk.Frame(d, bg=C.superficie)
+        fila.pack(fill="x", padx=16, pady=8)
+        lbl(fila, "% para todas (vacío = el descuento actual de cada una):",
+            variante="suave", bg=C.superficie).pack(side="left")
+        e_pct = tk.Entry(fila, width=7, justify="center", font=F.normal,
+                         bg=C.superficie, fg=C.texto, relief="solid", bd=1)
+        e_pct.pack(side="left", padx=6, ipady=4)
+
+        cols = [("producto", "Producto", 260, "w"), ("cant", "Desde", 55, "e"),
+                ("promo", "Promo hoy", 90, "e"), ("normal", "Normal", 90, "e"),
+                ("pct", "Quedaría", 80, "e"), ("estado", "Estado", 130, "w")]
+        frame_t, tree = tabla(d, cols, altura=12)
+        frame_t.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        tree.tag_configure("ok", foreground=C.exito)
+        tree.tag_configure("ya", foreground=C.texto_suave)
+        tree.tag_configure("sin", foreground=C.peligro)
+        lbl_res = lbl(d, "", variante="suave", bg=C.superficie)
+        lbl_res.pack(anchor="w", padx=16)
+
+        estado_txt = {"ok": "se convierte", "ya_es_pct": "ya es %",
+                      "sin_pct": "falta indicar el %"}
+
+        def _pct_ingresado():
+            t = e_pct.get().strip().replace(",", ".").rstrip("%")
+            if not t:
+                return None
+            try:
+                v = float(t)
+            except ValueError:
+                raise ValueError("El porcentaje no es un número.")
+            if not 0 < v < 100:
+                raise ValueError("El porcentaje tiene que estar entre 0 y 100.")
+            return v
+
+        def _vista(*_a):
+            try:
+                pct = _pct_ingresado()
+            except ValueError as exc:
+                lbl_res.config(text=str(exc), fg=C.peligro)
+                return None
+            items = convertir_promos_a_porcentaje(ids, pct)
+            for r in tree.get_children():
+                tree.delete(r)
+            for it in items:
+                tag = {"ok": "ok", "ya_es_pct": "ya", "sin_pct": "sin"}[it["estado"]]
+                tree.insert("", "end", values=(
+                    it["descripcion"], f"x {it['cantidad_minima']}",
+                    f"$ {it['precio_promo']:,.2f}", f"$ {it['precio_base']:,.2f}",
+                    f"{it['pct']:.2f}%" if it["pct"] is not None else "—",
+                    estado_txt[it["estado"]]), tags=(tag,))
+            n_ok = sum(1 for i in items if i["estado"] == "ok")
+            n_sin = sum(1 for i in items if i["estado"] == "sin_pct")
+            lbl_res.config(
+                text=f"{n_ok} se convierten"
+                     + (f"  ·  {n_sin} no se pueden: ya no mejoran el precio normal, "
+                        "poné un % arriba" if n_sin else ""),
+                fg=C.peligro if n_sin else C.exito)
+            return items
+
+        e_pct.bind("<KeyRelease>", _vista)
+        _vista()
+
+        def convertir():
+            try:
+                pct = _pct_ingresado()
+            except ValueError as exc:
+                messagebox.showwarning("Error", str(exc), parent=d)
+                return
+            items = convertir_promos_a_porcentaje(ids, pct)
+            n_ok = sum(1 for i in items if i["estado"] == "ok")
+            if not n_ok:
+                messagebox.showinfo("Pasar a %", "No hay ninguna promoción para convertir. "
+                                    "Poné un porcentaje.", parent=d)
+                return
+            from fiado_ui import pedir_autorizacion
+            resp = pedir_autorizacion(d, f"Pasar {n_ok} promoción(es) a porcentaje.")
+            if not resp:
+                return
+            convertir_promos_a_porcentaje(ids, pct, aplicar=True)
+            registrar_bitacora("Promociones pasadas a porcentaje", resp,
+                               f"{n_ok} promoción(es)"
+                               + (f" al {pct:g}%" if pct else " con su descuento actual"))
+            d.destroy()
+            toast(self, f"{n_ok} promoción(es) pasadas a porcentaje")
+            self._refrescar_promos()
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(pady=(4, 14))
+        btn(pie, "Convertir", variante="exito", comando=convertir).pack(side="left", padx=6)
+        btn(pie, "Cancelar", variante="neutro", comando=d.destroy).pack(side="left", padx=6)
 
     def _nueva_promo(self):
         self._dialogo_promo(None)
@@ -995,6 +1272,7 @@ class PreciosUI(ttk.Frame):
 
         self._prod_promo_id = None
         self._prod_promo_map = {}
+        self._actualizar_margen_promo = None
 
         def _buscar(evento=None):
             for r in tree_prod.get_children():
@@ -1018,6 +1296,9 @@ class PreciosUI(ttk.Frame):
                 lbl_elegido.configure(
                     text=f"Producto elegido: {p['descripcion']} ({p['codigo']})",
                     fg=C.exito)
+                _f = getattr(self, "_actualizar_margen_promo", None)
+                if _f:
+                    _f()
 
         e_buscar.bind("<KeyRelease>", _buscar)
         tree_prod.bind("<<TreeviewSelect>>", _elegir)
@@ -1093,6 +1374,64 @@ class PreciosUI(ttk.Frame):
 
         _mostrar_tipo()
 
+        # Margen en vivo, para ver cuanto queda ANTES de guardar
+        lbl_margen = tk.Label(f_tipo, text="", bg=C.superficie, font=F.normal,
+                              justify="left", wraplength=400, anchor="w")
+        lbl_margen.pack(fill="x", anchor="w", pady=(8, 0))
+
+        def _actualizar_margen(*_a):
+            pid_ = self._prod_promo_id
+            if not pid_:
+                lbl_margen.config(text="Elegí un producto para ver el margen.",
+                                  fg=C.texto_suave)
+                return
+            from repositorio import get_producto_completo
+            prod_ = get_producto_completo(pid_) or {}
+            base_ = float(prod_.get("precio_base") or 0)
+            try:
+                if self._tipo_promo.get() == "porcentaje":
+                    pct_ = float(e_pct.get().replace(",", "."))
+                    if not (0 < pct_ < 100):
+                        raise ValueError
+                    precio_ = round(base_ * (1 - pct_ / 100), 2)
+                else:
+                    precio_ = float(e_precio.get().replace(",", "."))
+                    if precio_ <= 0:
+                        raise ValueError
+            except ValueError:
+                lbl_margen.config(text="", fg=C.texto_suave)
+                return
+            m_ = margen_sobre_costo(precio_, costo_real_producto(pid_))
+            if m_["nivel"] == "sin_costo":
+                lbl_margen.config(
+                    text=f"Precio de venta $ {precio_:,.2f}. Este producto no tiene "
+                         "costo cargado: no se puede calcular el margen.",
+                    fg=C.advertencia)
+            elif m_["nivel"] == "perdida":
+                lbl_margen.config(
+                    text=f"⚠ VENDÉS BAJO COSTO: a $ {precio_:,.2f} con costo "
+                         f"$ {m_['costo']:,.2f} perdés $ {-m_['margen']:,.2f} por "
+                         f"unidad ({-m_['pct']:.1f}% por debajo del costo).",
+                    fg=C.peligro)
+            elif m_["nivel"] == "bajo":
+                lbl_margen.config(
+                    text=f"⚠ Margen muy bajo: a $ {precio_:,.2f} con costo "
+                         f"$ {m_['costo']:,.2f} ganás $ {m_['margen']:,.2f} por "
+                         f"unidad ({m_['pct']:.1f}% sobre el costo; el mínimo "
+                         f"recomendado es {margen_minimo_promo_pct():g}%).",
+                    fg=C.advertencia)
+            else:
+                lbl_margen.config(
+                    text=f"Margen: a $ {precio_:,.2f} con costo $ {m_['costo']:,.2f} "
+                         f"ganás $ {m_['margen']:,.2f} por unidad "
+                         f"({m_['pct']:.1f}% sobre el costo).",
+                    fg=C.exito)
+
+        e_precio.bind("<KeyRelease>", _actualizar_margen)
+        e_pct.bind("<KeyRelease>", _actualizar_margen)
+        self._tipo_promo.trace_add("write", _actualizar_margen)
+        self._actualizar_margen_promo = _actualizar_margen
+
         campos_fecha = [
             ("Fecha desde (AAAA-MM-DD)",      "entry_pr_desde", ""),
             ("Fecha hasta (AAAA-MM-DD)",      "entry_pr_hasta", ""),
@@ -1124,6 +1463,7 @@ class PreciosUI(ttk.Frame):
             lbl_elegido.configure(
                 text=f"Producto elegido: {desc_actual or '(sin cambios)'} "
                     f"({codigo_actual or '?'})", fg=C.exito)
+            _actualizar_margen()
 
         def guardar(event=None):
             pid = self._prod_promo_id
@@ -1168,6 +1508,25 @@ class PreciosUI(ttk.Frame):
                 try:    datetime.strptime(fecha, "%Y-%m-%d")
                 except ValueError: messagebox.showwarning("Error", f"Fecha invalida: {fecha}", parent=d); return
 
+            m_ = margen_sobre_costo(precio, costo_real_producto(pid))
+            if m_["nivel"] == "perdida":
+                if not messagebox.askyesno(
+                        "⚠ Vendés bajo costo",
+                        f"A $ {precio:,.2f} por unidad (costo $ {m_['costo']:,.2f}) "
+                        f"perdés $ {-m_['margen']:,.2f} en cada unidad que se "
+                        "venda con esta promoción.\n\n¿Guardarla igual?",
+                        icon="warning", default="no", parent=d):
+                    return
+            elif m_["nivel"] == "bajo":
+                if not messagebox.askyesno(
+                        "Margen muy bajo",
+                        f"A $ {precio:,.2f} por unidad (costo $ {m_['costo']:,.2f}) "
+                        f"ganás solo $ {m_['margen']:,.2f} ({m_['pct']:.1f}% sobre "
+                        f"el costo). El mínimo recomendado es "
+                        f"{margen_minimo_promo_pct():g}%.\n\n¿Guardarla igual?",
+                        icon="warning", default="no", parent=d):
+                    return
+
             guardar_promocion(
                 promo["id"] if promo else None,
                 pid, cant, precio,
@@ -1196,8 +1555,14 @@ class PreciosUI(ttk.Frame):
             self._refrescar_promos()
 
     def _eliminar_promo(self):
+        """Elimina las promos TILDADAS (columna de la izquierda); si no hay
+        ninguna tildada, la fila que esta elegida."""
+        if self._promos_seleccionadas:
+            return self._eliminar_promos_tildadas()
         if not self._promo_sel_id:
-            messagebox.showinfo("Atencion", "Selecciona una promocion.", parent=self)
+            messagebox.showinfo(
+                "Atencion", "Elegí una promoción (clic en la fila) o tildá varias con la "
+                "columna de la izquierda.", parent=self)
             return
         if messagebox.askyesno("Eliminar", "Eliminar esta promocion?", parent=self):
             eliminar_promocion(self._promo_sel_id)
@@ -1206,3 +1571,41 @@ class PreciosUI(ttk.Frame):
             import catalogo_web
             catalogo_web.sincronizar_stock_en_segundo_plano()
             self._refrescar_promos()
+
+    def _eliminar_promos_tildadas(self):
+        from repositorio import eliminar_promociones_bulk, registrar_bitacora
+        ids = [int(i) for i in self._promos_seleccionadas]
+        total = len(get_promociones())
+        todas = len(ids) >= total
+        if not messagebox.askyesno(
+                "Eliminar promociones",
+                (f"Vas a eliminar TODAS las promociones ({len(ids)})."
+                 if todas else f"Vas a eliminar {len(ids)} promoción(es).")
+                + "\n\nNo se puede deshacer, pero antes se guarda un archivo con cómo "
+                  "estaban (producto, cantidad, % y precio) para que puedas volver a "
+                  "cargarlas.\n\n¿Eliminar?",
+                icon="warning", default="no", parent=self):
+            return
+        from fiado_ui import pedir_autorizacion
+        responsable = pedir_autorizacion(
+            self, f"Eliminar {len(ids)} promoción(es).")
+        if not responsable:
+            return
+        try:
+            n, ruta = eliminar_promociones_bulk(ids)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Eliminar", f"No se eliminó nada:\n{exc}", parent=self)
+            return
+        registrar_bitacora("Eliminación masiva de promociones", responsable,
+                           f"{n} promoción(es); respaldo: {ruta}")
+        self._promo_sel_id = None
+        try:
+            import catalogo_web
+            catalogo_web.sincronizar_stock_en_segundo_plano()
+        except Exception:
+            pass
+        self._refrescar_promos()
+        messagebox.showinfo(
+            "Eliminar", f"Se eliminaron {n} promoción(es).\n\nRespaldo guardado en:\n{ruta}",
+            parent=self)

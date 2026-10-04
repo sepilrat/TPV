@@ -40,7 +40,8 @@ def _get_precios_producto(producto_id: int, precio_base: float,
     hoy = datetime.now().strftime("%Y-%m-%d")
     with get_connection() as conn:
         promos = conn.execute("""
-            SELECT cantidad_minima, precio_unitario
+            SELECT cantidad_minima, precio_unitario, tipo_descuento,
+                   porcentaje_descuento
             FROM promociones
             WHERE producto_id = ? AND activa = 1
               AND (fecha_desde IS NULL OR fecha_desde <= ?)
@@ -50,10 +51,25 @@ def _get_precios_producto(producto_id: int, precio_base: float,
 
     precios = []
 
-    # Agregar promos
+    # Agregar promos. Una promo de precio fijo que ya no mejora el precio de
+    # lista (se bajo el precio y la promo quedo vieja) NO se muestra: la
+    # etiqueta diria "llevando 12: $900" con el producto suelto a $800.
     for p in promos:
+        # Una promo por % se calcula contra el precio de lista de HOY (igual
+        # que en la caja): el precio guardado queda viejo si el producto
+        # cambio de precio, y la etiqueta mostraria algo distinto a lo que
+        # se cobra. `precio_base` ya trae el recargo del vendedor, que no
+        # entra en el descuento.
+        if (p["tipo_descuento"] == "porcentaje"
+                and p["porcentaje_descuento"] is not None):
+            precio_promo = round((precio_base - recargo)
+                                 * (1 - float(p["porcentaje_descuento"]) / 100), 2)
+        else:
+            precio_promo = p["precio_unitario"]
+        if precio_promo + recargo >= precio_base - 0.005:
+            continue
         precios.append({
-            "precio":   p["precio_unitario"] + recargo,
+            "precio":   precio_promo + recargo,
             "cantidad": p["cantidad_minima"],
             "label":    f"Llevando {p['cantidad_minima']}",
         })

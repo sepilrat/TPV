@@ -3,6 +3,8 @@ repositorio.py — Capa de acceso a datos centralizada TPV v2.0
 Toda query a la DB pasa por acá. Los módulos UI no tocan get_connection directamente.
 """
 
+import os
+import re
 import logging
 from db import get_connection, descontar_stock_fifo
 from datetime import datetime
@@ -1741,13 +1743,19 @@ def get_promociones_activas_por_producto() -> dict:
     """
     hoy = datetime.now().strftime("%Y-%m-%d")
     with get_connection() as conn:
+        # Se descartan las promos de precio fijo que ya no mejoran el precio
+        # de lista (se bajo el precio del producto y la promo quedo vieja):
+        # la pagina las mostraria como "descuento" siendo mas caras.
         filas = conn.execute("""
-            SELECT producto_id, cantidad_minima, tipo_descuento,
-                   porcentaje_descuento, precio_unitario
-            FROM promociones
-            WHERE activa = 1
-              AND (fecha_desde IS NULL OR fecha_desde <= ?)
-              AND (fecha_hasta IS NULL OR fecha_hasta >= ?)
+            SELECT pr.producto_id, pr.cantidad_minima, pr.tipo_descuento,
+                   pr.porcentaje_descuento, pr.precio_unitario
+            FROM promociones pr
+            JOIN productos p ON p.id = pr.producto_id
+            WHERE pr.activa = 1
+              AND (pr.fecha_desde IS NULL OR pr.fecha_desde <= ?)
+              AND (pr.fecha_hasta IS NULL OR pr.fecha_hasta >= ?)
+              AND (COALESCE(pr.tipo_descuento, 'precio_fijo') = 'porcentaje'
+                   OR pr.precio_unitario < p.precio_base - 0.005)
         """, (hoy, hoy)).fetchall()
         agrupadas = {}
         for f in filas:
@@ -2266,6 +2274,13 @@ def get_precio_con_promo(producto_id: int, cantidad: float) -> tuple[float, bool
             # barata y la venta salía regalada.
             if not precio_promo or precio_promo <= 0:
                 continue
+            # Una promo de precio FIJO no se ajusta sola cuando cambia el
+            # precio de lista. Si se baja el precio del producto, la promo
+            # vieja puede quedar MAS CARA que comprar de a uno ("x12 a $900"
+            # con el producto ya a $800): llevar mas salia mas caro. Una
+            # promo que no mejora el precio de lista simplemente no existe.
+            if precio_promo >= precio_base - 0.005:
+                continue
             if mejor_precio is None or precio_promo < mejor_precio:
                 mejor_precio = precio_promo
 
@@ -2278,6 +2293,7 @@ def get_promociones() -> list:
     with get_connection() as conn:
         return [dict(r) for r in conn.execute("""
             SELECT pr.id, pr.producto_id, p.descripcion, p.codigo,
+                   p.precio_base,
                    pr.cantidad_minima, pr.precio_unitario,
                    pr.tipo_descuento, pr.porcentaje_descuento,
                    pr.descripcion as detalle,
@@ -2332,6 +2348,56 @@ def eliminar_promocion(pid):
         conn.commit()
 
 
+def eliminar_promociones_bulk(ids: list, carpeta_respaldo: str = None):
+    """Borra varias promociones a la vez. Devuelve (cantidad, ruta_del_respaldo).
+
+    Antes de borrar guarda un CSV con lo que habia (producto, cantidad, %,
+    precio, fechas): eliminar promos no se puede deshacer, y para volver a
+    cargarlas hace falta saber como estaban. Si el respaldo no se puede
+    escribir, NO se borra nada.
+    """
+    import csv
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0, None
+    with get_connection() as conn:
+        filas = []
+        for i in range(0, len(ids), 500):
+            lote = ids[i:i + 500]
+            filas += conn.execute(f"""
+                SELECT p.codigo, p.descripcion, p.precio_base, pr.cantidad_minima,
+                       COALESCE(pr.tipo_descuento, 'precio_fijo') AS tipo,
+                       pr.porcentaje_descuento, pr.precio_unitario,
+                       pr.fecha_desde, pr.fecha_hasta, pr.activa, pr.descripcion AS detalle
+                FROM promociones pr JOIN productos p ON p.id = pr.producto_id
+                WHERE pr.id IN ({','.join('?' * len(lote))})
+                ORDER BY p.descripcion, pr.cantidad_minima
+            """, lote).fetchall()
+        carpeta = carpeta_respaldo or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "respaldos_promos")
+        os.makedirs(carpeta, exist_ok=True)
+        ruta = os.path.join(carpeta, "promos_borradas_"
+                            + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv")
+        with open(ruta, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["codigo", "producto", "precio_normal", "desde_cantidad", "tipo",
+                        "porcentaje", "precio_promo", "fecha_desde", "fecha_hasta",
+                        "activa", "detalle"])
+            for r in filas:
+                w.writerow([r["codigo"], r["descripcion"], r["precio_base"],
+                            r["cantidad_minima"], r["tipo"], r["porcentaje_descuento"],
+                            r["precio_unitario"], r["fecha_desde"], r["fecha_hasta"],
+                            r["activa"], r["detalle"]])
+        n = 0
+        for i in range(0, len(ids), 500):
+            lote = ids[i:i + 500]
+            n += conn.execute(
+                f"DELETE FROM promociones WHERE id IN ({','.join('?' * len(lote))})",
+                lote).rowcount or 0
+        conn.commit()
+    return n, ruta
+
+
 def modificar_promociones_bulk(ids: list, modo: str, valor: float) -> int:
     """
     Modifica en masa promociones YA existentes (no crea nuevas). Pensado
@@ -2365,9 +2431,12 @@ def modificar_promociones_bulk(ids: list, modo: str, valor: float) -> int:
             cur = conn.execute(f"""
                 UPDATE promociones
                 SET tipo_descuento = 'porcentaje',
-                    porcentaje_descuento = ?
+                    porcentaje_descuento = ?,
+                    precio_unitario = ROUND((
+                        SELECT p.precio_base FROM productos p
+                        WHERE p.id = promociones.producto_id) * (1 - ? / 100.0), 2)
                 WHERE id IN ({','.join('?' * len(ids))})
-            """, [valor] + ids)
+            """, [valor, valor] + ids)
         elif modo == "precio_fijo":
             valor = redondear_precio(valor)
             if valor <= 0:
@@ -2812,6 +2881,205 @@ def costo_real_producto(producto_id: int) -> float:
     return float(r["costo"] or 0) if r else 0.0
 
 
+MARGEN_MIN_PROMO_PCT = 10.0     # por debajo de esto la promo se marca "margen bajo"
+
+
+def margen_minimo_promo_pct() -> float:
+    """Margen minimo (% sobre el costo) debajo del cual se avisa.
+
+    Se puede cambiar con la clave "promo_margen_minimo_pct" de la config.
+    """
+    try:
+        from config import cfg
+        v = cfg().get("promo_margen_minimo_pct")
+        return float(v) if v not in (None, "") else MARGEN_MIN_PROMO_PCT
+    except Exception:
+        return MARGEN_MIN_PROMO_PCT
+
+
+def margen_sobre_costo(precio: float, costo: float, minimo_pct=None) -> dict:
+    """Cuanto queda por unidad al vender a `precio` un producto que cuesta `costo`.
+
+    Devuelve {precio, costo, margen, pct, nivel}. `pct` es sobre el COSTO
+    (precio = costo x (1 + pct)), igual que el "Margen %" del resto del TPV.
+    nivel: "sin_costo" (no hay costo cargado: no se puede saber) |
+           "perdida"   (se vende por debajo del costo) |
+           "bajo"      (gana, pero menos que el minimo) | "ok"
+    """
+    precio, costo = float(precio or 0), float(costo or 0)
+    minimo = margen_minimo_promo_pct() if minimo_pct is None else float(minimo_pct)
+    if costo <= 0:
+        return {"precio": precio, "costo": 0.0, "margen": None, "pct": None,
+                "nivel": "sin_costo"}
+    margen = precio - costo
+    pct = margen / costo * 100
+    if margen < -0.005:
+        nivel = "perdida"
+    elif pct < minimo:
+        nivel = "bajo"
+    else:
+        nivel = "ok"
+    return {"precio": precio, "costo": costo, "margen": margen, "pct": pct,
+            "nivel": nivel}
+
+
+def precio_efectivo_promo(pr: dict) -> float:
+    """Precio por unidad al que realmente vende una promo por producto.
+
+    Las promos por % se recalculan siempre contra el precio de lista actual.
+    """
+    if (pr.get("tipo_descuento") == "porcentaje"
+            and pr.get("porcentaje_descuento") is not None
+            and pr.get("precio_base") is not None):
+        return round(float(pr["precio_base"])
+                     * (1 - float(pr["porcentaje_descuento"]) / 100), 2)
+    return float(pr["precio_unitario"])
+
+
+def margen_promocion(pr: dict) -> dict:
+    """margen_sobre_costo() de una fila de get_promociones()."""
+    return margen_sobre_costo(precio_efectivo_promo(pr),
+                              costo_real_producto(pr["producto_id"]))
+
+
+def simular_promo_masiva(ids: list, tipo: str, valor: float) -> list:
+    """Margen que quedaria en cada producto si se aplica una promo masiva.
+
+    tipo: "pct" (% de descuento), "monto" ($ menos por unidad) o "fijo"
+    (precio fijo). Devuelve [{descripcion, precio, costo, margen, pct,
+    nivel}] solo de los productos a los que la promo SI se les aplicaria
+    (la que no baja el precio no se guarda). Una sola consulta por tanda.
+    """
+    out = []
+    ids = list(ids)
+    with get_connection() as conn:
+        for k in range(0, len(ids), 500):
+            lote = ids[k:k + 500]
+            q = ",".join("?" * len(lote))
+            for r in conn.execute(f"""
+                SELECT p.id, p.descripcion, p.precio_base,
+                       COALESCE((
+                           SELECT l.costo_unitario FROM lotes l
+                           WHERE l.producto_id = p.id AND l.cantidad_restante > 0
+                             AND COALESCE(l.costo_unitario, 0) > 0
+                           ORDER BY l.fecha_ingreso DESC, l.id DESC LIMIT 1
+                       ), p.costo_ultimo, 0) AS costo
+                FROM productos p WHERE p.id IN ({q})
+            """, lote).fetchall():
+                base = float(r["precio_base"] or 0)
+                if tipo == "pct":
+                    precio = round(base * (1 - valor / 100), 2)
+                elif tipo == "monto":
+                    precio = round(base - valor, 2)
+                else:
+                    precio = float(valor)
+                if precio >= base or precio <= 0:
+                    continue
+                m = margen_sobre_costo(precio, r["costo"])
+                m["descripcion"] = r["descripcion"]
+                out.append(m)
+    return out
+
+
+def convertir_promos_a_porcentaje(ids: list, pct: float = None,
+                                  aplicar: bool = False) -> list:
+    """Pasa promos de precio FIJO a porcentaje.
+
+    Las promos masivas por % se guardaban como precio fijo, asi que no
+    seguian al precio de lista. Esto las convierte.
+
+    pct=None: cada una conserva el descuento que tiene HOY respecto al
+        precio de lista actual. Solo es correcto si el precio del producto
+        no cambio desde que se cargo la promo: por eso primero se muestra
+        (aplicar=False) y las que ya no mejoran el precio (no hay descuento
+        que inferir) quedan "sin_pct" hasta que se indique un %.
+    pct=N: todas las elegidas quedan con ese N%.
+
+    Devuelve [{id, descripcion, cantidad_minima, precio_promo, precio_base,
+    pct, estado}] con estado "ok" | "ya_es_pct" | "sin_pct". Solo escribe si
+    aplicar=True, y solo las "ok".
+    """
+    if not ids:
+        return []
+    if pct is not None and not 0 < float(pct) < 100:
+        raise ValueError("El porcentaje tiene que estar entre 0 y 100")
+    out = []
+    with get_connection() as conn:
+        for i in range(0, len(ids), 500):
+            lote = list(ids)[i:i + 500]
+            for r in conn.execute(f"""
+                SELECT pr.id, p.descripcion, pr.cantidad_minima,
+                       pr.precio_unitario, pr.tipo_descuento,
+                       pr.porcentaje_descuento, p.precio_base
+                FROM promociones pr JOIN productos p ON p.id = pr.producto_id
+                WHERE pr.id IN ({','.join('?' * len(lote))})
+                ORDER BY p.descripcion, pr.cantidad_minima
+            """, lote).fetchall():
+                base = float(r["precio_base"] or 0)
+                precio = float(r["precio_unitario"] or 0)
+                item = {"id": r["id"], "descripcion": r["descripcion"],
+                        "cantidad_minima": r["cantidad_minima"],
+                        "precio_promo": precio, "precio_base": base,
+                        "pct": None, "estado": "ok"}
+                if (r["tipo_descuento"] or "precio_fijo") == "porcentaje":
+                    item.update(estado="ya_es_pct", pct=r["porcentaje_descuento"])
+                elif pct is not None:
+                    item["pct"] = round(float(pct), 2)
+                elif base > 0 and 0 < precio < base - 0.005:
+                    item["pct"] = round((1 - precio / base) * 100, 2)
+                else:
+                    item["estado"] = "sin_pct"
+                out.append(item)
+        if aplicar:
+            for it in out:
+                if it["estado"] != "ok":
+                    continue
+                conn.execute("""
+                    UPDATE promociones
+                       SET tipo_descuento = 'porcentaje',
+                           porcentaje_descuento = ?,
+                           precio_unitario = ?
+                     WHERE id = ?
+                """, (it["pct"], round(it["precio_base"] * (1 - it["pct"] / 100), 2),
+                      it["id"]))
+            conn.commit()
+    return out
+
+
+def promos_obsoletas() -> list:
+    """Promos de precio FIJO activas que ya no mejoran el precio de lista.
+
+    Pasa cuando se baja el precio de un producto y la promo queda con el
+    precio de antes. Cada item: {id, producto_id, descripcion, cantidad_minima,
+    precio_promo, precio_base, sugerido}. `sugerido` conserva el mismo
+    porcentaje de descuento que tenia la promo contra el precio de lista
+    ANTERIOR si se conoce; si no, no hay sugerencia (None).
+    """
+    with get_connection() as conn:
+        filas = conn.execute("""
+            SELECT pr.id, pr.producto_id, p.descripcion, pr.cantidad_minima,
+                   pr.precio_unitario AS precio_promo, p.precio_base
+            FROM promociones pr JOIN productos p ON p.id = pr.producto_id
+            WHERE pr.activa = 1
+              AND COALESCE(pr.tipo_descuento, 'precio_fijo') <> 'porcentaje'
+              AND pr.precio_unitario >= p.precio_base - 0.005
+            ORDER BY p.descripcion, pr.cantidad_minima
+        """).fetchall()
+    return [dict(f, sugerido=None) for f in filas]
+
+
+def desactivar_promos_obsoletas(ids: list = None) -> int:
+    """Apaga (no borra) las promos obsoletas. Devuelve cuantas apago."""
+    ids = list(ids) if ids is not None else [p["id"] for p in promos_obsoletas()]
+    if not ids:
+        return 0
+    with get_connection() as conn:
+        conn.execute(f"UPDATE promociones SET activa = 0 WHERE id IN "
+                     f"({','.join('?' * len(ids))})", ids)
+        conn.commit()
+    return len(ids)
+
+
 def chequeos_de_datos() -> list:
     """Los mismos chequeos de verificar_datos.py, pero como datos.
 
@@ -2891,6 +3159,7 @@ def chequeos_de_datos() -> list:
                        p.precio_base
                 FROM promociones pr JOIN productos p ON p.id = pr.producto_id
                 WHERE pr.activa = 1 AND pr.precio_unitario >= p.precio_base
+                  AND COALESCE(pr.tipo_descuento, 'precio_fijo') <> 'porcentaje'
             """).fetchall(),
             "Precios → Promociones",
             lambda f: (f"{f[0]} — x{f[1]} a $ {f[2]:,.0f} "
@@ -3260,13 +3529,21 @@ def aplicar_promocion_bulk_tipo(ids, escalas, descripcion=None,
                 # promo que sube el precio no es una promo.
                 if precio <= 0 or precio >= base:
                     continue
+                # Un descuento en % se guarda COMO porcentaje, no como el
+                # precio ya calculado: asi sigue al precio de lista si este
+                # cambia (antes quedaba como "precio fijo" y, al bajar el
+                # producto, la promo se quedaba con el precio viejo).
+                es_pct = tipo not in ("monto", "fijo")
                 conn.execute("""
                     INSERT INTO promociones
                         (producto_id, cantidad_minima, precio_unitario,
-                         fecha_desde, fecha_hasta, activa, descripcion)
-                    VALUES (?,?,?,?,?,1,?)
+                         fecha_desde, fecha_hasta, activa, descripcion,
+                         tipo_descuento, porcentaje_descuento)
+                    VALUES (?,?,?,?,?,1,?,?,?)
                 """, (f["id"], int(cant_min), precio, desde, hasta,
-                      descripcion))
+                      descripcion,
+                      "porcentaje" if es_pct else "precio_fijo",
+                      float(valor) if es_pct else None))
                 n += 1
         conn.commit()
     return n
@@ -3319,18 +3596,20 @@ def aplicar_promocion_bulk(ids: list, escalas: list[tuple[int, float]],
                     conn.execute("""
                         UPDATE promociones
                         SET precio_unitario=?, descripcion=?,
-                            fecha_desde=?, fecha_hasta=?
+                            fecha_desde=?, fecha_hasta=?,
+                            tipo_descuento='porcentaje', porcentaje_descuento=?
                         WHERE id=?
                     """, (precio_promo, desc_final, fecha_desde or None,
-                          fecha_hasta or None, promo_id))
+                          fecha_hasta or None, float(pct), promo_id))
                 else:
                     conn.execute("""
                         INSERT INTO promociones
                             (producto_id, cantidad_minima, precio_unitario,
-                             descripcion, fecha_desde, fecha_hasta)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                             descripcion, fecha_desde, fecha_hasta,
+                             tipo_descuento, porcentaje_descuento)
+                        VALUES (?, ?, ?, ?, ?, ?, 'porcentaje', ?)
                     """, (f["id"], cant_min, precio_promo, desc_final,
-                          fecha_desde or None, fecha_hasta or None))
+                          fecha_desde or None, fecha_hasta or None, float(pct)))
                 afectados += 1
         conn.commit()
         return afectados
@@ -4688,10 +4967,10 @@ def get_detalle_venta(venta_id: int) -> list:
 def get_movimientos_cliente(cliente_id: int) -> list:
     with get_connection() as conn:
         return [dict(r) for r in conn.execute("""
-            SELECT tipo, monto, concepto, autorizado_por, fecha, venta_id
+            SELECT id, tipo, monto, concepto, autorizado_por, fecha, venta_id
             FROM movimientos_cuenta
             WHERE cliente_id = ?
-            ORDER BY fecha DESC
+            ORDER BY fecha DESC, id DESC
         """, (cliente_id,)).fetchall()]
 
 
@@ -4716,6 +4995,91 @@ def registrar_pago_cuenta_corriente(cliente_id: int, monto: float, autorizado_po
         concepto="Pago de deuda",
         autorizado_por=autorizado_por
     )
+
+
+def registrar_cargo_cuenta_corriente(cliente_id: int, monto: float, concepto: str,
+                                     autorizado_por: str, fecha: str = None) -> float:
+    """Suma a mano una deuda a la cuenta del cliente (sin venta ni caja).
+
+    Sirve para deudas que no pasaron por el TPV: saldos viejos, plata
+    prestada, un trabajo anotado en un cuaderno. No toca la caja: no entra
+    ni sale plata, solo cambia lo que el cliente debe.
+    `fecha` (YYYY-MM-DD) permite anotar una deuda de una fecha anterior; no
+    puede ser futura. Devuelve el saldo nuevo.
+    """
+    monto = round(float(monto), 2)
+    concepto = (concepto or "").strip()
+    if monto <= 0:
+        raise ValueError("El monto tiene que ser mayor a cero")
+    if not concepto:
+        raise ValueError("Falta el concepto")
+    fecha_sql = None
+    if fecha:
+        try:
+            f = datetime.strptime(str(fecha)[:10], "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("Fecha inválida")
+        if f.date() > datetime.now().date():
+            raise ValueError("La fecha no puede ser futura")
+        # Mediodia: ordena bien contra los movimientos de ese mismo dia
+        fecha_sql = f.strftime("%Y-%m-%d") + " 12:00:00"
+    with get_connection() as conn:
+        _asegurar_cuenta_corriente(conn, cliente_id)
+        conn.execute("""
+            UPDATE cuentas_corrientes
+               SET saldo_actual = saldo_actual + ?,
+                   ultima_actualizacion = datetime('now','localtime')
+             WHERE cliente_id = ?
+        """, (monto, cliente_id))
+        conn.execute("""
+            INSERT INTO movimientos_cuenta
+                (cliente_id, tipo, monto, concepto, autorizado_por, fecha)
+            VALUES (?,'cuenta_corriente',?,?,?, COALESCE(?, datetime('now','localtime')))
+        """, (cliente_id, monto, concepto, autorizado_por, fecha_sql))
+        saldo = conn.execute("SELECT saldo_actual FROM cuentas_corrientes "
+                             "WHERE cliente_id=?", (cliente_id,)).fetchone()[0]
+        conn.commit()
+    return float(saldo)
+
+
+def anular_cargo_manual(mov_id: int, autorizado_por: str) -> float:
+    """Deshace una deuda cargada a mano, sin borrar nada.
+
+    Genera un movimiento 'ajuste' de signo contrario (misma convencion que
+    las devoluciones: negativo baja la deuda), asi queda el rastro de la
+    carga y de la anulacion. Solo anula cargos manuales (sin venta) y una
+    sola vez. Devuelve el saldo nuevo.
+    """
+    with get_connection() as conn:
+        m = conn.execute("SELECT * FROM movimientos_cuenta WHERE id=?",
+                         (mov_id,)).fetchone()
+        if not m:
+            raise ValueError("No existe ese movimiento")
+        if m["tipo"] != "cuenta_corriente" or m["venta_id"] is not None:
+            raise ValueError("Solo se pueden anular deudas cargadas a mano "
+                             "(las de ventas se corrigen anulando la venta)")
+        marca = f"[#{mov_id}]"
+        if conn.execute("SELECT 1 FROM movimientos_cuenta WHERE cliente_id=? "
+                        "AND tipo='ajuste' AND concepto LIKE ?",
+                        (m["cliente_id"], f"%{marca}")).fetchone():
+            raise ValueError("Esa deuda ya fue anulada")
+        monto = float(m["monto"])
+        conn.execute("""
+            UPDATE cuentas_corrientes
+               SET saldo_actual = saldo_actual - ?,
+                   ultima_actualizacion = datetime('now','localtime')
+             WHERE cliente_id = ?
+        """, (monto, m["cliente_id"]))
+        conn.execute("""
+            INSERT INTO movimientos_cuenta
+                (cliente_id, tipo, monto, concepto, autorizado_por)
+            VALUES (?,'ajuste',?,?,?)
+        """, (m["cliente_id"], -monto,
+              f"Anulación de deuda: {m['concepto'] or ''} {marca}", autorizado_por))
+        saldo = conn.execute("SELECT saldo_actual FROM cuentas_corrientes "
+                             "WHERE cliente_id=?", (m["cliente_id"],)).fetchone()[0]
+        conn.commit()
+    return float(saldo)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5608,6 +5972,76 @@ def get_bitacora(desde=None, hasta=None, accion=None, limite=300) -> list:
         """, params).fetchall()]
 
 
+_CODIGO_VEND_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+
+
+def codigo_vendedor_valido(codigo: str) -> bool:
+    return bool(_CODIGO_VEND_RE.match(str(codigo or "")))
+
+
+def normalizar_codigo_vendedor(texto: str) -> str:
+    """'Lauti Rossi' -> 'lauti-rossi' (sin tildes, espacios ni simbolos)."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(texto or "")).encode(
+        "ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-")[:40]
+
+
+def diagnosticar_vendedores() -> list:
+    """Revisa cada vendedor y dice POR QUE su link podria mostrar mal los precios.
+
+    Devuelve [{vendedor, problemas: [(gravedad, texto)], ejemplo}] con
+    gravedad "error" (el link no anda), "aviso" (anda pero no como se espera)
+    o "info". `ejemplo` es (descripcion, lista, ve) con el mismo calculo que
+    usan el folleto y WhatsApp (productos_para_vendedor).
+    """
+    prods = [p for p in get_productos(solo_activos=True)
+             if p["precio_base"] and p["precio_base"] > 0]
+    sin_costo = sum(1 for p in prods if not (p.get("costo_ultimo") or 0))
+    con_costo = sorted((p for p in prods if (p.get("costo_ultimo") or 0) > 0),
+                       key=lambda p: -float(p["precio_base"]))
+    muestra = con_costo[len(con_costo) // 2:len(con_costo) // 2 + 1]
+
+    out = []
+    for v in get_vendedores():
+        pr = []
+        cod = v["codigo"] or ""
+        if not codigo_vendedor_valido(cod):
+            pr.append(("error",
+                       f"El código «{cod}» tiene espacios, tildes o símbolos: el link "
+                       f"?v={cod} se rompe y la página no encuentra al vendedor, "
+                       f"así que muestra el precio de lista. Cambialo a "
+                       f"«{normalizar_codigo_vendedor(cod)}»."))
+        if not v["activo"]:
+            pr.append(("error", "Está desactivado: su link no funciona."))
+        modo = str(v.get("modo_comision") or "recargo").lower()
+        com = float(v.get("comision_pct") or 0)
+        if modo == "descuento":
+            pr.append(("aviso", "Está en «Vos pagás la comisión»: el cliente ve el "
+                                "PRECIO DE LISTA a propósito. Para que vea un recargo "
+                                "elegí «El cliente»."))
+        elif com <= 0:
+            pr.append(("aviso", "La comisión es 0%: no hay recargo, se ve el precio de lista."))
+        if modo != "descuento" and sin_costo:
+            pr.append(("aviso", f"{sin_costo} producto(s) no tienen costo cargado: el "
+                                "recargo es sobre el costo, así que esos se ven a precio "
+                                "de lista."))
+        if v.get("modo_cobro") == "vendedor" and not (v.get("telefono") or "").strip():
+            pr.append(("aviso", "Cobra él directo pero no tiene teléfono cargado."))
+        n_cat = len(get_categorias_vendedor(v["id"]))
+        pr.append(("info", f"Categorías: {n_cat if n_cat else 'todas'}."))
+        ejemplo = None
+        if muestra:
+            ajust, _ = productos_para_vendedor(muestra, v["id"])
+            if ajust:
+                ejemplo = (muestra[0]["descripcion"], float(muestra[0]["precio_base"]),
+                           float(ajust[0]["precio_base"]))
+            else:
+                pr.append(("aviso", "Con sus categorías no ve el producto de ejemplo."))
+        out.append({"vendedor": v, "problemas": pr, "ejemplo": ejemplo})
+    return out
+
+
 def get_vendedor_por_codigo(codigo: str) -> dict | None:
     with get_connection() as conn:
         r = conn.execute("SELECT * FROM vendedores WHERE codigo=?",
@@ -5648,6 +6082,22 @@ def guardar_vendedor(vid, codigo, nombre, usuario, password_plano,
     usuario = usuario.strip().lower()
     if not codigo or not nombre.strip() or not usuario:
         return False, "Código, nombre y usuario son obligatorios."
+
+    # El codigo viaja en el link (?v=codigo): con un espacio, una tilde o un
+    # simbolo el link se rompe y la pagina no encuentra al vendedor, asi que
+    # muestra el catalogo general (precio de lista). Un codigo viejo que ya
+    # estaba guardado se respeta, para no cambiar links ya repartidos.
+    if not codigo_vendedor_valido(codigo):
+        viejo = None
+        if vid:
+            with get_connection() as conn:
+                r = conn.execute("SELECT codigo FROM vendedores WHERE id=?",
+                                 (vid,)).fetchone()
+                viejo = r[0] if r else None
+        if codigo != viejo:
+            return False, (f"El código «{codigo}» no sirve para un link: solo "
+                           "letras, números, guion y guion bajo, sin espacios. "
+                           f"Probá con «{normalizar_codigo_vendedor(codigo)}».")
 
     with get_connection() as conn:
         dup = conn.execute(

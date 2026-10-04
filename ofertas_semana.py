@@ -123,7 +123,7 @@ def _datos_precio(prod, modo="unitario"):
     cantidad: el escalon mas barato por unidad; si es por cantidad, la
               tarjeta lo aclara con "a partir de N".
     """
-    base = float(prod["precio_base"]) + float(prod.get("_recargo", 0.0))
+    base = float(prod["precio_base"])      # ya incluye el recargo, si lo hay
     if modo == "lista":
         return base, 1
     precios = _get_precios_producto(prod["id"], prod["precio_base"],
@@ -137,6 +137,49 @@ def _datos_precio(prod, modo="unitario"):
     if unitarios:
         return float(min(p["precio"] for p in unitarios)), 1
     return base, 1
+
+
+# ── Chequeos antes de imprimir ────────────────────────────────────────────
+
+def chequear_flyer(productos, modo="unitario", valido_hasta=None):
+    """Problemas que conviene ver ANTES de imprimir y repartir el flyer.
+
+    Un flyer impreso no se corrige: si dice un precio bajo costo o una promo
+    que ya no rige, hay que honrarlo o repartir otro.
+    Devuelve (graves, avisos): listas de textos. Graves = pierde plata.
+    """
+    from repositorio import (margen_sobre_costo, costo_real_producto,
+                             get_promociones)
+    graves, avisos = [], []
+    promos = {}
+    if modo != "lista":
+        for pr in get_promociones():
+            if pr["activa"] and pr.get("fecha_hasta"):
+                promos.setdefault(pr["producto_id"], []).append(pr)
+    for p in productos:
+        precio, cant = _datos_precio(p, modo)
+        m = margen_sobre_costo(precio, costo_real_producto(p["id"]))
+        nombre = p.get("descripcion") or f"#{p['id']}"
+        if m["nivel"] == "perdida":
+            graves.append(f"{nombre}: sale a {_fmt_precio(precio)} y cuesta "
+                          f"{_fmt_precio(m['costo'])} (perdés {_fmt_precio(-m['margen'])} "
+                          "por unidad).")
+        elif m["nivel"] == "bajo":
+            avisos.append(f"{nombre}: margen de solo {m['pct']:.1f}% sobre el costo.")
+        elif m["nivel"] == "sin_costo":
+            avisos.append(f"{nombre}: no tiene costo cargado, no se pudo chequear el margen.")
+        if valido_hasta:
+            for pr in promos.get(p["id"], []):
+                try:
+                    vence = datetime.strptime(str(pr["fecha_hasta"])[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if vence < valido_hasta:
+                    avisos.append(f"{nombre}: la promo vence el {vence.strftime('%d/%m')}, "
+                                  f"antes del «válido hasta» del flyer "
+                                  f"({valido_hasta.strftime('%d/%m')}).")
+                    break
+    return graves, avisos
 
 
 # ── Imagenes ──────────────────────────────────────────────────────────────
@@ -846,6 +889,21 @@ def abrir_selector_ofertas(parent):
             messagebox.showwarning("Ofertas", "No encuentro la foto de fondo:\n"
                                    f"{fondo}", parent=d)
             return
+        graves, avisos = chequear_flyer(prods, _modo(), fecha)
+        if graves or avisos:
+            def _lista(xs):
+                return "\n".join(f"• {x}" for x in xs[:8]) + (
+                    f"\n… y {len(xs) - 8} más" if len(xs) > 8 else "")
+            cuerpo = ""
+            if graves:
+                cuerpo += "⚠ VENDERÍAS BAJO COSTO:\n" + _lista(graves) + "\n\n"
+            if avisos:
+                cuerpo += "A revisar:\n" + _lista(avisos) + "\n\n"
+            if not messagebox.askyesno(
+                    "⚠ Revisá el flyer antes de imprimirlo",
+                    cuerpo + "Un flyer impreso no se puede corregir.\n¿Generarlo igual?",
+                    icon="warning", default="no" if graves else "yes", parent=d):
+                return
         carpeta = filedialog.askdirectory(parent=d, title="¿Dónde guardo el flyer?")
         if not carpeta:
             return

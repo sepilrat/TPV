@@ -20,11 +20,41 @@ from repositorio import (get_cliente_por_dni, get_cliente_por_id,
                          crear_cliente, actualizar_cliente,
                          get_todos_clientes, get_movimientos_cliente,
                          registrar_pago_cuenta_corriente,
+                         registrar_cargo_cuenta_corriente, anular_cargo_manual,
                          buscar_clientes_por_nombre, get_detalle_venta)
 
 # Clave del responsable — en producción esto debería estar en DB con hash
 # Por ahora es configurable acá
 CLAVE_RESPONSABLE = "1234"
+
+
+def _detalle_movimientos(cliente_id, n=5):
+    """Ultimos movimientos de la cuenta, listos para meter en un mensaje.
+
+    Cargos suman, pagos y ajustes restan: asi el cliente ve de donde sale el
+    saldo y no solo el numero.
+    """
+    from datetime import datetime as _dt
+    lineas = []
+    for m in get_movimientos_cliente(cliente_id)[:n]:
+        try:
+            dia = _dt.strptime((m["fecha"] or "")[:10], "%Y-%m-%d").strftime("%d/%m")
+        except ValueError:
+            dia = "--/--"
+        monto = float(m["monto"])
+        if m["tipo"] == "cuenta_corriente":
+            signo, que = "+", (m["concepto"] or "Compra")
+        else:
+            signo, que = "-", (m["concepto"] or "Pago")
+        lineas.append(f"• {dia}  {que}: {signo}$ {abs(monto):,.2f}")
+    return "\n".join(lineas)
+
+
+def _activable_con_enter(b):
+    """Que el boton tome foco con Tab y se active con Enter, no solo con clic."""
+    b.configure(takefocus=1)
+    b.bind("<Return>", lambda e: (b.invoke(), "break")[1])
+    return b
 
 COLS_CLIENTES = [
     ("dni",        "DNI",         90,  "w"),
@@ -410,18 +440,21 @@ class FiadoUI(ttk.Frame):
         btn(ac, "Registrar pago", variante="exito",
             comando=self._registrar_pago).grid(
             row=1, column=0, sticky="ew", padx=16, pady=4)
+        _activable_con_enter(btn(ac, "Agregar deuda", variante="peligro",
+            comando=self._agregar_deuda)).grid(
+            row=2, column=0, sticky="ew", padx=16, pady=4)
         btn(ac, "Editar cliente / tope", variante="primario",
             comando=self._editar_cliente).grid(
-            row=2, column=0, sticky="ew", padx=16, pady=4)
+            row=3, column=0, sticky="ew", padx=16, pady=4)
         btn(ac, "Ver movimientos", variante="neutro",
             comando=self._ver_movimientos).grid(
-            row=3, column=0, sticky="ew", padx=16, pady=4)
+            row=4, column=0, sticky="ew", padx=16, pady=4)
         btn(ac, "📱 Recordatorio WhatsApp", variante="neutro",
             comando=self._recordatorio_whatsapp).grid(
-            row=4, column=0, sticky="ew", padx=16, pady=4)
+            row=5, column=0, sticky="ew", padx=16, pady=4)
         btn(ac, "📱 Recordatorios masivos", variante="neutro",
             comando=self._recordatorios_masivos).grid(
-            row=5, column=0, sticky="ew", padx=16, pady=(4, 16))
+            row=6, column=0, sticky="ew", padx=16, pady=(4, 16))
 
         # Movimientos del cliente seleccionado
         lbl(der, "Movimientos del cliente", variante="subtitulo").grid(
@@ -512,15 +545,18 @@ class FiadoUI(ttk.Frame):
         from config import cfg
         negocio = cfg().get("negocio_nombre") or "el negocio"
         saldo = c.get("saldo_actual", 0) or 0
+        detalle = _detalle_movimientos(c["id"])
         mensaje = (
             f"Hola {c['nombre']}! Te escribimos de {negocio} para "
             f"recordarte que tenés un saldo pendiente de $ {saldo:,.2f} "
-            f"en tu cuenta corriente. ¡Gracias!"
+            f"en tu cuenta corriente."
+            + (f"\n\nÚltimos movimientos:\n{detalle}" if detalle else "")
+            + "\n\n¡Gracias!"
         )
 
         d = tk.Toplevel(self)
         d.title("Recordatorio por WhatsApp")
-        w, h = 420, 300
+        w, h = 440, 420
         sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
         d.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         d.configure(bg=C.superficie)
@@ -532,7 +568,7 @@ class FiadoUI(ttk.Frame):
             variante="suave", bg=C.superficie).pack(padx=16, anchor="w")
 
         txt = tk.Text(d, font=F.normal, bg=C.superficie, fg=C.texto,
-                      relief="solid", bd=1, wrap="word", height=6)
+                      relief="solid", bd=1, wrap="word", height=10)
         txt.insert("1.0", mensaje)
         txt.pack(fill="both", expand=True, padx=16, pady=(6,12))
 
@@ -754,6 +790,135 @@ class FiadoUI(ttk.Frame):
         btn(d, "Registrar pago", variante="exito", comando=guardar).pack(
             fill="x", padx=20, pady=(0, 16))
 
+    def _agregar_deuda(self):
+        """Suma a mano plata que el cliente debe (concepto + monto)."""
+        if not self._cliente_sel:
+            messagebox.showinfo("Atencion",
+                "Selecciona un cliente primero.", parent=self)
+            return
+
+        responsable = pedir_autorizacion(
+            self, "Agregar una deuda a mano requiere autorizacion del responsable.")
+        if not responsable:
+            return
+
+        c = self._cliente_sel
+        saldo = float(c["saldo_actual"] or 0)
+        d = tk.Toplevel(self)
+        d.title("Agregar deuda")
+        d.resizable(True, False)
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        w, h = 400, 410
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        lbl(d, f"Deuda de {c['nombre']}", variante="titulo",
+            bg=C.superficie).pack(pady=(16, 4), padx=20, anchor="w")
+        lbl(d, f"Saldo actual: $ {saldo:,.2f}", variante="suave",
+            bg=C.superficie, fg=C.peligro).pack(padx=20, anchor="w")
+
+        lbl(d, "Concepto", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w", pady=(12, 0))
+        e_con = tk.Entry(d, font=("Segoe UI", 12), bg=C.superficie, fg=C.texto,
+                         relief="solid", bd=1)
+        e_con.insert(0, "Deuda anterior")
+        e_con.pack(fill="x", padx=20, ipady=5, pady=(2, 8))
+        e_con.focus_set()
+        e_con.select_range(0, "end")
+
+        lbl(d, "Monto $", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w")
+        e_mon = tk.Entry(d, font=("Segoe UI", 14), justify="right",
+                         bg=C.superficie, fg=C.texto, relief="solid", bd=1)
+        e_mon.pack(fill="x", padx=20, ipady=6, pady=(2, 6))
+
+        lbl(d, "Fecha de la deuda (dd/mm/aaaa — vacío = hoy)", variante="suave",
+            bg=C.superficie).pack(padx=20, anchor="w")
+        e_fec = tk.Entry(d, font=("Segoe UI", 11), bg=C.superficie, fg=C.texto,
+                         relief="solid", bd=1)
+        e_fec.pack(fill="x", padx=20, ipady=4, pady=(2, 6))
+
+        l_res = lbl(d, "", variante="suave", bg=C.superficie)
+        l_res.pack(padx=20, anchor="w")
+
+        def _monto():
+            """'1.500' = 1500, '1.500,50' = 1500,50, '1500.5' = 1500,5."""
+            t = e_mon.get().strip().replace("$", "").replace(" ", "")
+            if "," in t:
+                t = t.replace(".", "").replace(",", ".")
+            elif t.count(".") > 1 or (t.count(".") == 1 and len(t.rsplit(".", 1)[1]) == 3):
+                t = t.replace(".", "")          # puntos de miles
+            try:
+                m = float(t)
+            except ValueError:
+                return None
+            return m if m > 0 else None
+
+        def _previsualizar(event=None):
+            m = _monto()
+            if m is None:
+                l_res.config(text="", fg=C.texto_suave)
+                return
+            nuevo = saldo + m
+            tope = float(c.get("tope_credito") or 0)
+            if tope > 0 and nuevo > tope + 0.005:
+                l_res.config(text=f"Saldo nuevo: $ {nuevo:,.2f}  —  SUPERA EL TOPE "
+                                  f"($ {tope:,.2f}) por $ {nuevo - tope:,.2f}",
+                             fg=C.peligro)
+            else:
+                l_res.config(text=f"Saldo nuevo: $ {nuevo:,.2f}", fg=C.advertencia)
+
+        e_mon.bind("<KeyRelease>", _previsualizar)
+
+        def guardar(event=None):
+            concepto = e_con.get().strip()
+            m = _monto()
+            if not concepto:
+                messagebox.showwarning("Error", "Escribi el concepto.", parent=d)
+                return
+            if m is None:
+                messagebox.showwarning("Error", "Monto invalido.", parent=d)
+                return
+            fecha_iso = None
+            if e_fec.get().strip():
+                from datetime import datetime as _dt
+                t = e_fec.get().strip().replace("-", "/").replace(".", "/")
+                for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+                    try:
+                        fecha_iso = _dt.strptime(t, fmt).strftime("%Y-%m-%d")
+                        break
+                    except ValueError:
+                        pass
+                if not fecha_iso:
+                    messagebox.showwarning("Error", "Fecha inválida. Usá dd/mm/aaaa, "
+                                           "por ejemplo 15/08/2026.", parent=d)
+                    return
+            tope = float(c.get("tope_credito") or 0)
+            if tope > 0 and saldo + m > tope + 0.005:
+                if not messagebox.askyesno(
+                        "Supera el tope",
+                        f"Con esta deuda el saldo queda en $ {saldo + m:,.2f} y el "
+                        f"tope del cliente es $ {tope:,.2f}.\n\n"
+                        "¿Agregarla igual?", parent=d):
+                    return
+            try:
+                nuevo = registrar_cargo_cuenta_corriente(c["id"], m, concepto, responsable,
+                                                         fecha_iso)
+            except Exception as exc:
+                messagebox.showwarning("Error", f"No se pudo guardar:\n{exc}", parent=d)
+                return
+            d.destroy()
+            toast(self, f"Deuda de $ {m:,.2f} agregada a {c['nombre']} "
+                        f"(saldo $ {nuevo:,.2f})")
+            self.refrescar()
+
+        e_con.bind("<Return>", lambda e: e_mon.focus_set())
+        e_mon.bind("<Return>", guardar)
+        _activable_con_enter(btn(d, "Agregar deuda", variante="peligro",
+                                 comando=guardar)).pack(
+            fill="x", padx=20, pady=(8, 16))
+
     def _editar_cliente(self):
         if not self._cliente_sel:
             messagebox.showinfo("Atencion",
@@ -900,6 +1065,10 @@ class FiadoUI(ttk.Frame):
         tree.tag_configure("pago", foreground=C.exito)
 
         ventas_por_fila = {}
+        cargos_manuales = {}
+        anulados = {m["concepto"].rsplit("[#", 1)[1].rstrip("]")
+                    for m in movs
+                    if m["tipo"] == "ajuste" and "[#" in (m["concepto"] or "")}
         for m in movs:
             iid = tree.insert("", "end", values=(
                 m["tipo"].capitalize(),
@@ -910,6 +1079,35 @@ class FiadoUI(ttk.Frame):
             ), tags=(m["tipo"],))
             if m.get("venta_id"):
                 ventas_por_fila[iid] = m["venta_id"]
+            elif m["tipo"] == "cuenta_corriente" and str(m["id"]) not in anulados:
+                cargos_manuales[iid] = m
+
+        def _anular():
+            sel = tree.selection()
+            m = cargos_manuales.get(sel[0]) if sel else None
+            if not m:
+                messagebox.showinfo(
+                    "Anular deuda",
+                    "Elegí una deuda cargada a mano que no esté anulada.\n"
+                    "(Las de ventas se corrigen anulando la venta.)", parent=d)
+                return
+            if not messagebox.askyesno(
+                    "Anular deuda",
+                    f"¿Anular la deuda «{m['concepto']}» de $ {m['monto']:,.2f}?\n\n"
+                    "No se borra: queda un movimiento que la compensa.", parent=d):
+                return
+            resp = pedir_autorizacion(d, "Anular una deuda requiere autorizacion "
+                                         "del responsable.")
+            if not resp:
+                return
+            try:
+                nuevo = anular_cargo_manual(m["id"], resp)
+            except Exception as exc:
+                messagebox.showwarning("Error", str(exc), parent=d)
+                return
+            d.destroy()
+            toast(self, f"Deuda anulada (saldo $ {nuevo:,.2f})")
+            self.refrescar()
 
         def _doble_click(event=None):
             sel = tree.selection()
@@ -920,7 +1118,11 @@ class FiadoUI(ttk.Frame):
                 self._mostrar_detalle_venta(venta_id)
 
         tree.bind("<Double-1>", _doble_click)
-        btn(d, "Cerrar", variante="neutro", comando=d.destroy).pack(pady=(0,16))
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(pady=(0, 16))
+        _activable_con_enter(btn(pie, "Anular deuda cargada a mano", variante="peligro",
+                                 comando=_anular)).pack(side="left", padx=6)
+        btn(pie, "Cerrar", variante="neutro", comando=d.destroy).pack(side="left", padx=6)
 
 
 # ══════════════════════════════════════════════════════════════════════════

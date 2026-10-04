@@ -201,6 +201,7 @@ def main():
                    p.precio_base
             FROM promociones pr JOIN productos p ON p.id = pr.producto_id
             WHERE pr.activa = 1 AND pr.precio_unitario >= p.precio_base
+              AND COALESCE(pr.tipo_descuento, 'precio_fijo') <> 'porcentaje'
         """).fetchall()
         if filas:
             _mal(f"{len(filas)} promo(s) con precio igual o mayor al normal",
