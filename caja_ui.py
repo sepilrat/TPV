@@ -626,6 +626,26 @@ class CajaUI(ttk.Frame):
                         logging.warning(f"Aviso diario al cerrar: {exc}")
 
                 threading.Thread(target=_avisar, daemon=True).start()
+            # Facturacion del dia: respaldo del mail programado. El Programador
+            # de tareas de Windows no corre con la PC apagada o dormida; la
+            # caja se cierra todos los dias, asi que si hoy no salio, sale ahora.
+            if (cfg().get("informe_facturacion_activo")
+                    and cfg().get("informe_facturacion_al_cerrar_caja")):
+                import threading
+                from datetime import date as _date
+
+                def _facturar():
+                    try:
+                        if cfg().get("_facturacion_ultimo_envio") == _date.today().isoformat():
+                            return
+                        from impresion import enviar_email_facturacion
+                        ok, msg = enviar_email_facturacion()
+                        if not ok:
+                            logging.warning(f"Facturacion al cerrar la caja: {msg}")
+                    except Exception as exc:
+                        logging.warning(f"Facturacion al cerrar la caja: {exc}")
+
+                threading.Thread(target=_facturar, daemon=True).start()
             extra = ""
             if dif is not None:
                 extra = ("\nArqueo: cuadra exacto." if abs(dif) < 0.01

@@ -112,6 +112,76 @@ def revisar():
         print("        Por eso no vuelve a salir aunque reabras el TPV.")
         print("        Para probar de nuevo: correr este script con --enviar")
 
+    _t("3b. Facturacion del dia (mail aparte)")
+    dest_fact = (c.get("informe_facturacion_destinatario")
+                 or c.get("aviso_diario_destinatario") or "")
+    if c.get("informe_facturacion_activo"):
+        print(f"{OK} 'Facturacion del dia: activar' esta tildado")
+    else:
+        print(f"{MAL} 'Facturacion del dia: activar' esta DESTILDADO.")
+        print("        El script programado ve eso y sale sin mandar nada.")
+        print("        → Config → Avisos por email → Facturacion del dia: activar.")
+        problemas.append("informe_facturacion_activo")
+    if dest_fact:
+        print(f"{OK} Se manda a: {dest_fact}")
+    else:
+        print(f"{MAL} Sin destinatario para la facturacion.")
+        print("        → Config → 'Facturacion: mandar a' (o el mail del aviso diario).")
+        problemas.append("informe_facturacion_destinatario")
+    ult = c.get("_facturacion_ultimo_envio")
+    print(f"{OK if ult else AVISO} Ultimo envio registrado: {ult or 'ninguno todavia'}")
+    if c.get("informe_facturacion_al_cerrar_caja"):
+        print(f"{OK} Tambien se manda al cerrar la caja (respaldo)")
+    else:
+        print(f"{AVISO} Solo sale por el Programador de tareas de Windows: si la PC")
+        print("        esta apagada o dormida a esa hora, ese dia NO llega. Para tener")
+        print("        un respaldo, tildar 'Facturacion: mandarla tambien al cerrar la caja'.")
+
+    # Tarea programada de Windows (solo se puede mirar desde Windows)
+    if os.name == "nt":
+        import subprocess
+        try:
+            out = subprocess.run(["schtasks", "/query", "/fo", "LIST", "/v"],
+                                 capture_output=True, text=True, timeout=30,
+                                 encoding="cp850", errors="replace").stdout
+        except Exception as e:
+            out = ""
+            print(f"{AVISO} No se pudo consultar el Programador de tareas: {e}")
+        bloques = [b for b in out.split("\n\n") if "informe_facturacion_email" in b]
+        if not bloques:
+            print(f"{MAL} NO hay ninguna tarea programada que ejecute informe_facturacion_email.py")
+            print("        Es la causa mas comun de que 'no llegue nunca'. Hay que crearla:")
+            print("        ver las instrucciones al principio de informe_facturacion_email.py")
+            problemas.append("tarea_programada")
+        else:
+            for b in bloques:
+                for linea in b.splitlines():
+                    if any(k in linea for k in ("Nombre de tarea", "TaskName", "Estado", "Status",
+                                                "Ultima ejecuci", "Last Run Time",
+                                                "Ultimo resultado", "Last Result",
+                                                "Proxima ejecuci", "Next Run Time")):
+                        print("        " + linea.strip())
+            print(f"{AVISO} 'Ultimo resultado' distinto de 0 = el script fallo; mirar logs/tpv_AAAA-MM-DD.log")
+    else:
+        print(f"{AVISO} (La tarea programada solo se puede revisar corriendo esto en Windows.)")
+
+    # El log dice que paso en la ultima corrida
+    try:
+        logs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        lineas = []
+        for nombre in sorted(os.listdir(logs))[-3:]:
+            with open(os.path.join(logs, nombre), encoding="utf-8", errors="replace") as fh:
+                lineas += [f"{nombre[4:14]} {l.rstrip()}" for l in fh if "Facturaci" in l]
+        if lineas:
+            print(f"{OK} Lo ultimo que dice el log sobre la facturacion:")
+            for l in lineas[-5:]:
+                print("        " + l[:140])
+        else:
+            print(f"{AVISO} El log de los ultimos dias no menciona la facturacion: el script")
+            print("        programado no corrio, o corrio con otra carpeta de trabajo.")
+    except Exception:
+        pass
+
     _t("4. Hay algo para avisar?")
     try:
         from repositorio import get_vencimientos_proximos, get_informe_stock
@@ -175,6 +245,9 @@ def enviar_pruebas():
     print(f"{OK if ok else MAL} Aviso diario: {msg}")
     ok2, msg2 = enviar_informe_stock()
     print(f"{OK if ok2 else MAL} Informe de stock: {msg2}")
+    from impresion import enviar_email_facturacion
+    ok3, msg3 = enviar_email_facturacion()
+    print(f"{OK if ok3 else MAL} Facturacion del dia: {msg3}")
 
 
 if __name__ == "__main__":

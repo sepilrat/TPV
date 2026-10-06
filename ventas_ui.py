@@ -79,6 +79,7 @@ class VentasUI(ttk.Frame):
         self.cant_pendiente = None
         self.metodo        = tk.StringVar(value="efectivo")
         self._cliente_cta = None   # dict con datos del cliente fiado
+        self._cupon = None         # cupon cargado en esta venta (dict) o None
         self._build()
         self._atajos()
         self._chequear_recargo()
@@ -393,6 +394,7 @@ class VentasUI(ttk.Frame):
         # Descuento
         fd = tk.Frame(s, bg=C.superficie)
         fd.pack(fill="x", padx=16)
+        self._frame_desc = fd
         lbl(fd, "Descuento", variante="suave", bg=C.superficie).pack(side="left")
         self.entry_desc = tk.Entry(fd, width=8, justify="center",
                                     font=F.normal, bg=C.superficie,
@@ -410,6 +412,18 @@ class VentasUI(ttk.Frame):
                            selectcolor=C.superficie,
                            activebackground=C.superficie,
                            command=self._actualizar_totales).pack(side="left")
+        btn(fd, "🎟 Cupón", variante="neutro",
+            comando=self._pedir_cupon).pack(side="right")
+
+        # Cupon cargado: se ve que esta puesto y cuanto descuenta
+        self.frame_cupon = tk.Frame(s, bg=C.superficie)
+        self.lbl_cupon = tk.Label(self.frame_cupon, text="", bg=C.superficie,
+                                  fg=C.exito, font=F.normal, anchor="w",
+                                  justify="left", wraplength=260)
+        self.lbl_cupon.pack(side="left", fill="x", expand=True)
+        tk.Button(self.frame_cupon, text="✖", relief="flat", bg=C.superficie,
+                  fg=C.peligro, cursor="hand2", command=self._quitar_cupon
+                  ).pack(side="right")
 
         ttk.Separator(s, orient="horizontal").pack(fill="x", padx=16, pady=6)
 
@@ -1578,6 +1592,101 @@ class VentasUI(ttk.Frame):
                 # actividad; abajo queda lo mas viejo.
                 self.tree.see(kids[0])
 
+    # ── Cupones ───────────────────────────────────────────────────────────────
+
+    def _cupon_monto(self, bruto, desc_manual):
+        """Cuantos $ descuenta hoy el cupon cargado (0 si no aplica a esta compra)."""
+        if not self._cupon or not self.carrito:
+            return 0.0
+        from repositorio import calcular_aplicacion_cupon
+        items = [{"producto_id": i["producto_id"], "subtotal": i["subtotal"]}
+                 for i in self.carrito]
+        return calcular_aplicacion_cupon(self._cupon, items, desc_manual)["aplicable"]
+
+    def _descuento_total(self, bruto):
+        """Descuento manual + cupon: lo que realmente baja el total."""
+        manual = self._descuento_monto(bruto)
+        return manual + self._cupon_monto(bruto, manual)
+
+    def _refrescar_cartel_cupon(self, bruto):
+        if not self._cupon:
+            self.frame_cupon.pack_forget()
+            return
+        manual = self._descuento_monto(bruto)
+        from repositorio import calcular_aplicacion_cupon
+        calc = calcular_aplicacion_cupon(
+            self._cupon, [{"producto_id": i["producto_id"], "subtotal": i["subtotal"]}
+                          for i in self.carrito], manual) if self.carrito else \
+            {"aplicable": 0.0, "motivo": "Agregá productos a la venta."}
+        c = self._cupon
+        if calc["aplicable"] > 0:
+            cat = f" en {c['categoria_nombre']}" if c.get("categoria_nombre") else ""
+            texto, color = (f"🎟 {c['codigo']}: -$ {calc['aplicable']:,.2f}{cat}", C.exito)
+            perdido = float(c["monto_restante"]) - calc["aplicable"]
+            if perdido > 0.005 and not c.get("permite_saldo"):
+                # Es de un solo uso: el cliente tiene que saber que el resto se pierde
+                texto += (f"\n⚠ Se pierden $ {perdido:,.2f}: el cupón se usa en una "
+                          "sola compra. Conviene sumar más productos de la categoría.")
+                color = C.advertencia
+        else:
+            texto, color = (f"🎟 {c['codigo']}: no aplica. {calc['motivo']}", C.advertencia)
+        self.lbl_cupon.config(text=texto, fg=color)
+        self.frame_cupon.pack(fill="x", padx=16, pady=(2, 0), after=self._frame_desc)
+
+    def _quitar_cupon(self):
+        self._cupon = None
+        self._actualizar_totales()
+        self.foco_scanner()
+
+    def _pedir_cupon(self):
+        """Pide el codigo, lo valida contra lo que hay en el carrito y lo carga."""
+        if not self.carrito:
+            toast(self, "Primero cargá los productos de la venta", error=True)
+            return self.foco_scanner()
+        d = tk.Toplevel(self)
+        d.title("Cupón")
+        d.configure(bg=C.superficie)
+        d.resizable(False, False)
+        d.grab_set()
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"360x190+{(sw - 360) // 2}+{(sh - 190) // 2}")
+        lbl(d, "Código del cupón", variante="titulo", bg=C.superficie).pack(
+            anchor="w", padx=20, pady=(16, 4))
+        e = tk.Entry(d, font=("Segoe UI", 14), justify="center", bg=C.superficie,
+                     fg=C.texto, relief="solid", bd=1)
+        e.pack(fill="x", padx=20, ipady=6)
+        e.focus_set()
+        msg = tk.Label(d, text="", bg=C.superficie, fg=C.peligro, font=F.pequeña,
+                       wraplength=320, justify="left", anchor="w")
+        msg.pack(fill="x", padx=20, pady=(6, 0))
+
+        def aceptar(event=None):
+            from repositorio import get_cupon_por_codigo, calcular_aplicacion_cupon
+            codigo = e.get().strip()
+            if not codigo:
+                return
+            cup = get_cupon_por_codigo(codigo)
+            if not cup:
+                msg.config(text=f"No existe el cupón «{codigo.upper()}».")
+                return
+            bruto = sum(i["subtotal"] for i in self.carrito)
+            calc = calcular_aplicacion_cupon(
+                cup, [{"producto_id": i["producto_id"], "subtotal": i["subtotal"]}
+                      for i in self.carrito], self._descuento_monto(bruto))
+            if calc["aplicable"] <= 0:
+                msg.config(text=calc["motivo"] or "El cupón no aplica a esta venta.")
+                return
+            self._cupon = cup
+            d.destroy()
+            self._actualizar_totales()
+            toast(self, f"Cupón aplicado: -$ {calc['aplicable']:,.2f}")
+            self.foco_scanner()
+
+        e.bind("<Return>", aceptar)
+        btn(d, "Aplicar", variante="exito", comando=aceptar).pack(
+            fill="x", padx=20, pady=(8, 14))
+        d.bind("<Escape>", lambda ev: d.destroy())
+
     def _texto_descuento(self, desc_pct):
         """El descuento tal como se cargó: en $ o en %."""
         bruto = sum(i["subtotal"] for i in self.carrito)
@@ -1602,8 +1711,9 @@ class VentasUI(ttk.Frame):
 
     def _actualizar_totales(self):
         bruto      = sum(i["subtotal"] for i in self.carrito)
-        desc_monto = self._descuento_monto(bruto)
+        desc_monto = self._descuento_total(bruto)
         total      = max(0.0, bruto - desc_monto)
+        self._refrescar_cartel_cupon(bruto)
         n_items    = sum(i["cantidad"] for i in self.carrito)
 
         self.lbl_total.config(text=f"$ {total:,.2f}")
@@ -1675,7 +1785,7 @@ class VentasUI(ttk.Frame):
 
     def _on_recibido_key(self, event):
         bruto = sum(i["subtotal"] for i in self.carrito)
-        desc_monto = self._descuento_monto(bruto)
+        desc_monto = self._descuento_total(bruto)
         total = max(0.0, bruto - desc_monto)
         try:
             recibido = float(self.entry_recibido.get().replace(",", "."))
@@ -1691,7 +1801,7 @@ class VentasUI(ttk.Frame):
 
     def _on_mixto_key(self, event):
         bruto = sum(i["subtotal"] for i in self.carrito)
-        desc_monto = self._descuento_monto(bruto)
+        desc_monto = self._descuento_total(bruto)
         total = max(0.0, bruto - desc_monto)
         try:
             efectivo = float(self.entry_efectivo_mixto.get().replace(",", "."))
@@ -1845,13 +1955,27 @@ class VentasUI(ttk.Frame):
             toast(self, "El carrito esta vacio", error=True)
             return self.foco_scanner()
 
-        bruto      = sum(i["subtotal"] for i in self.carrito)
-        desc_monto = self._descuento_monto(bruto)
+        bruto       = sum(i["subtotal"] for i in self.carrito)
+        desc_manual = self._descuento_monto(bruto)
+        cupon_monto = self._cupon_monto(bruto, desc_manual)
+        cupon_id    = None
+        if self._cupon and cupon_monto <= 0:
+            # El cupon quedo cargado pero ya no aplica (se sacaron los productos
+            # de su categoria, venció): no se cobra "como si" lo descontara.
+            if not messagebox.askyesno(
+                    "El cupón no aplica",
+                    f"El cupón {self._cupon['codigo']} no descuenta nada en esta venta.\n\n"
+                    "¿Cobrar sin cupón?", parent=self, default="no"):
+                return self.foco_scanner()
+        elif self._cupon:
+            cupon_id = self._cupon["id"]
+        desc_monto = desc_manual + cupon_monto
         total      = max(0.0, bruto - desc_monto)
         # La venta guarda el descuento como PORCENTAJE: se convierte el
         # importe a su equivalente para no cambiar el historico ni los
-        # informes que ya lo leen asi.
-        desc_pct   = (desc_monto / bruto * 100) if bruto else 0.0
+        # informes que ya lo leen asi. Aca va SOLO el manual: el cupon se
+        # manda aparte y el registro de la venta suma los dos.
+        desc_pct   = (desc_manual / bruto * 100) if bruto else 0.0
         metodo = self.metodo.get()
         # Reparto del pago entre medios. None = todo al metodo elegido.
         desglose = None
@@ -1861,7 +1985,7 @@ class VentasUI(ttk.Frame):
         # y quedó recortado a 100%), NO alcanza con el "Sí" de siempre:
         # eso ya paso una vez y salio una venta regalada sin que nadie
         # lo notara hasta el otro dia.
-        if bruto > 0 and total <= 0:
+        if bruto > 0 and total <= 0 and not (cupon_monto > 0 and desc_manual <= 0.005):
             if not messagebox.askyesno(
                     "¿Vender en $0?",
                     f"Con este descuento el total queda en $ 0,00 "
@@ -1885,12 +2009,19 @@ class VentasUI(ttk.Frame):
         if metodo in ("efectivo", "tarjeta", "qr"):
             label = next((l for l, v in METODOS_PAGO if v == metodo), metodo)
             texto_confirmar = f"Total: $ {total:,.2f}\nMetodo: {label}"
-            if desc_monto:
+            if desc_manual > 0.005:
                 if self.desc_modo.get() == "$":
-                    texto_confirmar += f"\nDescuento: $ {desc_monto:,.2f}"
+                    texto_confirmar += f"\nDescuento: $ {desc_manual:,.2f}"
                 else:
                     texto_confirmar += (f"\nDescuento: {desc_pct:.1f}%  "
-                                        f"($ {desc_monto:,.2f})")
+                                        f"($ {desc_manual:,.2f})")
+            if cupon_monto > 0:
+                texto_confirmar += (f"\nCupón {self._cupon['codigo']}: "
+                                    f"-$ {cupon_monto:,.2f}")
+                _perdido = float(self._cupon["monto_restante"]) - cupon_monto
+                if _perdido > 0.005 and not self._cupon.get("permite_saldo"):
+                    texto_confirmar += (f"\n(el cupón era de un solo uso: se pierden "
+                                        f"$ {_perdido:,.2f})")
             if metodo == "efectivo":
                 try:
                     recibido = float(self.entry_recibido.get().replace(",", "."))
@@ -1955,7 +2086,7 @@ class VentasUI(ttk.Frame):
             vid = registrar_venta(
                 self.app.sesion_id, self.carrito,
                 metodo_db, desc_pct, cliente_id=cliente_id,
-                desglose=desglose)
+                desglose=desglose, cupon_id=cupon_id)
         except Exception as exc:
             messagebox.showerror("No se pudo cobrar",
                                  self._detalle_error_venta(exc), parent=self)
@@ -2628,6 +2759,7 @@ class VentasUI(ttk.Frame):
             self.lbl_promo_grupo.grid_forget()
         self.cant_pendiente = None
         self._cliente_cta = None
+        self._cupon = None
         self.lbl_cant.config(text="x1")
         self.entry_desc.delete(0, "end")
         self.entry_desc.insert(0, "0")

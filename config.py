@@ -154,6 +154,8 @@ DEFAULTS = {
     "informe_facturacion_activo":         False,
     "informe_facturacion_destinatario":   "",
     "informe_facturacion_hora":           "21:30",
+    "informe_facturacion_al_cerrar_caja": False,
+    "_facturacion_ultimo_envio":          "",
 
     # Caja
     "caja_clave_responsable": "1234",    # clave para operaciones sensibles

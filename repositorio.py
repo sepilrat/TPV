@@ -3655,10 +3655,239 @@ def validar_stock_carrito(items) -> list:
     return faltantes
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CUPONES
+# Un monto en $ para gastar comprando una categoria, hasta una fecha.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ALFABETO_CUPON = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"      # sin 0/O/1/I/L: se dictan por telefono
+_CODIGO_CUPON_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,23}$")
+
+
+def normalizar_codigo_cupon(codigo: str) -> str:
+    return re.sub(r"\s+", "", str(codigo or "")).upper()
+
+
+def _parse_fecha_iso(texto, que="La fecha"):
+    try:
+        return datetime.strptime(str(texto)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        raise ValueError(f"{que} no es válida")
+
+
+def estado_cupon(c: dict, hoy: str = None) -> str:
+    """"anulado" | "usado" | "vencido" | "todavia_no" | "activo"."""
+    hoy = hoy or datetime.now().date().isoformat()
+    if c.get("anulado"):
+        return "anulado"
+    if float(c.get("monto_restante") or 0) <= 0.004:
+        return "usado"
+    if str(c["fecha_hasta"])[:10] < hoy:
+        return "vencido"
+    if c.get("fecha_desde") and str(c["fecha_desde"])[:10] > hoy:
+        return "todavia_no"
+    return "activo"
+
+
+def _cupon_dict(r) -> dict | None:
+    if not r:
+        return None
+    c = dict(r)
+    c["estado"] = estado_cupon(c)
+    return c
+
+
+def crear_cupon(monto: float, categoria_id, fecha_hasta: str, *, codigo: str = None,
+                fecha_desde: str = None, permite_saldo: bool = False,
+                nota: str = "", creado_por: str = "") -> dict:
+    """Crea un cupon. categoria_id=None vale para cualquier producto.
+
+    Devuelve el cupon (con su codigo). Lanza ValueError con un motivo claro.
+    """
+    monto = round(float(monto), 2)
+    if monto <= 0:
+        raise ValueError("El monto tiene que ser mayor a cero")
+    hasta = _parse_fecha_iso(fecha_hasta, "La fecha de vencimiento")
+    if hasta < datetime.now().date():
+        raise ValueError("La fecha de vencimiento ya pasó")
+    desde = None
+    if fecha_desde:
+        desde = _parse_fecha_iso(fecha_desde, "La fecha de inicio")
+        if desde > hasta:
+            raise ValueError("La fecha de inicio es posterior al vencimiento")
+    with get_connection() as conn:
+        cat_nombre = None
+        if categoria_id:
+            r = conn.execute("SELECT nombre FROM categorias WHERE id=?",
+                             (categoria_id,)).fetchone()
+            if not r:
+                raise ValueError("La categoría no existe")
+            cat_nombre = r[0]
+        if codigo:
+            codigo = normalizar_codigo_cupon(codigo)
+            if not _CODIGO_CUPON_RE.match(codigo):
+                raise ValueError("El código usa solo letras, números y guion "
+                                 "(entre 3 y 24 caracteres, sin espacios)")
+        else:
+            import secrets
+            for _ in range(50):
+                codigo = "CUP-" + "".join(secrets.choice(_ALFABETO_CUPON) for _ in range(6))
+                if not conn.execute("SELECT 1 FROM cupones WHERE codigo=?", (codigo,)).fetchone():
+                    break
+            else:
+                raise ValueError("No se pudo generar un código libre")
+        if conn.execute("SELECT 1 FROM cupones WHERE codigo=?", (codigo,)).fetchone():
+            raise ValueError(f"Ya existe un cupón con el código {codigo}")
+        cur = conn.execute("""
+            INSERT INTO cupones (codigo, monto, monto_restante, categoria_id,
+                                 categoria_nombre, fecha_desde, fecha_hasta,
+                                 permite_saldo, nota, creado_por)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (codigo, monto, monto, categoria_id or None, cat_nombre,
+              desde.isoformat() if desde else None, hasta.isoformat(),
+              1 if permite_saldo else 0, (nota or "").strip() or None, creado_por or None))
+        conn.commit()
+        return _cupon_dict(conn.execute("SELECT * FROM cupones WHERE id=?",
+                                        (cur.lastrowid,)).fetchone())
+
+
+def get_cupon_por_codigo(codigo: str) -> dict | None:
+    with get_connection() as conn:
+        return _cupon_dict(conn.execute(
+            "SELECT * FROM cupones WHERE codigo=?",
+            (normalizar_codigo_cupon(codigo),)).fetchone())
+
+
+def listar_cupones(estado: str = None) -> list:
+    """Todos los cupones, los mas nuevos primero (con estado y lo ya usado)."""
+    with get_connection() as conn:
+        filas = conn.execute("""
+            SELECT c.*, COALESCE(c.categoria_nombre, '(todas)') AS categoria,
+                   (SELECT COUNT(*) FROM cupones_usos u
+                     WHERE u.cupon_id = c.id AND u.revertido = 0) AS usos
+            FROM cupones c ORDER BY c.id DESC
+        """).fetchall()
+    out = [_cupon_dict(f) for f in filas]
+    return [c for c in out if not estado or c["estado"] == estado]
+
+
+def anular_cupon(cupon_id: int, motivo: str = "") -> bool:
+    """Deja de valer (lo ya usado no se toca). False si ya estaba anulado."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE cupones SET anulado=1, motivo_anulacion=? WHERE id=? AND anulado=0",
+            ((motivo or "").strip() or None, cupon_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def calcular_aplicacion_cupon(cupon: dict, items: list, descuento_manual: float = 0.0,
+                              conn=None) -> dict:
+    """Cuantos $ del cupon se aplican a esta compra.
+
+    Reglas: solo cuentan los renglones de la categoria del cupon; nunca mas
+    que el saldo del cupon ni que lo que esos renglones valen una vez
+    descontado el descuento manual de la venta. Devuelve
+    {aplicable, base, motivo} — `motivo` explica por que no aplica nada.
+    """
+    estado = estado_cupon(cupon)
+    if estado != "activo":
+        txt = {"anulado": "está anulado", "usado": "ya fue usado",
+               "vencido": f"venció el {str(cupon['fecha_hasta'])[:10]}",
+               "todavia_no": f"empieza a valer el {str(cupon['fecha_desde'])[:10]}"}[estado]
+        return {"aplicable": 0.0, "base": 0.0, "motivo": f"El cupón {cupon['codigo']} {txt}."}
+
+    bruto = sum(float(i["subtotal"]) for i in items)
+    base = bruto
+    if cupon.get("categoria_nombre") and not cupon.get("categoria_id"):
+        # Se borro la categoria: la FK deja categoria_id en NULL. Sin este
+        # chequeo un cupon "de Bebidas" pasaria a valer para TODO.
+        return {"aplicable": 0.0, "base": 0.0,
+                "motivo": f"La categoría «{cupon['categoria_nombre']}» del cupón ya no existe."}
+    if cupon.get("categoria_id"):
+        ids = sorted({i["producto_id"] for i in items})
+        cats = {}
+        if ids:
+            propia = conn is None
+            cn = conn or get_connection()
+            try:
+                for k in range(0, len(ids), 500):
+                    lote = ids[k:k + 500]
+                    for r in cn.execute(
+                            f"SELECT id, categoria_id FROM productos WHERE id IN "
+                            f"({','.join('?' * len(lote))})", lote).fetchall():
+                        cats[r[0]] = r[1]
+            finally:
+                if propia:
+                    cn.close()
+        base = sum(float(i["subtotal"]) for i in items
+                   if cats.get(i["producto_id"]) == cupon["categoria_id"])
+    if base <= 0.004:
+        nombre = cupon.get("categoria_nombre") or "la categoría del cupón"
+        return {"aplicable": 0.0, "base": 0.0,
+                "motivo": f"No hay productos de «{nombre}» en esta venta."}
+    # el descuento manual se reparte parejo: no se descuenta dos veces lo mismo
+    if bruto > 0 and descuento_manual > 0:
+        base = base * max(0.0, 1 - descuento_manual / bruto)
+    aplicable = round(min(float(cupon["monto_restante"]), base), 2)
+    return {"aplicable": max(0.0, aplicable), "base": round(base, 2), "motivo": ""}
+
+
+def _consumir_cupon(conn, cupon_id: int, items: list, descuento_manual: float,
+                    venta_id: int) -> float:
+    """Dentro de la transaccion de la venta: valida de nuevo, descuenta y registra."""
+    r = conn.execute("SELECT * FROM cupones WHERE id=?", (cupon_id,)).fetchone()
+    cup = _cupon_dict(r)
+    if not cup:
+        raise ValueError("El cupón no existe")
+    calc = calcular_aplicacion_cupon(cup, items, descuento_manual, conn=conn)
+    if calc["aplicable"] <= 0:
+        raise ValueError(calc["motivo"] or f"El cupón {cup['codigo']} no se puede usar")
+    aplicado = calc["aplicable"]
+    consumido = aplicado if cup["permite_saldo"] else float(cup["monto_restante"])
+    conn.execute("UPDATE cupones SET monto_restante = monto_restante - ? WHERE id=?",
+                 (consumido, cupon_id))
+    conn.execute("""INSERT INTO cupones_usos (cupon_id, venta_id, monto, consumido)
+                    VALUES (?,?,?,?)""", (cupon_id, venta_id, aplicado, consumido))
+    return aplicado
+
+
+def _devolver_cupon_de_venta(conn, venta_id: int) -> float:
+    """Al anular una venta, el cupon que uso vuelve a quedar disponible."""
+    devuelto = 0.0
+    for u in conn.execute("SELECT * FROM cupones_usos WHERE venta_id=? AND revertido=0",
+                          (venta_id,)).fetchall():
+        conn.execute("UPDATE cupones SET monto_restante = monto_restante + ? WHERE id=?",
+                     (u["consumido"], u["cupon_id"]))
+        conn.execute("UPDATE cupones_usos SET revertido=1 WHERE id=?", (u["id"],))
+        devuelto += float(u["monto"])
+    return devuelto
+
+
+def texto_cupon(c: dict, negocio: str = "") -> str:
+    """Texto listo para mandar por WhatsApp."""
+    hasta = datetime.strptime(str(c["fecha_hasta"])[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    cat = c.get("categoria_nombre")
+    que = f"en productos de {cat}" if cat else "en tu compra"
+    saldo = ("Si no usás todo el monto, el resto queda disponible hasta el vencimiento."
+             if c.get("permite_saldo") else "Se usa en una sola compra.")
+    return (f"🎟 CUPÓN DE $ {float(c['monto']):,.0f} {que}"
+            + (f" — {negocio}" if negocio else "") + "\n"
+            f"Código: {c['codigo']}\n"
+            f"Válido hasta el {hasta}.\n{saldo}\n"
+            "Mostralo en la caja al pagar.")
+
+
 def registrar_venta(sesion_id, items, metodo_pago,
                     descuento_pct=0.0, cliente_id=None,
-                    desglose=None) -> int | None:
+                    desglose=None, cupon_id=None) -> int | None:
     """Registra la venta.
+
+    cupon_id: cupon a canjear. Se valida y se descuenta ACA, dentro de la
+    misma transaccion que la venta (dos cajas no pueden gastar el mismo
+    cupon). Su importe se suma al descuento: la venta guarda un solo
+    descuento_pct combinado, asi devoluciones, tickets e informes lo ven
+    igual que cualquier otro descuento.
 
     desglose: dict opcional {"efectivo":0, "tarjeta":0, "qr":0,
     "cta_cte":0} para pagos repartidos entre varios medios. Sin el, todo
@@ -3668,8 +3897,27 @@ def registrar_venta(sesion_id, items, metodo_pago,
     try:
         subtotales   = [i["cantidad"] * i["precio_unitario"] for i in items]
         total_bruto  = sum(subtotales)
-        desc_monto   = total_bruto * (descuento_pct / 100)
+        desc_manual  = total_bruto * (descuento_pct / 100)
+        desc_monto   = desc_manual
         total        = total_bruto - desc_monto
+
+        # El cupon se calcula ANTES de repartir el pago: cambia el total que
+        # entra a la caja y lo que queda fiado.
+        cupon_monto, _items_cupon = 0.0, []
+        if cupon_id:
+            _cup = _cupon_dict(conn.execute("SELECT * FROM cupones WHERE id=?",
+                                            (cupon_id,)).fetchone())
+            if not _cup:
+                raise ValueError("El cupón no existe")
+            _items_cupon = [{"producto_id": i["producto_id"], "subtotal": sub}
+                            for i, sub in zip(items, subtotales)]
+            _calc = calcular_aplicacion_cupon(_cup, _items_cupon, desc_manual, conn=conn)
+            if _calc["aplicable"] <= 0:
+                raise ValueError(_calc["motivo"] or f"El cupón {_cup['codigo']} no se puede usar")
+            cupon_monto = _calc["aplicable"]
+            desc_monto += cupon_monto
+            total = total_bruto - desc_monto
+            descuento_pct = (desc_monto / total_bruto * 100) if total_bruto else 0.0
 
         # Sin desglose, todo el total va al metodo elegido: asi las
         # ventas de un solo medio siguen cuadrando igual.
@@ -3684,13 +3932,23 @@ def registrar_venta(sesion_id, items, metodo_pago,
             INSERT INTO ventas
                 (sesion_id, total, metodo_pago, descuento_pct,
                  descuento_monto, cliente_id,
-                 monto_efectivo, monto_tarjeta, monto_qr, monto_cta_cte)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+                 monto_efectivo, monto_tarjeta, monto_qr, monto_cta_cte,
+                 cupon_id, cupon_monto)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """, (sesion_id, total, metodo_pago, descuento_pct,
               desc_monto, cliente_id,
               _d.get("efectivo", 0), _d.get("tarjeta", 0),
-              _d.get("qr", 0), _d.get("cta_cte", 0)))
+              _d.get("qr", 0), _d.get("cta_cte", 0),
+              cupon_id or None, cupon_monto))
         venta_id = cur.lastrowid
+
+        if cupon_id:
+            # Se vuelve a validar y a descontar ya DENTRO de la transaccion: si otra
+            # caja gasto el cupon mientras tanto, el importe cambia y se corta todo.
+            _aplicado = _consumir_cupon(conn, cupon_id, _items_cupon, desc_manual, venta_id)
+            if abs(_aplicado - cupon_monto) > 0.005:
+                raise ValueError("El cupón cambió mientras se cobraba. Volvé a "
+                                 "aplicarlo y cobrá de nuevo.")
 
         for item, sub in zip(items, subtotales):
             cur_det = conn.execute("""
@@ -3918,6 +4176,7 @@ def anular_venta(venta_id: int) -> bool:
             return False
 
         conn.execute("UPDATE ventas SET anulada=1 WHERE id=?", (venta_id,))
+        _devolver_cupon_de_venta(conn, venta_id)       # el cupon vuelve a estar disponible
 
         # Si la venta ya tuvo devoluciones parciales (registrar_devolucion),
         # esa plata y ese stock YA se movieron. Anular solo tiene que

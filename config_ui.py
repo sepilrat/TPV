@@ -98,7 +98,9 @@ SECCIONES = [
         # informe_facturacion_email.py / informe_stock_email.py /
         # informe_vencimientos_email.py.
         ("informe_facturacion_activo", "Facturación del día: activar (mail aparte, Programador de tareas)", "bool"),
-        ("informe_facturacion_hora",   "Facturación: hora del Programador de tareas", "text"),
+        ("informe_facturacion_hora",   "Facturación: hora de envío (HH:MM, la toma el script cada 10 min)", "text"),
+        ("informe_facturacion_destinatario", "Facturación: mandar a (vacío = el mismo mail del aviso diario)", "text"),
+        ("informe_facturacion_al_cerrar_caja", "Facturación: mandarla también al cerrar la caja (no depende del Programador de tareas)", "bool"),
         ("informe_stock_email_activo", "Poco stock por categoría: activar (mail aparte, Programador de tareas)", "bool"),
         ("informe_stock_email_hora",   "Poco stock: hora del Programador de tareas", "text"),
         ("vto_email_activo",           "Vencimientos: activar (mail aparte, Programador de tareas)", "bool"),
@@ -434,6 +436,8 @@ class ConfigUI(ttk.Frame):
             comando=self._probar_balanza).pack(side="left", padx=(0, 6))
         btn(fb2, "✉ Emails", variante="primario",
             comando=self._probar_emails).pack(side="left", padx=(0, 6))
+        btn(fb2, "⏰ Tareas de Windows", variante="primario",
+            comando=self._crear_tareas_windows).pack(side="left", padx=(0, 6))
         btn(fb2, "🌐 Sincronizar catálogo web", variante="primario",
             comando=self._sincronizar_catalogo).pack(side="left", padx=(0, 6))
         btn(fb2, "⬇️ Traer cambios de la web", variante="primario",
@@ -615,6 +619,52 @@ class ConfigUI(ttk.Frame):
             "Esta ventana sigue conectada a la base real.\n\n"
             "Para volver a empezar de cero, borrá tpv2_prueba.db.",
             parent=self)
+
+    def _crear_tareas_windows(self):
+        """Crea (o actualiza) las tareas de Windows que mandan los informes.
+
+        Se hace UNA vez. La hora de envio la lee cada informe de esta misma
+        Config, asi que cambiarla despues no requiere volver a tocar esto.
+        """
+        import os
+        import subprocess
+        if os.name != "nt":
+            messagebox.showinfo(
+                "Tareas de Windows",
+                "Esto solo funciona en Windows (usa el Programador de tareas).",
+                parent=self)
+            return
+        carpeta = os.path.dirname(os.path.abspath(__file__))
+        ps1 = os.path.join(carpeta, "crear_tareas_programadas.ps1")
+        if not os.path.isfile(ps1):
+            messagebox.showwarning("Tareas de Windows",
+                                   f"No encuentro el archivo:\n{ps1}", parent=self)
+            return
+        if not messagebox.askyesno(
+                "Tareas de Windows",
+                "Se van a crear en el Programador de tareas de Windows 3 tareas "
+                "(facturación, poco stock y vencimientos).\n\n"
+                "Corren cada 10 minutos y mandan el informe a la hora que pongas acá "
+                "en Config, una vez por día. Se hace una sola vez: después alcanza con "
+                "cambiar la hora en esta pantalla.\n\n¿Crearlas?", parent=self):
+            return
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", ps1, "-Informes", "todos"],
+                capture_output=True, text=True, timeout=120, cwd=carpeta,
+                encoding="cp850", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            salida = ((r.stdout or "") + (r.stderr or "")).strip() or "(sin mensajes)"
+            ok = r.returncode == 0 and "[ERROR]" not in salida
+        except Exception as exc:
+            salida, ok = f"No se pudo ejecutar PowerShell: {exc}", False
+        finally:
+            self.config(cursor="")
+        (messagebox.showinfo if ok else messagebox.showwarning)(
+            "Tareas de Windows", salida[-1500:], parent=self)
 
     def _probar_emails(self):
         """Manda cada aviso al instante, sin gastar el envío del día.

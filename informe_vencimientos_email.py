@@ -1,24 +1,15 @@
 """
-informe_vencimientos_email.py — Envío automático del aviso de vencimientos por email.
+informe_vencimientos_email.py — Envío automático por email (Vencimientos).
 
-Este script NO abre la interfaz del TPV. Está pensado para ejecutarse
-solo, en segundo plano, programado con el Programador de tareas de
-Windows — así el informe llega al email todos los días a una hora
-fija sin que nadie tenga que abrir el sistema.
+Este script NO abre la interfaz del TPV. Lo dispara el Programador de tareas
+de Windows cada 10 minutos con --programado, y en cada corrida lee la HORA DE
+ENVÍO que esté en Config: pasada esa hora, manda una vez por día; antes, no
+hace nada. Cambiar la hora en el TPV alcanza, sin tocar Windows.
 
-Cómo programarlo (una sola vez):
-  1. Abrí el "Programador de tareas" de Windows (Task Scheduler).
-  2. Crear tarea básica → nombre: "TPV - Vencimientos".
-  3. Desencadenador: Diariamente, a la hora que configuraste en
-     Config → Avisos por email → Vencimientos: hora.
-  4. Acción: Iniciar un programa.
-       Programa/script:  C:\\Users\\juampa\\Dropbox\\Sistemas\\TPV\\.venv\\Scripts\\python.exe
-       Argumentos:       informe_vencimientos_email.py
-       Iniciar en:       C:\\Users\\juampa\\Dropbox\\Sistemas\\TPV
-  5. Finalizar. Podés probarla con click derecho → Ejecutar, y revisar
-     logs/tpv_AAAA-MM-DD.log para confirmar que se mandó bien.
+La tarea se crea una sola vez: Config → botón "⏰ Tareas de Windows"
+(o doble clic en crear_tareas_programadas.bat).
 
-También podés correrlo a mano en cualquier momento para probar:
+Probarlo a mano (manda ya y no consume el envío del día):
   .venv\\Scripts\\python.exe informe_vencimientos_email.py
 """
 
@@ -31,28 +22,20 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from logger import inicializar_logs
-from config import cfg
+from config import cfg, set as cfg_set
 from impresion import enviar_alerta_vencimientos
+from programacion import correr_programado
 
 
-def main():
-    inicializar_logs()
-    c = cfg()
-
-    if not c.get("vto_email_activo"):
-        logging.info(
-            "Vencimientos: envío automático desactivado "
-            "(Config → Avisos por email)."
-        )
-        return 0
-
-    ok, msg = enviar_alerta_vencimientos(solo_una_vez_por_dia=False)
-    if ok:
-        logging.info(f"Vencimientos: {msg}")
-        return 0
-    else:
-        logging.error(f"Vencimientos: {msg}")
-        return 1
+def main(argv=None):
+    return correr_programado(
+        sys.argv[1:] if argv is None else argv,
+        nombre="Vencimientos",
+        clave_activo="vto_email_activo", clave_hora="vto_email_hora",
+        clave_envio="_vto_ultimo_envio", clave_intento="_vto_ultimo_intento",
+        enviar=lambda: enviar_alerta_vencimientos(solo_una_vez_por_dia=False),
+        hora_defecto=(8, 30),
+        cfg=cfg, cfg_set=cfg_set, inicializar_logs=inicializar_logs)
 
 
 if __name__ == "__main__":

@@ -36,23 +36,30 @@ from impresion import enviar_email_facturacion
 
 
 def main():
-    inicializar_logs()
-    c = cfg()
+    try:
+        inicializar_logs()
+    except Exception as exc:            # sin carpeta de logs escribible, igual se intenta mandar
+        print(f"No se pudo iniciar el log: {exc}")
+    logging.info("Facturación: arrancó el envío programado")
+    try:
+        c = cfg()
 
-    if not c.get("informe_facturacion_activo"):
-        logging.info(
-            "Facturación: envío automático desactivado "
-            "(Config → Avisos por email)."
-        )
-        return 0
+        if not c.get("informe_facturacion_activo"):
+            logging.warning(
+                "Facturación: NO se envió porque 'Facturación del día: activar' "
+                "está destildado (Config → Avisos por email)."
+            )
+            return 0
 
-    ok, msg = enviar_email_facturacion()
-    if ok:
-        logging.info(f"Facturación: {msg}")
-        return 0
-    else:
-        logging.error(f"Facturación: {msg}")
+        ok, msg = enviar_email_facturacion()
+        if ok:
+            logging.info(f"Facturación: {msg}")
+            return 0
+        logging.error(f"Facturación: NO se envió: {msg}")
         return 1
+    except Exception:
+        logging.exception("Facturación: error inesperado, NO se envió")
+        return 2
 
 
 if __name__ == "__main__":

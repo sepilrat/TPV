@@ -80,11 +80,215 @@ class PreciosUI(ttk.Frame):
 
         f_precios = ttk.Frame(nb)
         f_promos  = ttk.Frame(nb)
+        f_cupones = ttk.Frame(nb)
         nb.add(f_precios, text="  Actualizar precios  ")
         nb.add(f_promos,  text="  Promociones  ")
+        nb.add(f_cupones, text="  Cupones  ")
 
         self._build_precios(f_precios)
         self._build_promos(f_promos)
+        self._build_cupones(f_cupones)
+
+    # ── Tab Cupones ───────────────────────────────────────────────────────────
+
+    _ESTADO_CUPON = {"activo": "Activo", "usado": "Usado", "vencido": "Vencido",
+                     "anulado": "Anulado", "todavia_no": "Aún no vale"}
+
+    def _build_cupones(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        bar = tk.Frame(parent, bg=C.bg)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        btn(bar, "➕  Nuevo cupón", variante="exito",
+            comando=self._dialogo_cupon).pack(side="left")
+        btn(bar, "📋  Copiar para WhatsApp", variante="neutro",
+            comando=self._copiar_cupon).pack(side="left", padx=(8, 0))
+        btn(bar, "🚫  Anular", variante="peligro",
+            comando=self._anular_cupon).pack(side="left", padx=(8, 0))
+        self._solo_vigentes = tk.BooleanVar(value=True)
+        tk.Checkbutton(bar, text="Solo los vigentes", variable=self._solo_vigentes,
+                       bg=C.bg, fg=C.texto, font=F.normal, selectcolor=C.bg,
+                       activebackground=C.bg, command=self._refrescar_cupones
+                       ).pack(side="left", padx=(16, 0))
+        self.lbl_cupones = lbl(bar, "", variante="suave")
+        self.lbl_cupones.pack(side="right")
+
+        cols = [("codigo", "Código", 110, "w"), ("categoria", "Categoría", 150, "w"),
+                ("monto", "Monto", 90, "e"), ("resta", "Resta", 90, "e"),
+                ("hasta", "Vence", 90, "center"), ("estado", "Estado", 100, "center"),
+                ("saldo", "Saldo", 60, "center"), ("nota", "Nota", 220, "w")]
+        frame_t, self.tree_cup = tabla(parent, cols, altura=14)
+        frame_t.grid(row=1, column=0, sticky="nsew")
+        self.tree_cup.tag_configure("activo", foreground=C.exito)
+        self.tree_cup.tag_configure("usado", foreground=C.texto_suave)
+        self.tree_cup.tag_configure("vencido", foreground=C.advertencia)
+        self.tree_cup.tag_configure("anulado", foreground=C.peligro)
+        self.tree_cup.tag_configure("todavia_no", foreground=C.primario)
+        self.tree_cup.bind("<Double-1>", lambda e: self._copiar_cupon())
+        self._cupones_filas = {}
+        self._refrescar_cupones()
+
+    def _refrescar_cupones(self):
+        from repositorio import listar_cupones
+        for r in self.tree_cup.get_children():
+            self.tree_cup.delete(r)
+        self._cupones_filas = {}
+        todos = listar_cupones()
+        n_act = sum(1 for c in todos if c["estado"] == "activo")
+        pend = sum(c["monto_restante"] for c in todos if c["estado"] == "activo")
+        for c in todos:
+            if self._solo_vigentes.get() and c["estado"] not in ("activo", "todavia_no"):
+                continue
+            hasta = c["fecha_hasta"][:10]
+            self.tree_cup.insert("", "end", iid=str(c["id"]), tags=(c["estado"],), values=(
+                c["codigo"], c["categoria"], f"$ {c['monto']:,.2f}",
+                f"$ {c['monto_restante']:,.2f}",
+                f"{hasta[8:10]}/{hasta[5:7]}/{hasta[:4]}",
+                self._ESTADO_CUPON[c["estado"]], "sí" if c["permite_saldo"] else "no",
+                c["nota"] or ""))
+            self._cupones_filas[str(c["id"])] = c
+        self.lbl_cupones.config(
+            text=f"{n_act} vigente(s) · $ {pend:,.2f} comprometidos en cupones")
+
+    def _cupon_elegido(self):
+        sel = self.tree_cup.selection()
+        if not sel:
+            messagebox.showinfo("Cupones", "Elegí un cupón de la lista.", parent=self)
+            return None
+        return self._cupones_filas.get(sel[0])
+
+    def _copiar_cupon(self):
+        c = self._cupon_elegido()
+        if not c:
+            return
+        from repositorio import texto_cupon
+        from config import cfg
+        self.clipboard_clear()
+        self.clipboard_append(texto_cupon(c, cfg().get("negocio_nombre") or ""))
+        toast(self, "Texto del cupón copiado: pegalo en WhatsApp")
+
+    def _anular_cupon(self):
+        c = self._cupon_elegido()
+        if not c:
+            return
+        if c["estado"] in ("anulado", "usado"):
+            messagebox.showinfo("Cupones", f"Ese cupón ya está {c['estado']}.", parent=self)
+            return
+        if not messagebox.askyesno(
+                "Anular cupón",
+                f"¿Anular el cupón {c['codigo']} (quedan $ {c['monto_restante']:,.2f})?\n\n"
+                "Deja de valer desde ya. Lo que ya se usó no cambia.",
+                icon="warning", default="no", parent=self):
+            return
+        from fiado_ui import pedir_autorizacion
+        from repositorio import anular_cupon, registrar_bitacora
+        resp = pedir_autorizacion(self, "Anular un cupón requiere autorización del responsable.")
+        if not resp:
+            return
+        anular_cupon(c["id"], f"Anulado por {resp}")
+        registrar_bitacora("Cupón anulado", resp,
+                           f"{c['codigo']} (restaban $ {c['monto_restante']:,.2f})")
+        toast(self, f"Cupón {c['codigo']} anulado")
+        self._refrescar_cupones()
+
+    def _dialogo_cupon(self):
+        from datetime import date, timedelta
+        from repositorio import crear_cupon, get_categorias, texto_cupon
+        from config import cfg
+        d = tk.Toplevel(self)
+        d.title("Nuevo cupón")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+        _centrar(d, 440, 520)
+        lbl(d, "Nuevo cupón", variante="titulo", bg=C.superficie).pack(
+            anchor="w", padx=20, pady=(16, 2))
+        tk.Label(d, bg=C.superficie, fg=C.texto_suave, font=F.pequeña, justify="left",
+                 wraplength=400, anchor="w",
+                 text="Un monto en $ que el cliente gasta comprando productos de una "
+                      "categoría, hasta una fecha."
+                 ).pack(fill="x", padx=20)
+
+        def campo(texto, ancho=None):
+            lbl(d, texto, variante="suave", bg=C.superficie).pack(anchor="w", padx=20, pady=(10, 0))
+            e = tk.Entry(d, font=F.normal, bg=C.superficie, fg=C.texto, relief="solid", bd=1)
+            e.pack(fill="x", padx=20, ipady=4)
+            return e
+
+        e_monto = campo("Monto del cupón ($)")
+        lbl(d, "Categoría en la que se puede usar", variante="suave",
+            bg=C.superficie).pack(anchor="w", padx=20, pady=(10, 0))
+        cats = get_categorias()
+        nombres = ["(cualquier producto)"] + [c["nombre"] for c in cats]
+        v_cat = tk.StringVar(value=nombres[0])
+        ttk.Combobox(d, textvariable=v_cat, values=nombres, state="readonly").pack(
+            fill="x", padx=20, ipady=3)
+        e_hasta = campo("Válido hasta (dd/mm/aaaa)")
+        e_hasta.insert(0, (date.today() + timedelta(days=30)).strftime("%d/%m/%Y"))
+        e_nota = campo("Nota (para quién es, opcional)")
+        e_cod = campo("Código (vacío = se genera solo)")
+        v_saldo = tk.BooleanVar(value=False)
+        tk.Checkbutton(d, text="Permitir usar el saldo en otra compra", variable=v_saldo,
+                       bg=C.superficie, fg=C.texto, font=F.normal, selectcolor=C.superficie,
+                       activebackground=C.superficie).pack(anchor="w", padx=18, pady=(10, 0))
+        tk.Label(d, bg=C.superficie, fg=C.texto_suave, font=F.pequeña, justify="left",
+                 wraplength=400, anchor="w",
+                 text="Si no se tilda, el cupón se usa en una sola compra: aunque gaste "
+                      "menos que el monto, el resto se pierde."
+                 ).pack(fill="x", padx=20)
+        e_monto.focus_set()
+
+        def parse_monto(t):
+            t = t.strip().replace("$", "").replace(" ", "")
+            if "," in t:
+                t = t.replace(".", "").replace(",", ".")
+            elif t.count(".") > 1 or (t.count(".") == 1 and len(t.rsplit(".", 1)[1]) == 3):
+                t = t.replace(".", "")
+            return float(t)
+
+        def crear():
+            try:
+                monto = parse_monto(e_monto.get())
+            except ValueError:
+                messagebox.showwarning("Cupón", "El monto no es un número.", parent=d)
+                return
+            from datetime import datetime as _dt
+            t = e_hasta.get().strip().replace("-", "/").replace(".", "/")
+            hasta = None
+            for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+                try:
+                    hasta = _dt.strptime(t, fmt).strftime("%Y-%m-%d")
+                    break
+                except ValueError:
+                    pass
+            if not hasta:
+                messagebox.showwarning("Cupón", "La fecha no es válida. Usá dd/mm/aaaa.", parent=d)
+                return
+            cat_id = None
+            if v_cat.get() != nombres[0]:
+                cat_id = next(c["id"] for c in cats if c["nombre"] == v_cat.get())
+            try:
+                c = crear_cupon(monto, cat_id, hasta, codigo=e_cod.get() or None,
+                                permite_saldo=v_saldo.get(), nota=e_nota.get())
+            except ValueError as exc:
+                messagebox.showwarning("Cupón", str(exc), parent=d)
+                return
+            d.destroy()
+            self._refrescar_cupones()
+            if self.tree_cup.exists(str(c["id"])):
+                self.tree_cup.selection_set(str(c["id"]))
+            self.clipboard_clear()
+            self.clipboard_append(texto_cupon(c, cfg().get("negocio_nombre") or ""))
+            messagebox.showinfo(
+                "Cupón creado",
+                f"Código: {c['codigo']}\n\nEl texto para mandar por WhatsApp ya quedó "
+                "copiado: pegalo en el chat.", parent=self)
+
+        e_cod.bind("<Return>", lambda e: crear())
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(pady=14)
+        btn(pie, "Crear cupón", variante="exito", comando=crear).pack(side="left", padx=6)
+        btn(pie, "Cancelar", variante="neutro", comando=d.destroy).pack(side="left", padx=6)
 
     # ── Tab Precios ───────────────────────────────────────────────────────────
 

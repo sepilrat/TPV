@@ -104,14 +104,30 @@ def generar_texto_ticket(venta_id: int) -> str | None:
 
     L.append(_linea("-"))
 
-    # Descuento
+    # Descuento (y cupon, si se uso: la venta guarda un solo descuento
+    # combinado, aca se separa para que el cliente vea cada cosa)
+    cupon_monto = float((venta["cupon_monto"] if "cupon_monto" in venta.keys() else 0) or 0)
     if venta["descuento_pct"] and venta["descuento_pct"] > 0:
         subtotal_bruto = sum(i["subtotal"] for i in items)
         L.append(_col2("Subtotal:", f"{c['moneda_simbolo']} {subtotal_bruto:,.2f}"))
-        L.append(_col2(
-            f"Descuento ({venta['descuento_pct']:.0f}%):",
-            f"- {c['moneda_simbolo']} {venta['descuento_monto']:,.2f}"
-        ))
+        manual = float(venta["descuento_monto"] or 0) - cupon_monto
+        if manual > 0.005:
+            pct_manual = (manual / subtotal_bruto * 100) if subtotal_bruto else 0.0
+            L.append(_col2(
+                f"Descuento ({pct_manual:.0f}%):",
+                f"- {c['moneda_simbolo']} {manual:,.2f}"
+            ))
+        if cupon_monto > 0.005:
+            codigo = ""
+            if venta["cupon_id"]:
+                with get_connection() as _cn:
+                    _r = _cn.execute("SELECT codigo FROM cupones WHERE id=?",
+                                     (venta["cupon_id"],)).fetchone()
+                    codigo = f" {_r[0]}" if _r else ""
+            L.append(_col2(
+                f"Cupon{codigo}:",
+                f"- {c['moneda_simbolo']} {cupon_monto:,.2f}"
+            ))
         L.append(_linea("-"))
 
     # Total y método
@@ -1283,7 +1299,8 @@ def generar_html_facturacion(r: dict, cobros_qr: list) -> str:
 
 
 def enviar_email_facturacion(destinatario: str = None,
-                             fecha: str = None) -> tuple[bool, str]:
+                             fecha: str = None,
+                             registrar: bool = False) -> tuple[bool, str]:
     """Manda el mail de facturación del día (por defecto, hoy): total en
     efectivo, QR y cuenta corriente, más la lista de cobros por QR.
     Pensado para el Task Scheduler (informe_facturacion_email.py) y para
@@ -1304,11 +1321,15 @@ def enviar_email_facturacion(destinatario: str = None,
         return False, "Falta el email destinatario (Config → Avisos por email)."
 
     fecha = fecha or date.today().isoformat()
-    r = resumen_cobranzas(fecha, fecha)
-    r["fecha"] = fecha
-    cobros_qr = cobros_qr_del_dia(fecha)
 
     try:
+        # Antes estas consultas corrian FUERA del try: si fallaban (base
+        # bloqueada por otro programa, un dato raro) el script moria con un
+        # error que nadie veia -tarea programada sin consola- y el mail
+        # simplemente no llegaba, sin una linea en el log.
+        r = resumen_cobranzas(fecha, fecha)
+        r["fecha"] = fecha
+        cobros_qr = cobros_qr_del_dia(fecha)
         _dest = _destinatarios(destinatario)
         if not _dest:
             return False, ("No hay destinatario valido configurado. "
@@ -1326,6 +1347,15 @@ def enviar_email_facturacion(destinatario: str = None,
             s.login(c["email_usuario"], c["email_password"])
             s.send_message(msg)
         logging.info(f"Facturacion del {fecha} enviada a {destinatario}")
+        # Solo el envio programado (y el del cierre de caja) "consume" el dia.
+        # Una prueba desde Config o el diagnostico NO: si lo hiciera, probar
+        # el mail al mediodia dejaria sin enviar el de la noche.
+        if registrar and fecha > (cfg().get("_facturacion_ultimo_envio") or ""):
+            try:
+                cfg_set("_facturacion_ultimo_envio", fecha)
+                cfg_set("_facturacion_ultimo_intento", "")
+            except Exception as exc:
+                logging.warning(f"No se pudo anotar el envio de facturacion: {exc}")
         return True, f"Facturación enviada a {destinatario}"
     except Exception as e:
         logging.error(f"Error enviando facturacion: {e}")

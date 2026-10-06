@@ -890,6 +890,45 @@ def inicializar_db():
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
+    # CUPONES: un monto en $ para gastar en una categoria hasta una fecha
+    # ─────────────────────────────────────────────────────────────────────────
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS cupones (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo         TEXT NOT NULL UNIQUE,
+            monto          REAL NOT NULL,
+            monto_restante REAL NOT NULL,
+            categoria_id   INTEGER REFERENCES categorias(id) ON DELETE SET NULL,
+            categoria_nombre TEXT,
+            fecha_desde    TEXT,
+            fecha_hasta    TEXT NOT NULL,
+            permite_saldo  INTEGER DEFAULT 0,
+            nota           TEXT,
+            anulado        INTEGER DEFAULT 0,
+            motivo_anulacion TEXT,
+            creado_en      TEXT DEFAULT (datetime('now','localtime')),
+            creado_por     TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS cupones_usos (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            cupon_id   INTEGER NOT NULL REFERENCES cupones(id) ON DELETE CASCADE,
+            venta_id   INTEGER NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
+            monto      REAL NOT NULL,
+            consumido  REAL NOT NULL,
+            fecha      TEXT DEFAULT (datetime('now','localtime')),
+            revertido  INTEGER DEFAULT 0
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cupones_usos_venta ON cupones_usos(venta_id)")
+    for _col, _tipo in (("cupon_id", "INTEGER"), ("cupon_monto", "REAL DEFAULT 0")):
+        try:
+            c.execute(f"ALTER TABLE ventas ADD COLUMN {_col} {_tipo}")
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────────────────────────
     # COMPLETAR DESGLOSE HISTÓRICO
     # ─────────────────────────────────────────────────────────────────────────
     try:
