@@ -796,5 +796,94 @@ class Flyer(unittest.TestCase):
         self.assertEqual(o.chequear_flyer(prods, "lista")[0], [])
 
 
+class TicketsAdeudados(unittest.TestCase):
+    """Listado de tickets que componen la deuda de un cliente en cta cte."""
+    @classmethod
+    def setUpClass(cls):
+        with db.get_connection() as c:
+            cls.sesion = c.execute("INSERT INTO sesiones_caja (fondo_inicial) VALUES (0)").lastrowid
+            c.commit()
+
+    def setUp(self):
+        self.c = r.crear_cliente(str(id(self))[-8:], "Cliente Tickets", "1155", 1000000)["id"]
+
+    def _venta(self, precio, cant=1, desglose=None, metodo="cuenta_corriente", cliente=True):
+        pid = r.crear_producto(f"TK{id(object())}", "Prod tk", None, precio, precio * 0.5)
+        r.ajustar_stock(pid, 100, "test", "t")
+        item = {"producto_id": pid, "descripcion": "Prod tk", "cantidad": cant,
+                "precio_unitario": precio, "promo_aplicada": 0}
+        vid = r.registrar_venta(self.sesion, [item], metodo,
+                                cliente_id=self.c if cliente else None, desglose=desglose)
+        self.assertIsNotNone(vid)
+        return vid
+
+    def _chk(self, esperado_pendientes):
+        d = r.get_tickets_adeudados(self.c)
+        self.assertEqual([t["pendiente"] for t in d["tickets"]], esperado_pendientes)
+        self.assertEqual(d["diferencia"], 0)
+        self.assertEqual(d["total_pendiente"] - d["saldo_a_favor"], d["saldo_actual"])
+        return d
+
+    def test_sin_deuda(self):
+        d = self._chk([])
+        self.assertEqual(d["saldo_actual"], 0)
+
+    def test_pago_se_imputa_al_mas_viejo_y_deja_parcial_el_siguiente(self):
+        v1, v2, v3 = self._venta(1000), self._venta(2000), self._venta(3000)
+        d = self._chk([1000, 2000, 3000])
+        self.assertEqual([t["venta_id"] for t in d["tickets"]], [v1, v2, v3])
+        self.assertEqual(len(d["tickets"][0]["items"]), 1)
+        r.registrar_pago_cuenta_corriente(self.c, 1500, "t")
+        d = self._chk([1500, 3000])            # v1 cancelado, v2 a medias
+        self.assertEqual((d["tickets"][0]["venta_id"], d["tickets"][0]["pagos"]), (v2, 500))
+        r.registrar_pago_cuenta_corriente(self.c, 4500, "t")
+        self._chk([])
+
+    def test_venta_mixta_solo_lista_lo_fiado(self):
+        self._venta(1000, desglose={"efectivo": 400, "cta_cte": 600})
+        d = self._chk([600])
+        self.assertEqual((d["tickets"][0]["total_ticket"], d["tickets"][0]["fiado"]), (1000, 600))
+
+    def test_anular_venta_la_saca_del_listado(self):
+        v1, v2 = self._venta(1000), self._venta(2000)
+        self.assertTrue(r.anular_venta(v1))
+        d = self._chk([2000])
+        self.assertEqual(d["tickets"][0]["venta_id"], v2)
+
+    def test_cambio_de_medio_de_pago_en_ambos_sentidos(self):
+        v = self._venta(1000, metodo="efectivo", cliente=False)
+        self._chk([])
+        ok, _ = r.cambiar_metodo_pago(v, "cuenta_corriente", cliente_id=self.c, autorizado_por="t")
+        self.assertTrue(ok)
+        self._chk([1000])
+        ok, _ = r.cambiar_metodo_pago(v, "efectivo", autorizado_por="t")
+        self.assertTrue(ok)
+        self._chk([])
+
+    def test_devolucion_acreditada_baja_solo_ese_ticket(self):
+        v = self._venta(1000, cant=3)
+        self._venta(500)
+        with db.get_connection() as c:
+            det_id = c.execute("SELECT id FROM detalle_ventas WHERE venta_id=?", (v,)).fetchone()[0]
+        r.registrar_devolucion(v, self.sesion, [{"detalle_id": det_id, "cantidad": 1}],
+                               "t", "cuenta_corriente", "t")
+        d = self._chk([2000, 500])
+        self.assertEqual((d["tickets"][0]["ajustes"], d["tickets"][0]["items"][0]["devuelto"]), (-1000, 1))
+
+    def test_deuda_manual_y_su_anulacion(self):
+        r.registrar_cargo_cuenta_corriente(self.c, 700, "Cuaderno", "t", "2026-01-15")
+        v = self._venta(1000)
+        d = self._chk([700, 1000])
+        self.assertEqual((d["tickets"][0]["tipo"], d["tickets"][1]["venta_id"]), ("manual", v))
+        r.anular_cargo_manual(d["tickets"][0]["mov_id"], "t")
+        self._chk([1000])
+
+    def test_pago_de_mas_queda_a_favor(self):
+        self._venta(1000)
+        r.registrar_pago_cuenta_corriente(self.c, 1300, "t")
+        d = self._chk([])
+        self.assertEqual(d["saldo_a_favor"], 300)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

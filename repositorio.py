@@ -5232,6 +5232,151 @@ def get_movimientos_cliente(cliente_id: int) -> list:
             ORDER BY fecha DESC, id DESC
         """, (cliente_id,)).fetchall()]
 
+def _delta_movimiento(m) -> float:
+    """Efecto FIRMADO de un movimiento sobre el saldo (+ debe mas, - debe menos).
+
+    Los signos de movimientos_cuenta no son uniformes (ver
+    actualizar_saldo_cliente): 'cuenta_corriente' y 'ajuste' guardan el monto
+    con su signo (negativo = baja la deuda), mientras que 'pago' guarda el
+    monto en positivo y resta. Este es el unico lugar que traduce eso.
+    """
+    monto = float(m["monto"] or 0)
+    return -monto if m["tipo"] == "pago" else monto
+
+
+def get_tickets_adeudados(cliente_id: int) -> dict:
+    """Los tickets (y deudas cargadas a mano) que componen lo que debe un cliente.
+
+    Los pagos de cuenta corriente NO se registran contra un ticket puntual
+    (registrar_pago_cuenta_corriente solo baja el saldo), asi que aca se
+    imputan de mas viejo a mas nuevo (FIFO): el pago cancela primero los
+    tickets mas antiguos, y el que queda a medio pagar muestra solo lo que
+    falta. Las anulaciones, devoluciones acreditadas y cambios de medio de
+    pago SI estan ligados a su ticket (llevan venta_id) y lo corrigen directo.
+
+    Devuelve:
+      cliente         dict del cliente (o None)
+      tickets         lista, de mas viejo a mas nuevo, cada una con:
+                        tipo ('ticket' | 'manual'), venta_id, mov_id, fecha,
+                        concepto, total_ticket, fiado (lo que se cargo),
+                        ajustes (devoluciones/anulaciones, <= 0), pagos
+                        (cuanto de los pagos del cliente cae en este ticket),
+                        pendiente (> 0), items (detalle de la compra)
+      total_pendiente suma de lo pendiente de los tickets
+      saldo_a_favor   si los pagos/devoluciones superan toda la deuda
+      saldo_actual    el de cuentas_corrientes
+      diferencia      saldo_actual - (total_pendiente - saldo_a_favor); si no
+                      es ~0 hay movimientos que no cierran con el saldo
+                      (datos viejos): la pantalla lo avisa en vez de ocultarlo
+    """
+    import re
+    marca_rx = re.compile(r"\[#(\d+)\]\s*$")
+    with get_connection() as conn:
+        cli = conn.execute("""
+            SELECT c.*, COALESCE(cc.saldo_actual, 0) AS saldo_actual
+              FROM clientes c
+              LEFT JOIN cuentas_corrientes cc ON cc.cliente_id = c.id
+             WHERE c.id = ?
+        """, (cliente_id,)).fetchone()
+        if not cli:
+            return {"cliente": None, "tickets": [], "total_pendiente": 0.0,
+                    "saldo_a_favor": 0.0, "saldo_actual": 0.0, "diferencia": 0.0}
+        movs = conn.execute("""
+            SELECT id, tipo, monto, concepto, fecha, venta_id
+              FROM movimientos_cuenta
+             WHERE cliente_id = ?
+             ORDER BY fecha, id
+        """, (cliente_id,)).fetchall()
+
+        partidas = {}          # clave -> partida (un ticket o una deuda manual)
+        credito_libre = 0.0    # pagos y ajustes que no pertenecen a un ticket
+
+        def _partida(clave, **datos):
+            p = partidas.get(clave)
+            if p is None:
+                p = {"clave": clave, "orden": len(partidas), "fecha": None,
+                     "concepto": None, "fiado": 0.0, "ajustes": 0.0,
+                     "venta_id": None, "mov_id": None}
+                p.update(datos)
+                partidas[clave] = p
+            return p
+
+        for m in movs:
+            d = _delta_movimiento(m)
+            concepto = m["concepto"] or ""
+            marca = marca_rx.search(concepto) if m["tipo"] == "ajuste" else None
+            if m["venta_id"]:
+                p = _partida(("v", m["venta_id"]), venta_id=m["venta_id"])
+            elif marca:
+                # Anulacion de una deuda cargada a mano: apunta a su id
+                p = _partida(("m", int(marca.group(1))), mov_id=int(marca.group(1)))
+            elif d > 0:
+                p = _partida(("m", m["id"]), mov_id=m["id"])
+            else:
+                credito_libre += -d     # pago (o ajuste suelto) a favor del cliente
+                continue
+            if d > 0:
+                p["fiado"] += d
+                if p["fecha"] is None:
+                    p["fecha"] = m["fecha"]
+                if p["concepto"] is None:
+                    p["concepto"] = concepto
+            else:
+                p["ajustes"] += d
+
+        # Neto por partida: lo que realmente quedo debiendose por ella antes
+        # de aplicar pagos. Si quedo negativo (devolucion acreditada de una
+        # venta que no era fiada) esa plata es a favor del cliente.
+        abiertas = []
+        for p in partidas.values():
+            neto = p["fiado"] + p["ajustes"]
+            if neto < -0.005:
+                credito_libre += -neto
+            elif neto > 0.005:
+                p["neto"] = neto
+                abiertas.append(p)
+        abiertas.sort(key=lambda p: (p["fecha"] or "", p["orden"]))
+
+        tickets = []
+        for p in abiertas:
+            aplicado = min(credito_libre, p["neto"])
+            credito_libre -= aplicado
+            pendiente = round(p["neto"] - aplicado, 2)
+            if pendiente <= 0.005:
+                continue                       # ya cubierto por pagos
+            t = {"tipo": "ticket" if p["venta_id"] else "manual",
+                 "venta_id": p["venta_id"], "mov_id": p["mov_id"],
+                 "fecha": p["fecha"], "concepto": p["concepto"] or "",
+                 "total_ticket": None, "fiado": round(p["fiado"], 2),
+                 "ajustes": round(p["ajustes"], 2), "pagos": round(aplicado, 2),
+                 "pendiente": pendiente, "items": []}
+            if p["venta_id"]:
+                v = conn.execute("SELECT fecha, total FROM ventas WHERE id = ?",
+                                 (p["venta_id"],)).fetchone()
+                if v:
+                    t["fecha"] = v["fecha"] or t["fecha"]
+                    t["total_ticket"] = round(float(v["total"] or 0), 2)
+                t["items"] = [dict(r) for r in conn.execute("""
+                    SELECT dv.descripcion, dv.cantidad, dv.precio_unitario,
+                           dv.subtotal, dv.promo_aplicada,
+                           COALESCE((SELECT SUM(dd.cantidad)
+                                       FROM devoluciones_detalle dd
+                                      WHERE dd.detalle_venta_id = dv.id), 0)
+                               AS devuelto
+                      FROM detalle_ventas dv
+                     WHERE dv.venta_id = ?
+                     ORDER BY dv.id
+                """, (p["venta_id"],)).fetchall()]
+            tickets.append(t)
+
+        total_pend = round(sum(t["pendiente"] for t in tickets), 2)
+        a_favor = round(max(credito_libre, 0.0), 2)
+        saldo = round(float(cli["saldo_actual"] or 0), 2)
+        return {"cliente": dict(cli), "tickets": tickets,
+                "total_pendiente": total_pend, "saldo_a_favor": a_favor,
+                "saldo_actual": saldo,
+                "diferencia": round(saldo - (total_pend - a_favor), 2)}
+
 
 def get_todos_clientes() -> list:
     with get_connection() as conn:

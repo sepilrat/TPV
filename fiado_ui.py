@@ -21,7 +21,8 @@ from repositorio import (get_cliente_por_dni, get_cliente_por_id,
                          get_todos_clientes, get_movimientos_cliente,
                          registrar_pago_cuenta_corriente,
                          registrar_cargo_cuenta_corriente, anular_cargo_manual,
-                         buscar_clientes_por_nombre, get_detalle_venta)
+                         buscar_clientes_por_nombre, get_detalle_venta,
+                         get_tickets_adeudados)
 
 # Clave del responsable — en producción esto debería estar en DB con hash
 # Por ahora es configurable acá
@@ -48,6 +49,15 @@ def _detalle_movimientos(cliente_id, n=5):
             signo, que = "-", (m["concepto"] or "Pago")
         lineas.append(f"• {dia}  {que}: {signo}$ {abs(monto):,.2f}")
     return "\n".join(lineas)
+
+
+def _dia_corto(fecha) -> str:
+    """'2026-10-05 14:32:10' -> '05/10/2026' (o '—' si no se puede leer)."""
+    from datetime import datetime as _dt
+    try:
+        return _dt.strptime((fecha or "")[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return "—"
 
 
 def _activable_con_enter(b):
@@ -449,12 +459,15 @@ class FiadoUI(ttk.Frame):
         btn(ac, "Ver movimientos", variante="neutro",
             comando=self._ver_movimientos).grid(
             row=4, column=0, sticky="ew", padx=16, pady=4)
+        _activable_con_enter(btn(ac, "🧾 Tickets que debe", variante="primario",
+            comando=self._ver_tickets_adeudados)).grid(
+            row=5, column=0, sticky="ew", padx=16, pady=4)
         btn(ac, "📱 Recordatorio WhatsApp", variante="neutro",
             comando=self._recordatorio_whatsapp).grid(
-            row=5, column=0, sticky="ew", padx=16, pady=4)
+            row=6, column=0, sticky="ew", padx=16, pady=4)
         btn(ac, "📱 Recordatorios masivos", variante="neutro",
             comando=self._recordatorios_masivos).grid(
-            row=6, column=0, sticky="ew", padx=16, pady=(4, 16))
+            row=7, column=0, sticky="ew", padx=16, pady=(4, 16))
 
         # Movimientos del cliente seleccionado
         lbl(der, "Movimientos del cliente", variante="subtitulo").grid(
@@ -1123,6 +1136,149 @@ class FiadoUI(ttk.Frame):
         _activable_con_enter(btn(pie, "Anular deuda cargada a mano", variante="peligro",
                                  comando=_anular)).pack(side="left", padx=6)
         btn(pie, "Cerrar", variante="neutro", comando=d.destroy).pack(side="left", padx=6)
+
+
+    def _ver_tickets_adeudados(self):
+        """Los tickets que componen la deuda del cliente, con su detalle."""
+        if not self._cliente_sel:
+            messagebox.showinfo("Atencion",
+                "Selecciona un cliente primero.", parent=self)
+            return
+        cliente = self._cliente_sel
+        data = get_tickets_adeudados(cliente["id"])      # siempre fresco de la base
+        cli = data["cliente"] or cliente
+
+        d = tk.Toplevel(self)
+        d.title(f"Tickets que debe — {cli['nombre']}")
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        w, h = min(760, sw - 40), min(580, sh - 100)
+        d.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((sh - h) // 2 - 20, 0)}")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+
+        # Pie primero y anclado abajo, para que la tabla no lo empuje fuera
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x", pady=(0, 14))
+
+        total = data["total_pendiente"] - data["saldo_a_favor"]
+        lbl(d, f"{cli['nombre']} — Debe: $ {total:,.2f}",
+            variante="titulo", bg=C.superficie).pack(pady=(14, 2), padx=20, anchor="w")
+        lbl(d, "Los pagos se aplican a los tickets más antiguos primero.",
+            variante="suave", bg=C.superficie).pack(padx=20, anchor="w")
+
+        if abs(data["diferencia"]) > 0.01:
+            lbl(d, f"⚠ El saldo registrado ($ {data['saldo_actual']:,.2f}) no coincide con "
+                   f"la suma de estos tickets (diferencia $ {data['diferencia']:,.2f}). "
+                   "Hay movimientos viejos que no se pueden asociar: revisá "
+                   "\"Ver movimientos\".", variante="suave", bg=C.superficie,
+                fg=C.peligro, wraplength=w - 50, justify="left").pack(
+                padx=20, pady=(4, 0), anchor="w")
+
+        cols = [("desc", "Detalle", 300, "w"), ("cant", "Cant.", 60, "e"),
+                ("precio", "Precio u.", 90, "e"), ("imp", "Importe", 105, "e"),
+                ("debe", "Debe", 125, "e")]
+        frame_t, tree = tabla(d, cols, altura=14)
+        frame_t.pack(fill="both", expand=True, padx=20, pady=(8, 8))
+        tree.tag_configure("ticket", background=C.acento)
+        tree.tag_configure("resumen", foreground=C.texto_suave)
+
+        if not data["tickets"]:
+            tree.insert("", "end", values=("No tiene compras pendientes de pago.",
+                                           "", "", "", ""))
+        for t in data["tickets"]:
+            if t["tipo"] == "ticket":
+                titulo = f"Ticket #{t['venta_id']} — {_dia_corto(t['fecha'])}"
+            else:
+                titulo = f"{t['concepto'] or 'Deuda'} — {_dia_corto(t['fecha'])}"
+            tree.insert("", "end", tags=("ticket",), values=(
+                titulo, "", "", f"$ {t['fiado']:,.2f}", f"$ {t['pendiente']:,.2f}"))
+            for it in t["items"]:
+                dev = f" (devolvió {it['devuelto']:g})" if it.get("devuelto") else ""
+                tree.insert("", "end", values=(
+                    "      " + it["descripcion"] + dev, f"{it['cantidad']:g}",
+                    f"$ {it['precio_unitario']:,.2f}", f"$ {it['subtotal']:,.2f}", ""))
+            if t["total_ticket"] is not None and t["total_ticket"] - t["fiado"] > 0.005:
+                tree.insert("", "end", tags=("resumen",), values=(
+                    "      Pagado en el momento", "", "", "",
+                    f"-$ {t['total_ticket'] - t['fiado']:,.2f}"))
+            if t["ajustes"] < -0.005:
+                tree.insert("", "end", tags=("resumen",), values=(
+                    "      Devoluciones / ajustes", "", "", "",
+                    f"-$ {abs(t['ajustes']):,.2f}"))
+            if t["pagos"] > 0.005:
+                tree.insert("", "end", tags=("resumen",), values=(
+                    "      Pagos aplicados", "", "", "", f"-$ {t['pagos']:,.2f}"))
+
+        def _pdf():
+            from estado_cuenta import generar_pdf_estado_cuenta
+            d.config(cursor="watch")
+            d.update()
+            ruta = generar_pdf_estado_cuenta(cli["id"])
+            d.config(cursor="")
+            if not ruta:
+                messagebox.showwarning("Atencion",
+                    "No se pudo generar el PDF (mirá el log).", parent=d)
+                return
+            import os, sys
+            if sys.platform == "win32":
+                os.startfile(ruta)
+            else:
+                messagebox.showinfo("Listo", f"PDF generado:\n{ruta}", parent=d)
+
+        def _whatsapp():
+            if not cli.get("telefono"):
+                messagebox.showwarning("Sin teléfono",
+                    f"{cli['nombre']} no tiene un teléfono cargado — agregalo con "
+                    "\"Editar cliente / tope\".", parent=d)
+                return
+            from estado_cuenta import generar_texto_estado_cuenta
+            self._editar_y_enviar_whatsapp(
+                cli, generar_texto_estado_cuenta(cli["id"]) or "", padre=d)
+
+        sin_deuda = not data["tickets"]
+        b1 = _activable_con_enter(btn(pie, "📄 PDF para imprimir", variante="primario",
+                                      comando=_pdf))
+        b2 = _activable_con_enter(btn(pie, "📱 Enviar por WhatsApp", variante="exito",
+                                      comando=_whatsapp))
+        for b in (b1, b2):
+            b.pack(side="left", padx=6)
+            if sin_deuda:
+                b.configure(state="disabled")
+        _activable_con_enter(btn(pie, "Cerrar", variante="neutro",
+                                 comando=d.destroy)).pack(side="left", padx=6)
+        pie.pack_configure(anchor="center")
+
+    def _editar_y_enviar_whatsapp(self, cliente, mensaje, padre=None):
+        """Muestra el mensaje editable y lo abre en WhatsApp Web (wa.me)."""
+        d = tk.Toplevel(padre or self)
+        d.title("Mensaje por WhatsApp")
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        w, h = min(480, sw - 40), min(560, sh - 100)
+        d.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((sh - h) // 2, 0)}")
+        d.configure(bg=C.superficie)
+        d.grab_set()
+
+        pie = tk.Frame(d, bg=C.superficie)
+        pie.pack(side="bottom", fill="x")
+        lbl(d, f"Mensaje para {cliente['nombre']}", variante="titulo",
+            bg=C.superficie).pack(pady=(16, 6), padx=16, anchor="w")
+        lbl(d, "Lo podés editar antes de abrirlo en WhatsApp:",
+            variante="suave", bg=C.superficie).pack(padx=16, anchor="w")
+        txt = tk.Text(d, font=F.normal, bg=C.superficie, fg=C.texto,
+                      relief="solid", bd=1, wrap="word")
+        txt.insert("1.0", mensaje)
+        txt.pack(fill="both", expand=True, padx=16, pady=(6, 12))
+
+        def _abrir():
+            from impresion import abrir_whatsapp
+            ok, msg = abrir_whatsapp(cliente["telefono"], txt.get("1.0", "end").strip())
+            if ok:
+                d.destroy()
+            else:
+                messagebox.showwarning("Atencion", msg, parent=d)
+
+        _activable_con_enter(btn(pie, "📱 Abrir en WhatsApp", variante="exito",
+                                 comando=_abrir)).pack(padx=16, pady=(0, 16), fill="x")
 
 
 # ══════════════════════════════════════════════════════════════════════════
